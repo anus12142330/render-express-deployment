@@ -19,6 +19,7 @@
     "cors": "^2.8.5",
     "express-session": "^1.17.3",
     "nodemailer": "^6.9.14",
-    "node-cron": "^3.0.3"
+    "node-cron": "^3.0.3",
+    "dotenv": "^16"
   }
 }
