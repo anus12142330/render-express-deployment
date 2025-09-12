@@ -1,6 +1,6 @@
 // server/routes/lookups.js
 import { Router } from "express";
-import db from "../../server/db.js";
+import db from "../db.js";
 
 const router = Router();
 
