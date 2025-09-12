@@ -1,14 +1,14 @@
 import cron from 'node-cron';
 import dotenv from 'dotenv';
 import db from '../db.js';
-import sendEmail from '../../src/utils/sendEmailHelper.mjs';
+//import sendEmail from '../../src/utils/sendEmailHelper.mjs';
 import path from 'path';
 import fs from 'fs';
 
 dotenv.config();
 
 // ✅ Exportable function
-export const runExpiryCheck = async () => {
+/*export const runExpiryCheck = async () => {
   const today = new Date().toISOString().slice(0, 10);
   console.log(`📅 Running expiry check for ${today}`);
 
@@ -86,4 +86,4 @@ export const runExpiryCheck = async () => {
 };
 
 // ✅ Schedule the cron job (8:00 AM daily)
-cron.schedule('0 8 * * *', runExpiryCheck);
+cron.schedule('0 8 * * *', runExpiryCheck); */
