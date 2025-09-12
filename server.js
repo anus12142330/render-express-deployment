@@ -33,6 +33,8 @@ import './cronJobs/expireCheck.js';
 import masterRoutes from "./routes/master.js";
 import warehousesRoutes from "./routes/warehouses.js";
 import router from "./routes/customer.js"; // ✅ ES module import
+import db from "./db.js";
+
 
 
 const app = express();
@@ -107,12 +109,12 @@ const uploadCompany = uploadc.fields([
 /* ---------- Helpers ---------- */
 const likeWrap = (s = '') => `%${s || ''}%`;
 
-const db = mysql.createConnection({
+/* const db = mysql.createConnection({
   host: 'localhost',
   user: 'root',
   password: '',
   database: 'portal_db'
-});
+}); */
 
 db.connect(err => {
   if (err) {
