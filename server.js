@@ -6,7 +6,6 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import session from 'express-session';
-import emailRoutes from './routes/emailRoutes.js';
 import productRoutes from './routes/products.js';
 import customerRoutes from './routes/customer.js';
 import vendorRoutes from './routes/vendor.js';
@@ -774,7 +773,7 @@ app.post('/api/email-settings', (req, res) => {
 });
 
 // Routes
-app.use('/api/email-settings', emailRoutes);
+//app.use('/api/email-settings', emailRoutes);
 
 
 //template select
