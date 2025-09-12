@@ -990,7 +990,8 @@ app.put("/api/vendor-contacts/:id", (req, res) => {
 });
 
 // ✅ START SERVER
-const PORT = 5658;
-app.listen(PORT, () => console.log(`🚀 Server running at http://localhost:${PORT}`));
+const PORT = process.env.PORT || 5641;
+const HOST = '0.0.0.0';
+app.listen(PORT, HOST, () => console.log(`API on http://${HOST}:${PORT}`));
 
 
