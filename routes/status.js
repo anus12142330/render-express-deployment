@@ -1,6 +1,6 @@
 // routes/status.js
 import express from "express";
-import db from "../../server/db.js"; // keep your existing path
+import db from "../db.js"; // keep your existing path
 
 const router = express.Router();
 
