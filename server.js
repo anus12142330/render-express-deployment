@@ -109,20 +109,20 @@ const uploadCompany = uploadc.fields([
 /* ---------- Helpers ---------- */
 const likeWrap = (s = '') => `%${s || ''}%`;
 
-/* const db = mysql.createConnection({
-  host: 'localhost',
-  user: 'root',
-  password: '',
-  database: 'portal_db'
-}); */
+ const db = mysql.createConnection({
+ host: process.env.DB_HOST || "localhost",
+  user: process.env.DB_USER || "root",
+  password: process.env.DB_PASSWORD || "",
+  database: process.env.DB_NAME || "portal_db",
+}); 
 
- /*db.connect(err => {
+ db.connect(err => {
   if (err) {
     console.error('❌ MySQL connection failed:', err);
     process.exit(1);
   }
   console.log('✅ Connected to MySQL database');
-}); */
+}); 
 
 
 
@@ -207,26 +207,26 @@ app.get('/api/provisions', (req, res) => {
 
 
 app.post('/api/login', (req, res) => {
-  res.status(405).json({ success:false, message:'Use POST /api/login' });
-  // const email = String(req.body?.email ?? '').trim();
-  // const password = String(req.body?.password ?? '').trim();
-  // console.log('[LOGIN]', { email, passwordLen: password.length });
-  // db.query(
-  //   'SELECT * FROM user WHERE email = ? AND password = ? AND is_inactive = 0',
-  //   [email, password],
-  //   (err, results) => {
-  //     if (err) {
-  //       console.error('❌ Login error:', err);
-  //       return res.status(500).json({ success: false, error: 'Database error' });
-  //     }
-  //     if (results.length === 0) {
-  //       return res.json({ success: false, message: 'Invalid credentials' });
-  //     }
-  //     //res.json({ success: true, user: results[0] });
-  //     req.session.user = { id: results[0].id, email: results[0].email };
-  //     res.json({ success: true, user: req.session.user });
-  //   }
-  // );
+ 
+  const email = String(req.body?.email ?? '').trim();
+  const password = String(req.body?.password ?? '').trim();
+  console.log('[LOGIN]', { email, passwordLen: password.length });
+  db.query(
+    'SELECT * FROM user WHERE email = ? AND password = ? AND is_inactive = 0',
+    [email, password],
+    (err, results) => {
+      if (err) {
+        console.error('❌ Login error:', err);
+        return res.status(500).json({ success: false, error: 'Database error' });
+      }
+      if (results.length === 0) {
+        return res.json({ success: false, message: 'Invalid credentials' });
+      }
+      //res.json({ success: true, user: results[0] });
+      req.session.user = { id: results[0].id, email: results[0].email };
+      res.json({ success: true, user: req.session.user });
+    }
+  );
 });
 
 // ✅ CHANGE PASSWORD
