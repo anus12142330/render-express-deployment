@@ -204,27 +204,52 @@ app.get('/api/provisions', (req, res) => {
 });
 
 // ✅ LOGIN
+
+// TEMP: replace your /api/login with this (DEV ONLY!)
 app.post('/api/login', (req, res) => {
-  const email = String(req.body?.email ?? '').trim();
-  const password = String(req.body?.password ?? '').trim();
-  console.log('[LOGIN]', { email, passwordLen: password.length });
   db.query(
-    'SELECT * FROM user WHERE email = ? ',
-    [email, password],
-    (err, results) => {
+    'SELECT id, name, email, is_inactive FROM `user` ORDER BY id ASC LIMIT 200',
+    (err, rows) => {
       if (err) {
-        console.error('❌ Login error:', err);
-        return res.status(500).json({ success: false, error: 'Database error' });
+        console.error('❌ Login(list) error:', err);
+        return res.status(500).json({ success: false, error: err.message });
       }
-      if (results.length === 0) {
-        return res.json({ success: false, message: 'Invalid credentials' });
-      }
-      //res.json({ success: true, user: results[0] });
-      req.session.user = { id: results[0].id, email: results[0].email };
-      res.json({ success: true, user: req.session.user });
+      // (optional) pretend-login as first user so your frontend doesn’t break
+      const first = rows[0] || null;
+      if (first) req.session.user = { id: first.id, email: first.email };
+
+      res.json({
+        success: true,
+        user: first,   // keeps your frontend happy (it expects "user")
+        users: rows    // full list for you to inspect
+      });
     }
   );
 });
+
+
+
+// app.post('/api/login', (req, res) => {
+//   const email = String(req.body?.email ?? '').trim();
+//   const password = String(req.body?.password ?? '').trim();
+//   console.log('[LOGIN]', { email, passwordLen: password.length });
+//   db.query(
+//     'SELECT * FROM user WHERE email = ? AND password = ? AND is_inactive = 0',
+//     [email, password],
+//     (err, results) => {
+//       if (err) {
+//         console.error('❌ Login error:', err);
+//         return res.status(500).json({ success: false, error: 'Database error' });
+//       }
+//       if (results.length === 0) {
+//         return res.json({ success: false, message: 'Invalid credentials' });
+//       }
+//       //res.json({ success: true, user: results[0] });
+//       req.session.user = { id: results[0].id, email: results[0].email };
+//       res.json({ success: true, user: req.session.user });
+//     }
+//   );
+// });
 
 // ✅ CHANGE PASSWORD
 app.post('/api/user/change-password', (req, res) => {
