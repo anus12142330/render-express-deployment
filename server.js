@@ -116,13 +116,13 @@ const likeWrap = (s = '') => `%${s || ''}%`;
   database: 'portal_db'
 }); */
 
-/* db.connect(err => {
+ db.connect(err => {
   if (err) {
     console.error('❌ MySQL connection failed:', err);
     process.exit(1);
   }
   console.log('✅ Connected to MySQL database');
-}); */
+}); 
 
 
 
