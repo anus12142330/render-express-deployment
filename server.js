@@ -209,7 +209,7 @@ app.post('/api/login', (req, res) => {
   const password = String(req.body?.password ?? '').trim();
   console.log('[LOGIN]', { email, passwordLen: password.length });
   db.query(
-    'SELECT * FROM user WHERE email = ? AND password = ? AND is_inactive = 0',
+    'SELECT * FROM user WHERE email = ? ',
     [email, password],
     (err, results) => {
       if (err) {
