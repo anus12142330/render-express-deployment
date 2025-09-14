@@ -33,7 +33,7 @@ import './cronJobs/expireCheck.js';
 import masterRoutes from "./routes/master.js";
 import warehousesRoutes from "./routes/warehouses.js";
 import router from "./routes/customer.js"; // ✅ ES module import
-//import db from "./db.js";
+import db from "./db.js";
 
 
 
@@ -109,20 +109,20 @@ const uploadCompany = uploadc.fields([
 /* ---------- Helpers ---------- */
 const likeWrap = (s = '') => `%${s || ''}%`;
 
- const db = mysql.createConnection({
- host: process.env.DB_HOST || "localhost",
-  user: process.env.DB_USER || "root",
-  password: process.env.DB_PASSWORD || "",
-  database: process.env.DB_NAME || "portal_db",
-}); 
+//  const db = mysql.createConnection({
+//  host: process.env.DB_HOST || "localhost",
+//   user: process.env.DB_USER || "root",
+//   password: process.env.DB_PASSWORD || "",
+//   database: process.env.DB_NAME || "portal_db",
+// }); 
 
- db.connect(err => {
-  if (err) {
-    console.error('❌ MySQL connection failed:', err);
-    process.exit(1);
-  }
-  console.log('✅ Connected to MySQL database');
-}); 
+//  db.connect(err => {
+//   if (err) {
+//     console.error('❌ MySQL connection failed:', err);
+//     process.exit(1);
+//   }
+//   console.log('✅ Connected to MySQL database');
+// }); 
 
 
 
