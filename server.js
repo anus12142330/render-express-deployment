@@ -1018,8 +1018,9 @@ app.put("/api/vendor-contacts/:id", (req, res) => {
 });
 
 // ✅ START SERVER
+// server/server.js (Render)
 const PORT = process.env.PORT || 5641;
-const HOST = '0.0.0.0';
-app.listen(PORT, HOST, () => console.log(`API on http://${HOST}:${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log('API on', PORT));
+
 
 
