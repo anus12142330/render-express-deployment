@@ -33,7 +33,7 @@ import './cronJobs/expireCheck.js';
 import masterRoutes from "./routes/master.js";
 import warehousesRoutes from "./routes/warehouses.js";
 import router from "./routes/customer.js"; // ✅ ES module import
-import db from "./db.js";
+//import db from "./db.js";
 
 
 
