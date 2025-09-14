@@ -206,6 +206,7 @@ app.get('/api/provisions', (req, res) => {
 // ✅ LOGIN
 app.post('/api/login', (req, res) => {
   const { email, password } = req.body;
+  console.log('[LOGIN BODY]', req.body);
   db.query(
     'SELECT * FROM user WHERE email = ? AND password = ? AND is_inactive = 0',
     [email, password],
