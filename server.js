@@ -205,6 +205,14 @@ app.get('/api/provisions', (req, res) => {
 
 // ✅ LOGIN
 
+// list users (debug)
+app.get('/api/login-debug', (req, res) => {
+  db.query('SELECT id,name,email,is_inactive FROM `user` ORDER BY id LIMIT 200',
+    (err, rows) => err ? res.status(500).json({success:false, error:err.message})
+                       : res.json({success:true, users:rows})
+  );
+});
+
 
 app.post('/api/login', (req, res) => {
  
