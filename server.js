@@ -207,25 +207,26 @@ app.get('/api/provisions', (req, res) => {
 
 
 app.post('/api/login', (req, res) => {
-  const email = String(req.body?.email ?? '').trim();
-  const password = String(req.body?.password ?? '').trim();
-  console.log('[LOGIN]', { email, passwordLen: password.length });
-  db.query(
-    'SELECT * FROM user WHERE email = ? AND password = ? AND is_inactive = 0',
-    [email, password],
-    (err, results) => {
-      if (err) {
-        console.error('❌ Login error:', err);
-        return res.status(500).json({ success: false, error: 'Database error' });
-      }
-      if (results.length === 0) {
-        return res.json({ success: false, message: 'Invalid credentials' });
-      }
-      //res.json({ success: true, user: results[0] });
-      req.session.user = { id: results[0].id, email: results[0].email };
-      res.json({ success: true, user: req.session.user });
-    }
-  );
+  res.status(405).json({ success:false, message:'Use POST /api/login' });
+  // const email = String(req.body?.email ?? '').trim();
+  // const password = String(req.body?.password ?? '').trim();
+  // console.log('[LOGIN]', { email, passwordLen: password.length });
+  // db.query(
+  //   'SELECT * FROM user WHERE email = ? AND password = ? AND is_inactive = 0',
+  //   [email, password],
+  //   (err, results) => {
+  //     if (err) {
+  //       console.error('❌ Login error:', err);
+  //       return res.status(500).json({ success: false, error: 'Database error' });
+  //     }
+  //     if (results.length === 0) {
+  //       return res.json({ success: false, message: 'Invalid credentials' });
+  //     }
+  //     //res.json({ success: true, user: results[0] });
+  //     req.session.user = { id: results[0].id, email: results[0].email };
+  //     res.json({ success: true, user: req.session.user });
+  //   }
+  // );
 });
 
 // ✅ CHANGE PASSWORD
