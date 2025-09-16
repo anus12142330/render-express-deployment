@@ -34,14 +34,15 @@ import masterRoutes from "./routes/master.js";
 import warehousesRoutes from "./routes/warehouses.js";
 import router from "./routes/customer.js"; // ✅ ES module import
 import db from "./db.js";
-
+import { fileURLToPath } from 'url';
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 //session
 app.use(session({
