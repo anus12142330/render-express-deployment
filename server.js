@@ -63,7 +63,7 @@ const vendorStorage = multer.diskStorage({
 
 const productStorage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, 'uploads/product'); // ⬅️ Folder where files are saved
+    cb(null, 'public/uploads/product'); // ⬅️ Folder where files are saved
   },
   filename: (req, file, cb) => {
     const ext = path.extname(file.originalname); // Get extension (e.g., .jpg)
@@ -547,7 +547,7 @@ app.post('/api/products', upload.array('images', 15), async (req, res) => {
 
         for (let i = 0; i < files.length; i++) {
             const f = files[i];
-            const relPath = `/uploads/product/${path.basename(f.path)}`;
+            const relPath = `/public/uploads/product/${path.basename(f.path)}`;
             await queryAsync(
                 `INSERT INTO product_images (product_id, file_path, is_primary, created_at)
          VALUES (?, ?, ?, NOW())`,
