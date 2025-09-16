@@ -35,7 +35,7 @@ const q = async (sql, params = []) => (await db.promise().query(sql, params))[0]
 const read = (b, keys, def = '') => { for (const k of keys) if (b[k] !== undefined) return b[k]; return def; };
 const readNum = (b, keys, def = 0) => { const v = read(b, keys, def); const n = Number(v); return Number.isFinite(n) ? n : def; };
 const readBool01 = (b, keys) => { const v = read(b, keys, 0); return (v === 1 || v === '1' || v === true || v === 'true') ? 1 : 0; };
-const relPath = (full) => `/uploads/product/${path.basename(full)}`;
+const relPath = (full) => `/public/uploads/product/${path.basename(full)}`;
 
 // ==================================================
 // GET /api/products  (list with search/sort/pager)
