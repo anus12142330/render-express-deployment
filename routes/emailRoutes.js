@@ -1,6 +1,6 @@
 import express from 'express';
 import nodemailer from 'nodemailer';
-import db from '../../server/db.js';
+import db from '../db.js';
 import sendEmail from '../../src/utils/sendEmailHelper.mjs'; // ✅ adjust path as needed
 
 

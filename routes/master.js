@@ -22,6 +22,25 @@ const MASTER_CONFIG = {
         listOrderBy: 'brand_name'
     },
 
+    category: {
+        table: 'categories',
+        id: 'id',
+        fields: [
+            { name: 'name', type: 'string', required: true },
+            { name: 'parent_id', type: 'number', lookup: 'category' }
+        ],
+        listSelect: `
+            c.id, c.name, c.parent_id,
+            p.name AS parent_name
+        `,
+        listFrom: `
+            categories c
+            LEFT JOIN categories p ON p.id = c.parent_id
+        `,
+        listSearchIn: ['c.name', 'p.name'],
+        listOrderBy: 'c.name'
+    },
+
     tax_treatment: {
         table: 'tax_treatment',
         id: 'id',
@@ -89,7 +108,7 @@ acc_detail_type: {
   table: 'acc_detail_type',
   id: 'id',
   fields: [
-    { name: 'acc_type_id',  type: 'number', required: true }, // FK -> acc_type.id
+    { name: 'acc_type_id',  type: 'number', required: true, lookup: 'acc_type' }, // FK -> acc_type.id
     { name: 'detail_type',  type: 'string', required: true },
     { name: 'description',  type: 'string' }
   ],
@@ -112,14 +131,14 @@ chart_of_accounts: {
   id: 'id',
   fields: [
     // keep both IDs separately as you requested
-    { name: 'account_type_id', type: 'number', required: true }, // header type -> acc_type.id
-    { name: 'acc_type_id',    type: 'number', required: true }, // group type  -> acc_type.id
-    { name: 'acc_detail_id',  type: 'number', required: true }, // -> acc_detail_type.id
+    { name: 'account_type_id', type: 'number', required: true, lookup: 'account_type' }, // header type -> account_type.id
+    { name: 'acc_type_id',    type: 'number', required: true, lookup: 'acc_type' }, // group type  -> acc_type.id
+    { name: 'acc_detail_id',  type: 'number', required: true, lookup: 'acc_detail_type' }, // -> acc_detail_type.id
     { name: 'name',           type: 'string', required: true },
     { name: 'description',    type: 'string', required: true },
     { name: 'sub_id',         type: 'boolean', default: false }, // "Is sub-account"
-    { name: 'parent_id',      type: 'number' },
-    { name: 'vat_id',         type: 'number' },
+    { name: 'parent_id',      type: 'number', lookup: 'chart_of_accounts' },
+    { name: 'vat_id',         type: 'number', lookup: 'tax' },
     { name: 'balance',        type: 'number' },
     { name: 'as_of',          type: 'date' } // yyyy-mm-dd (let UI send a date string)
   ],
@@ -156,7 +175,7 @@ chart_of_accounts: {
         id: 'id',
         fields: [
             { name: 'account_name', type: 'string', required: true },
-            { name: 'type_id', type: 'number', required: true }
+            { name: 'type_id', type: 'number', required: true, lookup: 'account_type' }
         ],
         // JOIN-enabled listing to show type_name in the grid
         listSelect: 'a.id, a.account_name, a.type_id, at.type_name',
@@ -196,8 +215,8 @@ chart_of_accounts: {
         table: 'shipment_document',
         id: 'id',
             fields: [
-                    { name: 'shipment_stage', type: 'number', required: true },   // FK → shipment_stage.id
-                    { name: 'document_type_id', type: 'number', required: true }, // FK → document_type.id
+                    { name: 'shipment_stage', type: 'number', required: true, lookup: 'shipment_stage' },   // FK → shipment_stage.id
+                    { name: 'document_type_id', type: 'number', required: true, lookup: 'document_type' }, // FK → document_type.id
                     { name: 'is_required', type: 'boolean', default: false }
                   ],
           listSelect: `

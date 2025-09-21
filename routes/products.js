@@ -65,7 +65,7 @@ router.get('/', async (req, res) => {
         if (search) {
             conds.push(`(
         COALESCE(p.product_name, '') LIKE ? OR
-        COALESCE(p.sku, '')          LIKE ? OR
+        COALESCE(c.name, '')         LIKE ? OR
         COALESCE(p.hscode, '')       LIKE ?
       )`);
             const s = `%${search}%`;
@@ -89,7 +89,7 @@ router.get('/', async (req, res) => {
                     p.id,
                     p.pdt_uniqid AS uniqid,
                     COALESCE(p.product_name, '') AS name,
-                    p.sku,
+                    c.name as category_name,
                     p.reorder_point,
                     COALESCE(p.hscode, '') AS hscode,
                     0 AS unit_price,
@@ -107,7 +107,7 @@ router.get('/', async (req, res) => {
                     ) AS image_url
  -- pk.name AS packing_name
                 FROM products p
-                  --  LEFT JOIN packing pk ON pk.id = p.packing_id
+                LEFT JOIN categories c ON c.id = p.category_id
                     ${whereSql}        -- <- WHERE should come AFTER joins
                 ORDER BY name ASC
                     LIMIT ? OFFSET ?
@@ -122,7 +122,7 @@ router.get('/', async (req, res) => {
                 id: r.id,
                 uniqid: r.uniqid || null,
                 name: r.name,
-                sku: r.sku,
+                category: r.category_name || '',
                 reorder_point: r.reorder_point,
                 hscode: r.hscode || '',
                 unit_price: 0,
@@ -151,12 +151,14 @@ router.get('/:id', async (req, res) => {
             `
       SELECT
         p.*,
+        cat.name AS category_name,
         sales_acc.name AS sales_account_name,
         purch_acc.name AS purchase_account_name,
         inv_acc.name   AS inventory_account_name,
         vm.method_name AS valuation_method_name,
         creator.name   AS created_by_name
       FROM products p
+      LEFT JOIN categories cat ON cat.id = p.category_id
       LEFT JOIN acc_chart_accounts sales_acc ON sales_acc.id = p.sales_account_id
       LEFT JOIN acc_chart_accounts purch_acc ON purch_acc.id = p.purchase_account_id
       LEFT JOIN acc_chart_accounts inv_acc   ON inv_acc.id = p.inventory_account_id
@@ -204,6 +206,9 @@ router.get('/:id', async (req, res) => {
         d.net_wt,
         d.gross_wt,
         d.wt_unit,
+        d.variety,
+        d.grade_and_size_code,
+        d.packing_alias,
         d.brand_id,
        -- d.manufacturer_id,
         d.mpn,
@@ -235,6 +240,9 @@ router.get('/:id', async (req, res) => {
             net_weight: r.net_wt != null ? r.net_wt.toString() : '',
             gross_weight: r.gross_wt != null ? r.gross_wt.toString() : '',
             weight_unit: r.wt_unit || 'kg',
+            variety: r.variety || '',
+            grade_and_size_code: r.grade_and_size_code || '',
+            packing_alias: r.packing_alias || '',
             mpn: r.mpn || '',
             isbn: r.isbn || '',
             upc: r.upc || '',
@@ -373,34 +381,31 @@ router.post('/', uploadFields, async (req, res) => {
         const inventory_account_id = await fkOrNull(conn, 'acc_chart_accounts',    p.inventory_account_id);
         const selling_currency_id  = await fkOrNull(conn, 'currency', p.selling_currency_id);
         const cost_currency_id     = await fkOrNull(conn, 'currency', p.cost_currency_id);
+        const category_id          = await fkOrNull(conn, 'categories',            p.category_id);
 
         const preferred_vendor_id  = await fkOrNull(conn, 'vendor',               p.preferred_vendor_id);
         const valuation_method_id  = await fkOrNull(conn, 'valuation_methods',  p.valuation_method_id);
         const sales_tax_id         = await fkOrNull(conn, 'taxes',                 p.sales_tax_id);
         const purchase_tax_id      = await fkOrNull(conn, 'taxes',                 p.purchase_tax_id);
 
-        // NEW: two fields you want saved
-        const origin_ids = csvFromAny(p.origin_ids || parseJSON(p, 'origins', []));
         const pdt_uniqid = `pdt_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
 
-        // INSERT now explicitly includes pdt_uniqid + origin_ids
         const [r1] = await conn.query(
             `INSERT INTO products
-       (pdt_uniqid, origin_ids,
-        item_type, product_name, sku, hscode, created_by,
+       (pdt_uniqid, category_id,
+        item_type, product_name, hscode, created_by,
         returnable, excise,
         enable_sales, selling_currency_id, selling_price, sales_account_id, sales_description, sales_tax_id,
         enable_purchase, cost_currency_id, cost_price, purchase_account_id, purchase_tax_id, purchase_description, preferred_vendor_id,
         track_inventory, track_batches, inventory_account_id, valuation_method_id, reorder_point,
         description, created_at, updated_at)
        VALUES
-       (?,?,?,?,?,  ?,?,  ?,?,?,?,?, ?,?,  ?,?,?,?,?,?, ?,?,  ?,?,?,?, ?,  ?, NOW(), NOW())`,
+       (?,?,?,?,?,  ?,?,  ?,?,?,?,?, ?,?,  ?,?,?,?,?,?, ?,?,  ?,?,?,?, ?, NOW(), NOW())`,
             [
-                pdt_uniqid, origin_ids,
+                pdt_uniqid, category_id,
 
                 read(p, ['item_type'], 'Goods'),
                 read(p, ['product_name']),
-                read(p, ['sku']),
                 read(p, ['hscode'], null),
                 created_by_id,
 
@@ -436,7 +441,7 @@ router.post('/', uploadFields, async (req, res) => {
 
         await conn.query(
             `INSERT INTO product_history (product_id, user_id, action, details, created_at) VALUES (?, ?, ?, ?, NOW())`,
-            [productId, created_by_id, 'CREATED', JSON.stringify({ name: read(p, ['product_name']), sku: read(p, ['sku']) })]
+            [productId, created_by_id, 'CREATED', JSON.stringify({ name: read(p, ['product_name']) })]
         );
 
         const rowFiles = (req.files?.['row_images[]'] || []);
@@ -467,7 +472,10 @@ router.post('/', uploadFields, async (req, res) => {
                     r.upc || null,
                     r.ean || null,
                     numOrNull(r.uom_id),
-                    pack_image_path                         // <-- NEW
+                    pack_image_path,                        // <-- NEW
+                    r.variety || null,
+                    r.grade_and_size_code || null,
+                    r.packing_alias || null
                 ];
             });
 
@@ -475,7 +483,8 @@ router.post('/', uploadFields, async (req, res) => {
                 `INSERT INTO product_details
       (product_id, origin_id, packing_text, dimensions, dim_unit,
        net_wt, gross_wt, wt_unit, brand_id,
-       mpn, isbn, upc, ean, uom_id, pack_image_path)
+       mpn, isbn, upc, ean, uom_id, pack_image_path,
+       variety, grade_and_size_code, packing_alias)
      VALUES ?`,
                 [values]
             );
@@ -656,20 +665,17 @@ router.put('/:id', uploadFields, async (req, res) => {
         const inventory_account_id = await fkOrNull(conn, 'acc_chart_accounts',    p.inventory_account_id);
         const selling_currency_id  = await fkOrNull(conn, 'currency',            p.selling_currency_id);
         const cost_currency_id     = await fkOrNull(conn, 'currency',            p.cost_currency_id);
+        const category_id          = await fkOrNull(conn, 'categories',          p.category_id);
 
         const preferred_vendor_id  = await fkOrNull(conn, 'vendor',              p.preferred_vendor_id);
         const valuation_method_id  = await fkOrNull(conn, 'valuation_methods',   p.valuation_method_id);
         const sales_tax_id         = await fkOrNull(conn, 'taxes',               p.sales_tax_id);
         const purchase_tax_id      = await fkOrNull(conn, 'taxes',               p.purchase_tax_id);
 
-        // origin_ids may come as CSV or as array under "origins"/"origin_ids"
-        const origin_ids = csvFromAny(p.origin_ids || parseJSON(p, 'origins', []));
-
         const newValuesForHistory = {
-            origin_ids,
+            category_id,
             item_type: read(p, ['item_type'], 'Goods'),
             product_name: read(p, ['product_name']),
-            sku: read(p, ['sku']),
             hscode: read(p, ['hscode'], null),
             returnable: readBool01(p, ['returnable']),
             excise: readBool01(p, ['excise']),
@@ -699,10 +705,9 @@ router.put('/:id', uploadFields, async (req, res) => {
         // ----- Update main products row (DO NOT change pdt_uniqid here) -----
         await conn.query(
             `UPDATE products SET
-        origin_ids=?,
+        category_id=?,
         item_type=?,
         product_name=?,
-        sku=?,
         hscode=?,
         returnable=?,
         excise=?,
@@ -728,10 +733,9 @@ router.put('/:id', uploadFields, async (req, res) => {
         updated_at=NOW()
       WHERE id=?`,
             [
-                origin_ids,
+                category_id,
                 read(p, ['item_type'], 'Goods'),
                 read(p, ['product_name']),
-                read(p, ['sku']),
                 read(p, ['hscode'], null),
 
                 readBool01(p, ['returnable']),
@@ -802,7 +806,10 @@ router.put('/:id', uploadFields, async (req, res) => {
                     r.upc || null,
                     r.ean || null,
                     numOrNull(r.uom_id),
-                    pack_image_path
+                    pack_image_path,
+                    r.variety || null,
+                    r.grade_and_size_code || null,
+                    r.packing_alias || null
                 ];
 
                 if (r.id && existingDetailIds.includes(Number(r.id))) {
@@ -811,7 +818,8 @@ router.put('/:id', uploadFields, async (req, res) => {
                         `UPDATE product_details SET
                             origin_id=?, packing_text=?, dimensions=?, dim_unit=?,
                             net_wt=?, gross_wt=?, wt_unit=?, brand_id=?,
-                            mpn=?, isbn=?, upc=?, ean=?, uom_id=?, pack_image_path=?
+                            mpn=?, isbn=?, upc=?, ean=?, uom_id=?, pack_image_path=?,
+                            variety=?, grade_and_size_code=?, packing_alias=?
                          WHERE id=? AND product_id=?`,
                         [...rowData, r.id, productId]
                     );
@@ -822,8 +830,9 @@ router.put('/:id', uploadFields, async (req, res) => {
                         `INSERT INTO product_details
                             (product_id, origin_id, packing_text, dimensions, dim_unit,
                              net_wt, gross_wt, wt_unit, brand_id,
-                             mpn, isbn, upc, ean, uom_id, pack_image_path)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                             mpn, isbn, upc, ean, uom_id, pack_image_path,
+                             variety, grade_and_size_code, packing_alias)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                         [productId, ...rowData]
                     );
                 }
@@ -986,6 +995,9 @@ router.get('/:id/packings', async (req, res) => {
         d.net_wt,
         d.gross_wt,
         d.wt_unit,
+        d.variety,
+        d.grade_and_size_code,
+        d.packing_alias,
         d.brand_id,
        -- d.manufacturer_id,
         d.mpn,
@@ -1013,6 +1025,9 @@ router.get('/:id/packings', async (req, res) => {
             net_weight: r.net_wt != null ? String(r.net_wt) : '',
             gross_weight: r.gross_wt != null ? String(r.gross_wt) : '',
             weight_unit: r.wt_unit || 'kg',
+            variety: r.variety || '',
+            grade_and_size_code: r.grade_and_size_code || '',
+            packing_alias: r.packing_alias || '',
             brand_id: r.brand_id != null ? String(r.brand_id) : '',
           //  manufacturer_id: r.manufacturer_id != null ? String(r.manufacturer_id) : '',
             mpn: r.mpn || '',
