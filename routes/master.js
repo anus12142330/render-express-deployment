@@ -165,7 +165,7 @@ chart_of_accounts: {
     LEFT JOIN acc_type atG ON atG.id = cca.acc_type_id
     LEFT JOIN acc_detail_type dt ON dt.id = cca.acc_detail_id
   `,
-  listSearchIn: ['cca.name','cca.description','atH.acc_type','atG.acc_type','dt.detail_type'],
+  listSearchIn: ['cca.name', 'cca.description', 'atH.type_name', 'atG.acc_type', 'dt.detail_type'],
   listOrderBy: 'cca.name'
 },
 
@@ -338,7 +338,8 @@ router.get('/:type', (req, res, next) => {
         // JOIN-enabled path
         if (cfg.listFrom && cfg.listSelect) {
             const orderBy = cfg.listOrderBy || cfg.id;
-            const { whereSql, params } = buildSearchClause(cfg.listSearchIn, q);
+            // Ignore search query `q` when `all` is requested for dropdowns
+            const { whereSql, params } = buildSearchClause(cfg.listSearchIn, all ? '' : q);
 
             if (all) {
                 const dataSql = `SELECT ${cfg.listSelect} FROM ${cfg.listFrom} ${whereSql} ORDER BY ${orderBy} ASC`;
@@ -374,7 +375,8 @@ router.get('/:type', (req, res, next) => {
         // Simple table path
         const orderBy = cfg.listOrderBy || cfg.id;
         const searchCols = cfg.fields?.map(f => `\`${f.name}\``) || ['`name`'];
-        const { whereSql, params } = buildSearchClause(searchCols, q);
+        // Ignore search query `q` when `all` is requested for dropdowns
+        const { whereSql, params } = buildSearchClause(searchCols, all ? '' : q);
 
         if (all) {
             const dataSql = `SELECT * FROM \`${cfg.table}\` ${whereSql} ORDER BY \`${orderBy}\` ASC`;

@@ -181,7 +181,7 @@ router.get('/:id', async (req, res) => {
         )).map(r => ({ ...r, file_path: r.file_path }));
 
         // 3) opening stocks (unchanged)
-        const opening = await q(
+        const warehousesForView = await q(
             `SELECT w.id AS warehouse_id, w.warehouse_name,
               IFNULL(s.qty,0) AS qty,
               IFNULL(s.unit_cost_per_unit,0) AS unit_cost_per_unit,
@@ -189,7 +189,21 @@ router.get('/:id', async (req, res) => {
        FROM warehouses w
        LEFT JOIN product_opening_stock s
          ON s.warehouse_id=w.id AND s.product_id=?
+       WHERE w.is_inactive = 0
        ORDER BY w.warehouse_name`,
+            [id]
+        );
+
+        const openingStocksForEdit = await q(
+            `SELECT
+                s.warehouse_id,
+                w.warehouse_name,
+                s.qty,
+                s.unit_cost_per_unit
+            FROM product_opening_stock s
+            JOIN warehouses w ON w.id = s.warehouse_id
+            WHERE s.product_id = ?
+            ORDER BY w.warehouse_name`,
             [id]
         );
 
@@ -282,8 +296,8 @@ router.get('/:id', async (req, res) => {
         res.json({
             ...product,
             images,
-            opening_stocks: opening,
-            warehouses: opening,       // (kept for UI compatibility)
+            opening_stocks: openingStocksForEdit, // For Edit Modal
+            warehouses: warehousesForView,       // For View Page
             origin_ids,                // CSV, unchanged
             origins,                   // array for easy hydration
             origin_names,
