@@ -150,8 +150,18 @@ router.get('/:id', async (req, res) => {
         const rows = await q(
             `
       SELECT
-        p.*
+        p.*,
+        sales_acc.name AS sales_account_name,
+        purch_acc.name AS purchase_account_name,
+        inv_acc.name   AS inventory_account_name,
+        vm.method_name AS valuation_method_name,
+        creator.name   AS created_by_name
       FROM products p
+      LEFT JOIN acc_chart_accounts sales_acc ON sales_acc.id = p.sales_account_id
+      LEFT JOIN acc_chart_accounts purch_acc ON purch_acc.id = p.purchase_account_id
+      LEFT JOIN acc_chart_accounts inv_acc   ON inv_acc.id = p.inventory_account_id
+      LEFT JOIN valuation_methods vm ON vm.id = p.valuation_method_id
+      LEFT JOIN \`user\` creator ON creator.id = p.created_by
       WHERE p.id = ?
       `,
             [id]
@@ -202,8 +212,9 @@ router.get('/:id', async (req, res) => {
         d.ean,
         d.uom_id,
         d.pack_image_path
-        --  pk.name AS packing_name
+        , c.name as origin_name
       FROM product_details d
+      LEFT JOIN country c ON c.id = d.origin_id
       -- LEFT JOIN packing pk ON pk.id = d.packing_id
       WHERE d.product_id=?
       ORDER BY d.id ASC
@@ -213,7 +224,9 @@ router.get('/:id', async (req, res) => {
 
         // 5) normalize for frontend (keep field names the UI expects)
         const dimension_rows = details.map(r => ({
+            id: r.id,
             origin_country_id: r.origin_id ?? '',
+            origin_name: r.origin_name ?? '',
             // UI shows packing as TEXT (textbox). Prefer name, fall back to id, then empty string.
             packing: r.packing_text || null,
             packing_id: r.packing_text || '',
@@ -238,7 +251,26 @@ router.get('/:id', async (req, res) => {
             ? origin_ids.split(',').map(s => s.trim()).filter(Boolean)
             : [];
 
+        let origin_names = [];
+        if (origins.length > 0) {
+            const originData = await q(
+                `SELECT name FROM country WHERE id IN (?)`,
+                [origins]
+            );
+            origin_names = originData.map(c => c.name);
+        }
+
         // 7) respond with everything the UI needs
+        // 8) Fetch product history
+        const history = await q(
+            `SELECT ph.id, ph.action, ph.details, ph.created_at, u.name as user_name
+             FROM product_history ph
+             LEFT JOIN user u ON u.id = ph.user_id
+             WHERE ph.product_id = ?
+             ORDER BY ph.created_at DESC`,
+            [id]
+        );
+
         res.json({
             ...product,
             images,
@@ -246,7 +278,9 @@ router.get('/:id', async (req, res) => {
             warehouses: opening,       // (kept for UI compatibility)
             origin_ids,                // CSV, unchanged
             origins,                   // array for easy hydration
+            origin_names,
             dimension_rows,            // fully hydrated packing/origin rows
+            history: history || [],
         });
     } catch (e) {
         console.error('GET /api/products/:id error:', e);
@@ -326,17 +360,24 @@ router.post('/', uploadFields, async (req, res) => {
         await conn.beginTransaction();
 
         const p = req.body;
+        const created_by_id = req.session?.user?.id;
+
+        if (!created_by_id) {
+            await conn.rollback();
+            return res.status(401).json({ ok: false, error: 'UNAUTHORIZED', error_details: { message: 'User session not found. Please log in again.' } });
+        }
 
         // Validate FKs (stay consistent with your table names)
-        const sales_account_id     = await fkOrNull(conn, 'accounts',              p.sales_account_id);
-        const purchase_account_id  = await fkOrNull(conn, 'accounts',              p.purchase_account_id);
-        const inventory_account_id = await fkOrNull(conn, 'accounts',              p.inventory_account_id);
+        const sales_account_id     = await fkOrNull(conn, 'acc_chart_accounts',    p.sales_account_id);
+        const purchase_account_id  = await fkOrNull(conn, 'acc_chart_accounts',    p.purchase_account_id);
+        const inventory_account_id = await fkOrNull(conn, 'acc_chart_accounts',    p.inventory_account_id);
         const selling_currency_id  = await fkOrNull(conn, 'currency', p.selling_currency_id);
         const cost_currency_id     = await fkOrNull(conn, 'currency', p.cost_currency_id);
 
         const preferred_vendor_id  = await fkOrNull(conn, 'vendor',               p.preferred_vendor_id);
         const valuation_method_id  = await fkOrNull(conn, 'valuation_methods',  p.valuation_method_id);
         const sales_tax_id         = await fkOrNull(conn, 'taxes',                 p.sales_tax_id);
+        const purchase_tax_id      = await fkOrNull(conn, 'taxes',                 p.purchase_tax_id);
 
         // NEW: two fields you want saved
         const origin_ids = csvFromAny(p.origin_ids || parseJSON(p, 'origins', []));
@@ -346,14 +387,14 @@ router.post('/', uploadFields, async (req, res) => {
         const [r1] = await conn.query(
             `INSERT INTO products
        (pdt_uniqid, origin_ids,
-        item_type, product_name, sku, hscode,
+        item_type, product_name, sku, hscode, created_by,
         returnable, excise,
         enable_sales, selling_currency_id, selling_price, sales_account_id, sales_description, sales_tax_id,
-        enable_purchase, cost_currency_id, cost_price, purchase_account_id, purchase_description, preferred_vendor_id,
+        enable_purchase, cost_currency_id, cost_price, purchase_account_id, purchase_tax_id, purchase_description, preferred_vendor_id,
         track_inventory, track_batches, inventory_account_id, valuation_method_id, reorder_point,
         description, created_at, updated_at)
        VALUES
-       (?,?,?,?,  ?,?,  ?,?,?,?,?, ?,?,  ?,?,?,?,?, ?,?,  ?,?,?,?, ?,  ?, NOW(), NOW())`,
+       (?,?,?,?,?,  ?,?,  ?,?,?,?,?, ?,?,  ?,?,?,?,?,?, ?,?,  ?,?,?,?, ?,  ?, NOW(), NOW())`,
             [
                 pdt_uniqid, origin_ids,
 
@@ -361,6 +402,7 @@ router.post('/', uploadFields, async (req, res) => {
                 read(p, ['product_name']),
                 read(p, ['sku']),
                 read(p, ['hscode'], null),
+                created_by_id,
 
                 readBool01(p, ['returnable']),
                 readBool01(p, ['excise']),
@@ -376,6 +418,7 @@ router.post('/', uploadFields, async (req, res) => {
                 cost_currency_id,
                 readNum(p, ['cost_price'], null),
                 purchase_account_id,
+                purchase_tax_id,
                 read(p, ['purchase_description'], null),
                 preferred_vendor_id,
 
@@ -390,6 +433,12 @@ router.post('/', uploadFields, async (req, res) => {
         );
 
         const productId = r1.insertId;
+
+        await conn.query(
+            `INSERT INTO product_history (product_id, user_id, action, details, created_at) VALUES (?, ?, ?, ?, NOW())`,
+            [productId, created_by_id, 'CREATED', JSON.stringify({ name: read(p, ['product_name']), sku: read(p, ['sku']) })]
+        );
+
         const rowFiles = (req.files?.['row_images[]'] || []);
         // ---- product_details ----
         // ---- product_details ----
@@ -527,6 +576,47 @@ function sendCreateError(res, e, req) {
     return res.status(500).json(payload);
 }
 
+function getChangedFields(oldValues, newValues) {
+    const changes = [];
+    // Only iterate over the keys we've defined in our `newValuesForHistory` object.
+    // This prevents comparing fields like `id`, `created_at`, etc.
+    const keysToCompare = Object.keys(newValues);
+
+    const numericFields = ['selling_price', 'cost_price', 'reorder_point'];
+    const booleanFields = ['returnable', 'excise', 'enable_sales', 'enable_purchase', 'track_inventory', 'track_batches'];
+
+    for (const key of keysToCompare) {
+        const oldValue = oldValues[key];
+        const newValue = newValues[key];
+
+        // Normalize null/undefined to empty string for string comparison
+        const oldString = oldValue == null ? '' : String(oldValue);
+        const newString = newValue == null ? '' : String(newValue);
+
+        if (booleanFields.includes(key)) {
+            // Booleans are already normalized to 0 or 1 in newValues.
+            // DB stores TINYINT(1) which can be 0 or 1.
+            if (Number(oldValue) !== Number(newValue)) {
+                changes.push({ field: key, from: oldValue, to: newValue });
+            }
+        } else if (numericFields.includes(key)) {
+            // For decimal/float fields, compare them as numbers to avoid "8.50" vs "8.5" issues.
+            // Treat null/undefined/empty as null for a safer comparison.
+            const oldNum = (oldValue === null || oldValue === undefined || String(oldValue).trim() === '') ? null : parseFloat(oldValue);
+            const newNum = (newValue === null || newValue === undefined || String(newValue).trim() === '') ? null : parseFloat(newValue);
+
+            if (oldNum !== newNum) {
+                changes.push({ field: key, from: oldValue, to: newValue });
+            }
+        } else {
+            // For all other fields (strings, FK IDs), compare as strings.
+            if (oldString !== newString) {
+                changes.push({ field: key, from: oldValue, to: newValue });
+            }
+        }
+    }
+    return changes;
+}
 
 
 // ==================================================
@@ -543,31 +633,68 @@ router.put('/:id', uploadFields, async (req, res) => {
             throw new Error('Invalid product id');
         }
 
+        const updated_by_id = req.session?.user?.id;
+        if (!updated_by_id) {
+            await conn.rollback();
+            return res.status(401).json({ ok: false, error: 'UNAUTHORIZED', error_details: { message: 'User session not found. Please log in again.' } });
+        }
+
         // Ensure product exists (and fetch pdt_uniqid if needed)
-        const [[exist]] = await conn.query(
-            'SELECT id, pdt_uniqid FROM products WHERE id=? LIMIT 1',
+        const [[oldProduct]] = await conn.query(
+            'SELECT * FROM products WHERE id=? LIMIT 1',
             [productId]
         );
-        if (!exist) {
+        if (!oldProduct) {
             await conn.rollback();
             return res.status(404).json({ ok: false, error: 'Product not found' });
         }
 
         const p = req.body;
-
         // ----- Validate FKs (stay consistent with your table names) -----
-        const sales_account_id     = await fkOrNull(conn, 'accounts',            p.sales_account_id);
-        const purchase_account_id  = await fkOrNull(conn, 'accounts',            p.purchase_account_id);
-        const inventory_account_id = await fkOrNull(conn, 'accounts',            p.inventory_account_id);
+        const sales_account_id     = await fkOrNull(conn, 'acc_chart_accounts',    p.sales_account_id);
+        const purchase_account_id  = await fkOrNull(conn, 'acc_chart_accounts',    p.purchase_account_id);
+        const inventory_account_id = await fkOrNull(conn, 'acc_chart_accounts',    p.inventory_account_id);
         const selling_currency_id  = await fkOrNull(conn, 'currency',            p.selling_currency_id);
         const cost_currency_id     = await fkOrNull(conn, 'currency',            p.cost_currency_id);
 
         const preferred_vendor_id  = await fkOrNull(conn, 'vendor',              p.preferred_vendor_id);
         const valuation_method_id  = await fkOrNull(conn, 'valuation_methods',   p.valuation_method_id);
         const sales_tax_id         = await fkOrNull(conn, 'taxes',               p.sales_tax_id);
+        const purchase_tax_id      = await fkOrNull(conn, 'taxes',               p.purchase_tax_id);
 
         // origin_ids may come as CSV or as array under "origins"/"origin_ids"
         const origin_ids = csvFromAny(p.origin_ids || parseJSON(p, 'origins', []));
+
+        const newValuesForHistory = {
+            origin_ids,
+            item_type: read(p, ['item_type'], 'Goods'),
+            product_name: read(p, ['product_name']),
+            sku: read(p, ['sku']),
+            hscode: read(p, ['hscode'], null),
+            returnable: readBool01(p, ['returnable']),
+            excise: readBool01(p, ['excise']),
+            enable_sales: readBool01(p, ['enable_sales']),
+            selling_currency_id,
+            selling_price: readNum(p, ['selling_price'], null),
+            sales_account_id,
+            sales_description: read(p, ['sales_description'], null),
+            sales_tax_id,
+            enable_purchase: readBool01(p, ['enable_purchase']),
+            cost_currency_id,
+            cost_price: readNum(p, ['cost_price'], null),
+            purchase_account_id,
+            purchase_tax_id,
+            purchase_description: read(p, ['purchase_description'], null),
+            preferred_vendor_id,
+            track_inventory: readBool01(p, ['track_inventory']),
+            track_batches: readBool01(p, ['track_batches']),
+            inventory_account_id,
+            valuation_method_id,
+            reorder_point: readNum(p, ['reorder_point'], null),
+            description: read(p, ['description'], null),
+        };
+
+        const changedFields = getChangedFields(oldProduct, newValuesForHistory);
 
         // ----- Update main products row (DO NOT change pdt_uniqid here) -----
         await conn.query(
@@ -589,6 +716,7 @@ router.put('/:id', uploadFields, async (req, res) => {
         cost_currency_id=?,
         cost_price=?,
         purchase_account_id=?,
+        purchase_tax_id=?,
         purchase_description=?,
         preferred_vendor_id=?,
         track_inventory=?,
@@ -620,6 +748,7 @@ router.put('/:id', uploadFields, async (req, res) => {
                 cost_currency_id,
                 readNum(p, ['cost_price'], null),
                 purchase_account_id,
+                purchase_tax_id,
                 read(p, ['purchase_description'], null),
                 preferred_vendor_id,
 
@@ -635,30 +764,39 @@ router.put('/:id', uploadFields, async (req, res) => {
             ]
         );
 
-        // ----- product_details: replace-all strategy -----
-        // Frontend should send dimension_rows as JSON array
-        const rowFiles = (req.files?.['row_images[]'] || []);
-        const rows = parseJSON(p, 'dimension_rows', []);
-        await conn.query('DELETE FROM product_details WHERE product_id=?', [productId]);
+        if (changedFields.length > 0) {
+            await conn.query(
+                `INSERT INTO product_history (product_id, user_id, action, details, created_at) VALUES (?, ?, ?, ?, NOW())`,
+                [productId, updated_by_id, 'UPDATED', JSON.stringify(changedFields)]
+            );
+        }
 
-        if (Array.isArray(rows) && rows.length) {
-            const values = rows.map((r) => {
+        // ----- product_details: Smarter update to preserve IDs -----
+        const rowFiles = (req.files?.['row_images[]'] || []);
+        const incomingRows = parseJSON(p, 'dimension_rows', []);
+
+        // 1. Get existing detail IDs for this product to compare against
+        const [existingDetailRows] = await conn.query('SELECT id FROM product_details WHERE product_id=?', [productId]);
+        const existingDetailIds = existingDetailRows.map(r => r.id);
+        const idsToKeep = [];
+
+        // 2. Process incoming rows: update existing, insert new
+        if (Array.isArray(incomingRows) && incomingRows.length) {
+            for (const r of incomingRows) {
                 const idx = Number.isFinite(Number(r.image_upload_index)) ? Number(r.image_upload_index) : -1;
                 const pack_image_path =
                     idx >= 0 && rowFiles[idx] ? relPath(rowFiles[idx].path)
                         : (r.pack_image_url || null);
 
-                return [
-                    productId,
+                const rowData = [
                     numOrNull(r.origin_country_id),
                     (r.packing_id || null),
                     r.dimensions || null,
                     r.dim_unit || r.dimensions_unit || 'cm',
-                    r.net_weight === ''  ? null : numOrNull(r.net_weight),
-                    r.gross_weight === ''? null : numOrNull(r.gross_weight),
+                    r.net_weight === '' ? null : numOrNull(r.net_weight),
+                    r.gross_weight === '' ? null : numOrNull(r.gross_weight),
                     r.weight_unit || 'kg',
                     numOrNull(r.brand_id),
-                  //  numOrNull(r.manufacturer_id),
                     r.mpn || null,
                     r.isbn || null,
                     r.upc || null,
@@ -666,16 +804,36 @@ router.put('/:id', uploadFields, async (req, res) => {
                     numOrNull(r.uom_id),
                     pack_image_path
                 ];
-            });
 
-            await conn.query(
-                `INSERT INTO product_details
-                 (product_id, origin_id, packing_text, dimensions, dim_unit,
-                  net_wt, gross_wt, wt_unit, brand_id,
-                  mpn, isbn, upc, ean, uom_id, pack_image_path)
-                 VALUES ?`,
-                [values]
-            );
+                if (r.id && existingDetailIds.includes(Number(r.id))) {
+                    // UPDATE existing row
+                    await conn.query(
+                        `UPDATE product_details SET
+                            origin_id=?, packing_text=?, dimensions=?, dim_unit=?,
+                            net_wt=?, gross_wt=?, wt_unit=?, brand_id=?,
+                            mpn=?, isbn=?, upc=?, ean=?, uom_id=?, pack_image_path=?
+                         WHERE id=? AND product_id=?`,
+                        [...rowData, r.id, productId]
+                    );
+                    idsToKeep.push(Number(r.id));
+                } else {
+                    // INSERT new row
+                    await conn.query(
+                        `INSERT INTO product_details
+                            (product_id, origin_id, packing_text, dimensions, dim_unit,
+                             net_wt, gross_wt, wt_unit, brand_id,
+                             mpn, isbn, upc, ean, uom_id, pack_image_path)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                        [productId, ...rowData]
+                    );
+                }
+            }
+        }
+
+        // 3. Delete rows from DB that were removed in the UI
+        const idsToDelete = existingDetailIds.filter(id => !idsToKeep.includes(id));
+        if (idsToDelete.length > 0) {
+            await conn.query(`DELETE FROM product_details WHERE id IN (?)`, [idsToDelete]);
         }
 
         // ----- product_opening_stock: replace-all strategy -----
@@ -937,5 +1095,28 @@ router.delete('/:id/images/:imageId', async (req, res) => {
         res.status(500).json({ error: 'Failed to delete image' });
     }
 });
+
+
+// products.js (or wherever your /api/products routes live)
+
+// make sure you have a helper `q(sql, params)` for MySQL. If not, replace with your pool/query code.
+router.get('/packings/:packingDetailId/in-use', async (req, res) => {
+  const { packingDetailId } = req.params;
+  try {
+    // If your schema uses a different table/column, change here:
+    const rows = await q(
+      'SELECT COUNT(*) AS c FROM purchase_order_items WHERE packing_id = ?',
+      [packingDetailId]
+    );
+    const count = rows?.[0]?.c || 0;
+    res.json({ inUse: count > 0, count });
+  } catch (e) {
+    console.error('packings in-use check failed', e);
+    res.status(500).json({ inUse: true, error: 'CHECK_FAILED' });
+  }
+});
+
+
+
 
 export default router;

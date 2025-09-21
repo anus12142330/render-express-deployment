@@ -6,7 +6,6 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import session from 'express-session';
-import emailRoutes from './routes/emailRoutes.js';
 import productRoutes from './routes/products.js';
 import customerRoutes from './routes/customer.js';
 import vendorRoutes from './routes/vendor.js';
@@ -34,13 +33,17 @@ import './cronJobs/expireCheck.js';
 import masterRoutes from "./routes/master.js";
 import warehousesRoutes from "./routes/warehouses.js";
 import router from "./routes/customer.js"; // ✅ ES module import
+import uploadRoutes from "./routes/upload.js";
+import db from "./db.js";
+import { fileURLToPath } from 'url';
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
+app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
 
 //session
 app.use(session({
@@ -108,20 +111,20 @@ const uploadCompany = uploadc.fields([
 /* ---------- Helpers ---------- */
 const likeWrap = (s = '') => `%${s || ''}%`;
 
-const db = mysql.createConnection({
-  host: 'localhost',
-  user: 'root',
-  password: '',
-  database: 'portal_db'
-});
+//  const db = mysql.createConnection({
+//  host: process.env.DB_HOST || "localhost",
+//   user: process.env.DB_USER || "root",
+//   password: process.env.DB_PASSWORD || "",
+//   database: process.env.DB_NAME || "portal_db",
+// }); 
 
-db.connect(err => {
-  if (err) {
-    console.error('❌ MySQL connection failed:', err);
-    process.exit(1);
-  }
-  console.log('✅ Connected to MySQL database');
-});
+//  db.connect(err => {
+//   if (err) {
+//     console.error('❌ MySQL connection failed:', err);
+//     process.exit(1);
+//   }
+//   console.log('✅ Connected to MySQL database');
+// }); 
 
 
 
@@ -155,6 +158,7 @@ app.use("/api/brand", brandRoutes);
 app.use("/api/manufacture", manufactureRoutes);
 app.use("/api/master", masterRoutes);
 app.use("/api/warehouses", warehousesRoutes);
+app.use('/api/upload', uploadRoutes);
 
 
 // ✅ GET ALL USERS
@@ -203,8 +207,21 @@ app.get('/api/provisions', (req, res) => {
 });
 
 // ✅ LOGIN
+
+// list users (debug)
+app.get('/api/login-debug', (req, res) => {
+  db.query('SELECT id,name,email,is_inactive FROM `user` ORDER BY id LIMIT 200',
+    (err, rows) => err ? res.status(500).json({success:false, error:err.message})
+                       : res.json({success:true, users:rows})
+  );
+});
+
+
 app.post('/api/login', (req, res) => {
-  const { email, password } = req.body;
+ 
+  const email = String(req.body?.email ?? '').trim();
+  const password = String(req.body?.password ?? '').trim();
+  console.log('[LOGIN]', { email, passwordLen: password.length });
   db.query(
     'SELECT * FROM user WHERE email = ? AND password = ? AND is_inactive = 0',
     [email, password],
@@ -383,7 +400,7 @@ app.get('/api/products/metadata', (req, res) => {
         units:         'SELECT id, name as unit_name FROM uom_master ORDER BY name',
         brands:        'SELECT id, brand_name FROM brands ORDER BY brand_name',
         manufacturers: 'SELECT id, name FROM manufacturers ORDER BY name',
-        accounts:      'SELECT id, account_name, type FROM accounts ORDER BY account_name',
+        accounts:      'SELECT id, name, account_type_id FROM acc_chart_accounts ORDER BY name',
         warehouses:    'SELECT id, warehouse_name FROM warehouses ORDER BY warehouse_name',
         vendors:       'SELECT id, display_name FROM vendor ORDER BY display_name',
         taxes:         "SELECT id, tax_name, rate, type FROM taxes WHERE is_active=1 ORDER BY tax_name",
@@ -645,29 +662,83 @@ app.get('/api/salutations', (req, res) => {
 //company settings
 // Load company settings (latest one)
 app.get('/api/company-settings', (req, res) => {
-  db.query('SELECT * FROM company_settings ORDER BY id DESC LIMIT 1', (err, results) => {
+  db.query(
+    `SELECT cs.*, c.id as currency_id, c.name as currency_name 
+     FROM company_settings cs 
+     LEFT JOIN currency c ON cs.base_currency = c.id 
+     ORDER BY cs.id DESC LIMIT 1`,
+    (err, results) => {
     if (err) return res.status(500).json({ error: err });
-    res.json(results[0] || {});
+    if (results.length > 0) {
+      const settings = results[0];
+      // Re-shape the base_currency to be the object the frontend expects
+      if (settings.currency_id && settings.currency_name) {
+        settings.base_currency = {
+          value: settings.currency_id,
+          label: settings.currency_name
+        };
+      } else {
+        settings.base_currency = null;
+      }
+      // remove the extra fields to avoid confusion
+      delete settings.currency_id;
+      delete settings.currency_name;
+      res.json(settings);
+    } else {
+      res.json({});
+    }
   });
 });
 
 // Insert company settings
 // Insert company settings (accepts logo and/or company_stamp)
 app.post('/api/company-settings', uploadCompany, (req, res) => {
-    const { name, full_address, telephone, fax, country } = req.body;
+    const {
+        name, industry, full_address, telephone, fax, country, is_tax_registered, trn_no,
+        primary_contact_email, base_currency,
+        fiscal_year_id, fiscal_start_day, language_id, timezone_id, date_format_id, company_prefix
+    } = req.body;
 
     const logoFile  = req.files?.logo?.[0] || null;
     const stampFile = req.files?.company_stamp?.[0] || null;
+
+    let final_base_currency = null;
+    const raw_currency = req.body.base_currency;
+
+    if (typeof raw_currency === 'object' && raw_currency !== null) {
+        // Case 1: It's already an object, e.g., { value: 'USD', label: '...' }
+        final_base_currency = raw_currency.value || null;
+    } else if (typeof raw_currency === 'string' && raw_currency.trim() && raw_currency !== '[object Object]') {
+        // Case 2: It's a string. It could be a primitive 'USD' or a JSON string.
+        if (raw_currency.startsWith('{') && raw_currency.endsWith('}')) {
+            try {
+                const parsed = JSON.parse(raw_currency);
+                final_base_currency = parsed.value || null;
+            } catch (e) {
+                final_base_currency = raw_currency;
+            }
+        } else {
+            final_base_currency = raw_currency;
+        }
+    }
 
     const logo = logoFile ? `uploads/company/${logoFile.filename}` : null;
     const company_stamp = stampFile ? `uploads/company/${stampFile.filename}` : null;
 
     const sql = `
     INSERT INTO company_settings
-      (name, full_address, telephone, fax, country, logo, company_stamp)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+      (name, industry, full_address, telephone, fax, country, is_tax_registered, trn_no,
+       primary_contact_email, base_currency,
+       fiscal_year_id, fiscal_start_day, language_id, timezone_id, date_format_id,
+       logo, company_stamp, company_prefix)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `;
-    const params = [name, full_address, telephone, fax, country, logo, company_stamp];
+    const params = [
+        name, industry, full_address, telephone, fax, country, is_tax_registered === '1' ? 1 : 0, trn_no || null,
+        primary_contact_email, final_base_currency,
+        fiscal_year_id || null, fiscal_start_day || 1, language_id || null, timezone_id || null, date_format_id || null,
+        logo, company_stamp, company_prefix || null,
+    ];
 
     db.query(sql, params, (err, result) => {
         if (err) return res.status(500).json({ error: err?.sqlMessage || 'Database error' });
@@ -684,17 +755,45 @@ app.post('/api/company-settings', uploadCompany, (req, res) => {
 
 
 app.put('/api/company-settings/:id', uploadCompany, (req, res) => {
-    const { name, full_address, telephone, fax, country } = req.body;
+    const {
+        name, industry, full_address, telephone, fax, country, is_tax_registered, trn_no,
+        primary_contact_email, base_currency,
+        fiscal_year_id, fiscal_start_day, language_id, timezone_id, date_format_id, company_prefix
+    } = req.body;
     const id = req.params.id;
 
+    let final_base_currency = null;
+    const raw_currency = req.body.base_currency;
+
+    if (typeof raw_currency === 'object' && raw_currency !== null) {
+        // Case 1: It's already an object, e.g., { value: 'USD', label: '...' }
+        final_base_currency = raw_currency.value || null;
+    } else if (typeof raw_currency === 'string' && raw_currency.trim() && raw_currency !== '[object Object]') {
+        // Case 2: It's a string. It could be a primitive 'USD' or a JSON string.
+        if (raw_currency.startsWith('{') && raw_currency.endsWith('}')) {
+            try {
+                const parsed = JSON.parse(raw_currency);
+                final_base_currency = parsed.value || null;
+            } catch (e) {
+                final_base_currency = raw_currency;
+            }
+        } else {
+            final_base_currency = raw_currency;
+        }
+    }
+
     const fields = [
-        'name = ?',
-        'full_address = ?',
-        'telephone = ?',
-        'fax = ?',
-        'country = ?'
+        'name = ?', 'industry = ?', 'full_address = ?', 'telephone = ?', 'fax = ?', 'country = ?', 'is_tax_registered = ?', 'trn_no = ?',
+        'primary_contact_email = ?', 'base_currency = ?',
+        'fiscal_year_id = ?', 'fiscal_start_day = ?', 'language_id = ?', 'timezone_id = ?', 'date_format_id = ?',
+        'company_prefix = ?'
     ];
-    const values = [name, full_address, telephone, fax, country];
+    const values = [
+        name, industry, full_address, telephone, fax, country, is_tax_registered === '1' ? 1 : 0, trn_no || null,
+        primary_contact_email, base_currency,
+        fiscal_year_id || null, fiscal_start_day || 1, language_id || null, timezone_id || null, date_format_id || null,
+        company_prefix || null,
+    ];
 
     // If logo uploaded (existing behavior with base64logo)
     const logoFile = req.files?.logo?.[0] || null;
@@ -774,7 +873,7 @@ app.post('/api/email-settings', (req, res) => {
 });
 
 // Routes
-app.use('/api/email-settings', emailRoutes);
+//app.use('/api/email-settings', emailRoutes);
 
 
 //template select
@@ -990,7 +1089,6 @@ app.put("/api/vendor-contacts/:id", (req, res) => {
 });
 
 // ✅ START SERVER
-const PORT = 5658;
-app.listen(PORT, () => console.log(`🚀 Server running at http://localhost:${PORT}`));
-
-
+// server/server.js (Render)
+const PORT = process.env.PORT || 5700;
+app.listen(PORT, '0.0.0.0', () => console.log('API on', PORT));

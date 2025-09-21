@@ -77,6 +77,79 @@ const MASTER_CONFIG = {
         listOrderBy: 'type_name'
     },
 
+    /* ---------- CHART OF ACCOUNTS – DROPDOWN SOURCES ---------- */
+acc_type: {
+  table: 'acc_type',
+  id: 'id',
+  fields: [{ name: 'acc_type', type: 'string', required: true }],
+  listOrderBy: 'acc_type'
+},
+
+acc_detail_type: {
+  table: 'acc_detail_type',
+  id: 'id',
+  fields: [
+    { name: 'acc_type_id',  type: 'number', required: true }, // FK -> acc_type.id
+    { name: 'detail_type',  type: 'string', required: true },
+    { name: 'description',  type: 'string' }
+  ],
+  // Show the parent type name in list view
+  listSelect: `
+    dt.id, dt.acc_type_id, dt.detail_type, dt.description,
+    t.acc_type AS acc_type_name
+  `,
+  listFrom: `
+    acc_detail_type dt
+    LEFT JOIN acc_type t ON t.id = dt.acc_type_id
+  `,
+  listSearchIn: ['dt.detail_type', 't.acc_type'],
+  listOrderBy: 'dt.detail_type'
+},
+
+/* ---------- CHART OF ACCOUNTS (main) ---------- */
+chart_of_accounts: {
+  table: 'acc_chart_accounts',
+  id: 'id',
+  fields: [
+    // keep both IDs separately as you requested
+    { name: 'account_type_id', type: 'number', required: true }, // header type -> acc_type.id
+    { name: 'acc_type_id',    type: 'number', required: true }, // group type  -> acc_type.id
+    { name: 'acc_detail_id',  type: 'number', required: true }, // -> acc_detail_type.id
+    { name: 'name',           type: 'string', required: true },
+    { name: 'description',    type: 'string', required: true },
+    { name: 'sub_id',         type: 'boolean', default: false }, // "Is sub-account"
+    { name: 'parent_id',      type: 'number' },
+    { name: 'vat_id',         type: 'number' },
+    { name: 'balance',        type: 'number' },
+    { name: 'as_of',          type: 'date' } // yyyy-mm-dd (let UI send a date string)
+  ],
+  // nice listing with joined names for your grid
+  listSelect: `
+    cca.id,
+    cca.name,
+    cca.description,
+    cca.account_type_id,
+    cca.acc_type_id,
+    cca.acc_detail_id,
+    cca.sub_id,
+    cca.parent_id,
+    cca.vat_id,
+    cca.balance,
+    cca.as_of,
+    atH.type_name AS header_type_name,
+    atG.acc_type AS group_type_name,
+    dt.detail_type AS detail_type_name
+  `,
+  listFrom: `
+    acc_chart_accounts cca
+    LEFT JOIN account_type atH ON atH.id = cca.account_type_id
+    LEFT JOIN acc_type atG ON atG.id = cca.acc_type_id
+    LEFT JOIN acc_detail_type dt ON dt.id = cca.acc_detail_id
+  `,
+  listSearchIn: ['cca.name','cca.description','atH.acc_type','atG.acc_type','dt.detail_type'],
+  listOrderBy: 'cca.name'
+},
+
     /* ---------- INVENTORY ACCOUNT (accounts table) ---------- */
     inventory_account: {
         table: 'accounts',
@@ -138,12 +211,64 @@ const MASTER_CONFIG = {
                   listFrom: `
                  shipment_document sd
                  LEFT JOIN shipment_stage ss ON ss.id = sd.shipment_stage
-                 LEFT JOIN document_type dt ON dt.id = sd.document_type_id
-               `,
+                  LEFT JOIN document_type dt ON dt.id = sd.document_type_id`,
                    listSearchIn: ['ss.name', 'dt.name'],
                    listOrderBy: 'ss.name'
-            }
-        };
+            },
+   
+    fiscal_year: {
+        table: 'fiscal_years',
+        id: 'id',
+        fields: [{ name: 'name', type: 'string', required: true }],
+        listOrderBy: 'id'
+    },
+    language: {
+        table: 'languages',
+        id: 'id',
+        fields: [{ name: 'name', type: 'string', required: true }],
+        listOrderBy: 'name'
+    },
+    time_zone: {
+        table: 'time_zones',
+        id: 'id',
+        fields: [{ name: 'name', type: 'string', required: true }],
+        listOrderBy: 'name'
+    },
+    date_format: {
+        table: 'date_formats',
+        id: 'id',
+        fields: [
+            { name: 'format', type: 'string', required: true },
+            { name: 'example', type: 'string' }
+        ],
+        listOrderBy: 'id'
+    },
+    document_template: {
+  table: 'document_templates',
+  id: 'id',
+  fields: [
+    { name: 'name', type: 'string', required: true },
+    { name: 'content', type: 'string' },
+    { name: 'document_id', type: 'number' },
+    { name: 'template_attachment_path', type: 'string' },
+    { name: 'sign_path', type: 'string' },
+    { name: 'stamp_path', type: 'string' },
+    { name: 'updated_at', type: 'date' }
+  ],
+  listSelect: `
+    dtmpl.*,
+    dt.name AS document_name
+  `,
+  listFrom: `
+    document_templates dtmpl
+    LEFT JOIN document_type dt ON dt.id = dtmpl.document_id
+  `,
+  listSearchIn: ['dtmpl.name', 'dt.name'],
+  // ✅ remove ASC here (let the router add direction)
+  listOrderBy: 'dtmpl.name'
+}
+
+};
 
 function getCfg(type) {
     const cfg = MASTER_CONFIG[type];
@@ -160,6 +285,13 @@ function coerceField(field, value) {
     switch (field.type) {
         case 'number': return value === '' ? null : Number(value);
         case 'boolean': return value === true || value === 'true' || value === 1 || value === '1';
+        case 'date':
+            // The 'YYYY-MM-DD' string is parsed by new Date() as midnight UTC.
+            // To prevent timezone issues where it might roll back to the previous day,
+            // we set the time to noon UTC. This is a robust way to ensure the correct date is saved.
+            const d = new Date(value);
+            d.setUTCHours(12);
+            return d;
         default: return String(value);
     }
 }
@@ -182,11 +314,22 @@ router.get('/:type', (req, res, next) => {
         const page = Math.max(parseInt(req.query.page || '1', 10), 1);
         const pageSize = Math.min(Math.max(parseInt(req.query.pageSize || '25', 10), 1), 200);
         const q = (req.query.q || '').trim();
+        const all = req.query.all === '1';
 
         // JOIN-enabled path
         if (cfg.listFrom && cfg.listSelect) {
             const orderBy = cfg.listOrderBy || cfg.id;
             const { whereSql, params } = buildSearchClause(cfg.listSearchIn, q);
+
+            if (all) {
+                const dataSql = `SELECT ${cfg.listSelect} FROM ${cfg.listFrom} ${whereSql} ORDER BY ${orderBy} ASC`;
+                db.query(dataSql, params, (err, rows) => {
+                    if (err) return next(err);
+                    // For `all=1`, we return a flat array, not the {rows, total} object
+                    return res.json(rows);
+                });
+                return;
+            }
 
             const countSql = `SELECT COUNT(*) AS cnt FROM ${cfg.listFrom} ${whereSql}`;
             db.query(countSql, params, (err, cntRows) => {
@@ -213,6 +356,15 @@ router.get('/:type', (req, res, next) => {
         const orderBy = cfg.listOrderBy || cfg.id;
         const searchCols = cfg.fields?.map(f => `\`${f.name}\``) || ['`name`'];
         const { whereSql, params } = buildSearchClause(searchCols, q);
+
+        if (all) {
+            const dataSql = `SELECT * FROM \`${cfg.table}\` ${whereSql} ORDER BY \`${orderBy}\` ASC`;
+            db.query(dataSql, params, (err, rows) => {
+                if (err) return next(err);
+                return res.json(rows);
+            });
+            return;
+        }
 
         db.query(`SELECT COUNT(*) AS cnt FROM \`${cfg.table}\` ${whereSql}`, params, (err, cntRows) => {
             if (err) return next(err);

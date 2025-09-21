@@ -1,10 +1,19 @@
-import mysql from 'mysql2';
+// src/db.js
+import mysql from "mysql2";
 
 const db = mysql.createPool({
-  host: 'localhost',
-  user: 'root',
-  password: '',
-  database: 'portal_db'
+  host: process.env.DB_HOST || "localhost",
+  user: process.env.DB_USER || "root",
+  password: process.env.DB_PASSWORD || "",
+  database: process.env.DB_NAME || "portal_db",
+  port: Number(process.env.DB_PORT || 3306),
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
+
+  // keeps idle connections alive (important on Render)
+  enableKeepAlive: true,
+  keepAliveInitialDelay: 10000,
 });
 
 export default db;

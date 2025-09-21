@@ -7,6 +7,45 @@ const router = Router();
 const pick = (obj = {}, fields = []) =>
     fields.reduce((acc, k) => (obj[k] !== undefined ? (acc[k] = obj[k], acc) : acc), {});
 
+//warehouse 
+// GET /api/warehouses/:id/can-delete
+router.get('/:id/can-delete', async (req, res) => {
+  const id = Number(req.params.id);
+  if (!id) return res.status(400).json({ canDelete: false, error: 'Invalid id' });
+  try {
+    const [rows] = await db.promise().query(
+      `SELECT COUNT(*) AS c FROM inventory WHERE warehouse_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)`,
+      [id]
+    );
+    const canDelete = Number(rows?.[0]?.c || 0) === 0;
+    res.json({ canDelete, stock_count: Number(rows?.[0]?.c || 0) });
+  } catch (err) {
+    console.error('GET /api/warehouses/:id/can-delete error ->', err);
+    res.status(500).json({ canDelete: false, error: 'Failed to check inventory', detail: String(err?.message || err) });
+  }
+});
+
+// DELETE /api/warehouses/:id (server-side enforcement)
+router.delete('/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const [[exists]] = await db.promise().query('SELECT id FROM warehouses WHERE id = ?', [id]);
+        if (!exists) return res.status(404).json({ error: 'Warehouse not found' });
+
+        const [rows] = await db.promise().query('SELECT COUNT(*) AS c FROM inventory WHERE warehouse_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)', [id]);
+        if (Number(rows?.[0]?.c || 0) > 0) {
+            return res.status(409).json({ error: 'Cannot delete: warehouse still linked to inventory.' });
+        }
+
+        await db.promise().query('UPDATE warehouses SET is_inactive = 1 WHERE id = ?', [id]);
+        res.json({ message: 'Warehouse marked inactive.' });
+    } catch (err) {
+        console.error('DELETE /api/warehouses/:id error ->', err);
+        res.status(500).json({ error: 'Failed to delete warehouse', detail: String(err?.message || err) });
+    }
+});
+
+
 // GET /api/warehouses?company_id=#
 router.get('/', async (req, res) => {
     try {
@@ -95,28 +134,6 @@ router.put('/:id', async (req, res) => {
     } catch (err) {
         console.error('PUT /api/warehouses/:id error ->', err);
         res.status(500).json({ error: 'Failed to update warehouse', detail: String(err?.message || err) });
-    }
-});
-
-// DELETE /api/warehouses/:id  (soft delete)
-router.delete('/:id', async (req, res) => {
-    try {
-        const { id } = req.params;
-
-        const [[exists]] = await db.promise().query('SELECT id FROM warehouses WHERE id = ?', [id]);
-        if (!exists) return res.status(404).json({ error: 'Warehouse not found' });
-
-        await db.promise().query('UPDATE warehouses SET is_inactive = 1 WHERE id = ?', [id]);
-
-        const [[row]] = await db.promise().query(
-            'SELECT id, company_id, warehouse_name AS name, code, address, is_inactive, created_at, updated_at FROM warehouses WHERE id = ?',
-            [id]
-        );
-
-        res.json({ message: 'Warehouse marked inactive.', ...row });
-    } catch (err) {
-        console.error('DELETE /api/warehouses/:id error ->', err);
-        res.status(500).json({ error: 'Failed to delete warehouse', detail: String(err?.message || err) });
     }
 });
 
