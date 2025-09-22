@@ -154,12 +154,14 @@ router.get('/:id', async (req, res) => {
         cat.name AS category_name,
         sales_acc.name AS sales_account_name,
         purch_acc.name AS purchase_account_name,
+        mos.name as mode_of_shipment_name,
         vm.method_name AS valuation_method_name,
         creator.name   AS created_by_name
       FROM products p
       LEFT JOIN categories cat ON cat.id = p.category_id
       LEFT JOIN acc_chart_accounts sales_acc ON sales_acc.id = p.sales_account_id
       LEFT JOIN acc_chart_accounts purch_acc ON purch_acc.id = p.purchase_account_id
+      LEFT JOIN mode_of_shipment mos ON mos.id = p.mode_of_shipment_id
       LEFT JOIN valuation_methods vm ON vm.id = p.valuation_method_id
       LEFT JOIN \`user\` creator ON creator.id = p.created_by
       WHERE p.id = ?
@@ -393,6 +395,7 @@ router.post('/', uploadFields, async (req, res) => {
         const selling_currency_id  = await fkOrNull(conn, 'currency', p.selling_currency_id);
         const cost_currency_id     = await fkOrNull(conn, 'currency', p.cost_currency_id);
         const category_id          = await fkOrNull(conn, 'categories',            p.category_id);
+        const mode_of_shipment_id  = await fkOrNull(conn, 'mode_of_shipment',      p.mode_of_shipment_id);
 
         const preferred_vendor_id  = await fkOrNull(conn, 'vendor',               p.preferred_vendor_id);
         const valuation_method_id  = await fkOrNull(conn, 'valuation_methods',  p.valuation_method_id);
@@ -403,7 +406,7 @@ router.post('/', uploadFields, async (req, res) => {
 
         const [r1] = await conn.query(
             `INSERT INTO products
-       (pdt_uniqid, category_id, is_taxable,
+       (pdt_uniqid, category_id, is_taxable, mode_of_shipment_id,
         item_type, product_name, hscode, created_by,
         returnable, excise,
         enable_sales, selling_currency_id, selling_price, sales_account_id, sales_description, sales_tax_id,
@@ -411,9 +414,9 @@ router.post('/', uploadFields, async (req, res) => {
         track_inventory, track_batches, valuation_method_id, reorder_point,
         description, created_at, updated_at)
        VALUES
-       (?,?,?, ?,?,?,?,  ?,?,  ?,?,?,?,?, ?,?,  ?,?,?,?,?,?, ?,?,  ?,?,?, NOW(), NOW())`,
+       (?,?,?, ?, ?,?,?,?,  ?,?,  ?,?,?,?,?, ?,?,  ?,?,?,?,?,?, ?,?,  ?,?,?, NOW(), NOW())`,
             [
-                pdt_uniqid, category_id, readBool01(p, ['is_taxable']),
+                pdt_uniqid, category_id, readBool01(p, ['is_taxable']), mode_of_shipment_id,
 
                 read(p, ['item_type'], 'Goods'),
                 read(p, ['product_name']),
@@ -675,6 +678,7 @@ router.put('/:id', uploadFields, async (req, res) => {
         const selling_currency_id  = await fkOrNull(conn, 'currency',            p.selling_currency_id);
         const cost_currency_id     = await fkOrNull(conn, 'currency',            p.cost_currency_id);
         const category_id          = await fkOrNull(conn, 'categories',          p.category_id);
+        const mode_of_shipment_id  = await fkOrNull(conn, 'mode_of_shipment',      p.mode_of_shipment_id);
 
         const preferred_vendor_id  = await fkOrNull(conn, 'vendor',              p.preferred_vendor_id);
         const valuation_method_id  = await fkOrNull(conn, 'valuation_methods',   p.valuation_method_id);
@@ -686,6 +690,7 @@ router.put('/:id', uploadFields, async (req, res) => {
             item_type: read(p, ['item_type'], 'Goods'),
             product_name: read(p, ['product_name']),
             hscode: read(p, ['hscode'], null),
+            mode_of_shipment_id,
             returnable: readBool01(p, ['returnable']),
             excise: readBool01(p, ['excise']),
             is_taxable: readBool01(p, ['is_taxable']),
@@ -717,6 +722,7 @@ router.put('/:id', uploadFields, async (req, res) => {
         category_id=?,
         item_type=?,
         product_name=?,
+        mode_of_shipment_id=?,
         hscode=?,
         returnable=?,
         excise=?,
@@ -745,6 +751,7 @@ router.put('/:id', uploadFields, async (req, res) => {
                 category_id,
                 read(p, ['item_type'], 'Goods'),
                 read(p, ['product_name']),
+                mode_of_shipment_id,
                 read(p, ['hscode'], null),
 
                 readBool01(p, ['returnable']),
