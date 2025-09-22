@@ -154,14 +154,12 @@ router.get('/:id', async (req, res) => {
         cat.name AS category_name,
         sales_acc.name AS sales_account_name,
         purch_acc.name AS purchase_account_name,
-        inv_acc.name   AS inventory_account_name,
         vm.method_name AS valuation_method_name,
         creator.name   AS created_by_name
       FROM products p
       LEFT JOIN categories cat ON cat.id = p.category_id
       LEFT JOIN acc_chart_accounts sales_acc ON sales_acc.id = p.sales_account_id
       LEFT JOIN acc_chart_accounts purch_acc ON purch_acc.id = p.purchase_account_id
-      LEFT JOIN acc_chart_accounts inv_acc   ON inv_acc.id = p.inventory_account_id
       LEFT JOIN valuation_methods vm ON vm.id = p.valuation_method_id
       LEFT JOIN \`user\` creator ON creator.id = p.created_by
       WHERE p.id = ?
@@ -392,7 +390,6 @@ router.post('/', uploadFields, async (req, res) => {
         // Validate FKs (stay consistent with your table names)
         const sales_account_id     = await fkOrNull(conn, 'acc_chart_accounts',    p.sales_account_id);
         const purchase_account_id  = await fkOrNull(conn, 'acc_chart_accounts',    p.purchase_account_id);
-        const inventory_account_id = await fkOrNull(conn, 'acc_chart_accounts',    p.inventory_account_id);
         const selling_currency_id  = await fkOrNull(conn, 'currency', p.selling_currency_id);
         const cost_currency_id     = await fkOrNull(conn, 'currency', p.cost_currency_id);
         const category_id          = await fkOrNull(conn, 'categories',            p.category_id);
@@ -406,17 +403,17 @@ router.post('/', uploadFields, async (req, res) => {
 
         const [r1] = await conn.query(
             `INSERT INTO products
-       (pdt_uniqid, category_id,
+       (pdt_uniqid, category_id, is_taxable,
         item_type, product_name, hscode, created_by,
         returnable, excise,
         enable_sales, selling_currency_id, selling_price, sales_account_id, sales_description, sales_tax_id,
         enable_purchase, cost_currency_id, cost_price, purchase_account_id, purchase_tax_id, purchase_description, preferred_vendor_id,
-        track_inventory, track_batches, inventory_account_id, valuation_method_id, reorder_point,
+        track_inventory, track_batches, valuation_method_id, reorder_point,
         description, created_at, updated_at)
        VALUES
-       (?,?,?,?,?,  ?,?,  ?,?,?,?,?, ?,?,  ?,?,?,?,?,?, ?,?,  ?,?,?,?, ?, NOW(), NOW())`,
+       (?,?,?, ?,?,?,?,  ?,?,  ?,?,?,?,?, ?,?,  ?,?,?,?,?,?, ?,?,  ?,?,?, ?, NOW(), NOW())`,
             [
-                pdt_uniqid, category_id,
+                pdt_uniqid, category_id, readBool01(p, ['is_taxable']),
 
                 read(p, ['item_type'], 'Goods'),
                 read(p, ['product_name']),
@@ -443,7 +440,6 @@ router.post('/', uploadFields, async (req, res) => {
 
                 readBool01(p, ['track_inventory']),
                 readBool01(p, ['track_batches']),
-                inventory_account_id,
                 valuation_method_id,
                 readNum(p, ['reorder_point'], null),
 
@@ -606,7 +602,7 @@ function getChangedFields(oldValues, newValues) {
     const keysToCompare = Object.keys(newValues);
 
     const numericFields = ['selling_price', 'cost_price', 'reorder_point'];
-    const booleanFields = ['returnable', 'excise', 'enable_sales', 'enable_purchase', 'track_inventory', 'track_batches'];
+    const booleanFields = ['returnable', 'excise', 'is_taxable', 'enable_sales', 'enable_purchase', 'track_inventory', 'track_batches'];
 
     for (const key of keysToCompare) {
         const oldValue = oldValues[key];
@@ -676,7 +672,6 @@ router.put('/:id', uploadFields, async (req, res) => {
         // ----- Validate FKs (stay consistent with your table names) -----
         const sales_account_id     = await fkOrNull(conn, 'acc_chart_accounts',    p.sales_account_id);
         const purchase_account_id  = await fkOrNull(conn, 'acc_chart_accounts',    p.purchase_account_id);
-        const inventory_account_id = await fkOrNull(conn, 'acc_chart_accounts',    p.inventory_account_id);
         const selling_currency_id  = await fkOrNull(conn, 'currency',            p.selling_currency_id);
         const cost_currency_id     = await fkOrNull(conn, 'currency',            p.cost_currency_id);
         const category_id          = await fkOrNull(conn, 'categories',          p.category_id);
@@ -693,6 +688,7 @@ router.put('/:id', uploadFields, async (req, res) => {
             hscode: read(p, ['hscode'], null),
             returnable: readBool01(p, ['returnable']),
             excise: readBool01(p, ['excise']),
+            is_taxable: readBool01(p, ['is_taxable']),
             enable_sales: readBool01(p, ['enable_sales']),
             selling_currency_id,
             selling_price: readNum(p, ['selling_price'], null),
@@ -708,7 +704,6 @@ router.put('/:id', uploadFields, async (req, res) => {
             preferred_vendor_id,
             track_inventory: readBool01(p, ['track_inventory']),
             track_batches: readBool01(p, ['track_batches']),
-            inventory_account_id,
             valuation_method_id,
             reorder_point: readNum(p, ['reorder_point'], null),
             description: read(p, ['description'], null),
@@ -725,6 +720,7 @@ router.put('/:id', uploadFields, async (req, res) => {
         hscode=?,
         returnable=?,
         excise=?,
+        is_taxable=?,
         enable_sales=?,
         selling_currency_id=?,
         selling_price=?,
@@ -740,7 +736,6 @@ router.put('/:id', uploadFields, async (req, res) => {
         preferred_vendor_id=?,
         track_inventory=?,
         track_batches=?,
-        inventory_account_id=?,
         valuation_method_id=?,
         reorder_point=?,
         description=?,
@@ -754,6 +749,7 @@ router.put('/:id', uploadFields, async (req, res) => {
 
                 readBool01(p, ['returnable']),
                 readBool01(p, ['excise']),
+                readBool01(p, ['is_taxable']),
 
                 readBool01(p, ['enable_sales']),
                 selling_currency_id,
@@ -772,7 +768,6 @@ router.put('/:id', uploadFields, async (req, res) => {
 
                 readBool01(p, ['track_inventory']),
                 readBool01(p, ['track_batches']),
-                inventory_account_id,
                 valuation_method_id,
                 readNum(p, ['reorder_point'], null),
 
