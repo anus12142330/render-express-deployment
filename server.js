@@ -16,6 +16,7 @@ import uomRoutes from './routes/uom.js';
 import statusRoutes from './routes/status.js';
 import termsconditionRoutes from './routes/termscondition.js';
 import taxesRoutes from './routes/taxes.js';
+import purchasebillRoutes from './routes/purchasebill.js';
 import shipmentRoutes from './routes/shipment.js';
 import proformaRoutes from './routes/proforma.js';
 import documentTypeRoutes from './routes/documentType.js';
@@ -34,10 +35,14 @@ import masterRoutes from "./routes/master.js";
 import warehousesRoutes from "./routes/warehouses.js";
 import router from "./routes/customer.js"; // ✅ ES module import
 import uploadRoutes from "./routes/upload.js";
+import rbacRoutes from './routes/rbac.js';
 import db from "./db.js";
 import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+import { requireAuth, requirePerm } from './middleware/authz.js';
 
+// Helper function to run queries with promises and return rows
+const q = async (sql, p = []) => (await db.promise().query(sql, p))[0];
 
 const app = express();
 app.use(cors());
@@ -144,6 +149,7 @@ app.use("/api/incoterms", incoRoutes);
 app.use("/api/uoms", uomRoutes);
 app.use("/api/termscondition", termsconditionRoutes);
 app.use("/api/taxes", taxesRoutes);
+app.use("/api/purchase-bills", purchasebillRoutes);
 app.use("/api/status", statusRoutes);
 app.use("/api/shipment", shipmentRoutes);
 app.use("/api/document-types", documentTypeRoutes);
@@ -160,6 +166,50 @@ app.use("/api/manufacture", manufactureRoutes);
 app.use("/api/master", masterRoutes);
 app.use("/api/warehouses", warehousesRoutes);
 app.use('/api/upload', uploadRoutes);
+app.use('/api/rbac', rbacRoutes);
+
+//Role permission
+app.get('/api/me', requireAuth, async (req, res) => {
+  const sessionUser = req.session?.user || null;
+  if (!sessionUser) return res.status(401).json({ user: null });
+
+  // Enrich user with roles to make client-side `isAdmin` checks work
+  const roleRows = await q(`
+    SELECT r.name FROM role r JOIN user_role ur ON ur.role_id = r.id WHERE ur.user_id = ?
+  `, [sessionUser.id]);
+
+  const userWithRoles = {
+    ...sessionUser,
+    roles: roleRows.map(r => r.name) // e.g., ['Admin', 'Manager']
+  };
+  res.json({ user: userWithRoles });
+});
+
+
+
+
+app.get('/api/me/permissions', requireAuth, async (req, res) => {
+  const userId = req.user.id;// or JWT subject
+  if(!userId) return res.status(401).json({});
+
+  console.log(`[PERMISSIONS] Fetching for user ID: ${userId}`);
+
+  const rows = await q(`
+    SELECT m.key_name AS module_key, a.key_name AS action_key, MAX(rp.allowed) AS allowed
+    FROM user_role ur
+    JOIN role_permission rp ON rp.role_id = ur.role_id
+    JOIN menu_module m ON m.id = rp.module_id
+    JOIN permission_action a ON a.id = rp.action_id
+    WHERE ur.user_id = ?
+    GROUP BY m.key_name, a.key_name
+  `,[userId]);
+
+  console.log(`[PERMISSIONS] Found ${rows.length} permission entries for user ID: ${userId}`);
+
+  const out = {};
+  rows.forEach(r => { (out[r.module_key] ||= {})[r.action_key] = r.allowed === 1; });
+  res.json(out);
+});
 
 
 // ✅ GET ALL USERS

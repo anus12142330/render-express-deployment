@@ -64,12 +64,16 @@ router.get('/', async (req, res) => {
 
         if (search) {
             conds.push(`(
-        COALESCE(p.product_name, '') LIKE ? OR
-        COALESCE(c.name, '')         LIKE ? OR
-        COALESCE(p.hscode, '')       LIKE ?
-      )`);
+                COALESCE(p.product_name, '') LIKE ? OR
+                COALESCE(c.name, '')         LIKE ? OR
+                COALESCE(p.hscode, '')       LIKE ? OR
+                EXISTS (
+                    SELECT 1 FROM product_details pd 
+                    WHERE pd.product_id = p.id AND pd.packing_alias LIKE ?
+                )
+            )`);
             const s = `%${search}%`;
-            params.push(s, s, s);
+            params.push(s, s, s, s);
         }
 
         if (inStockOnly) {
@@ -83,12 +87,23 @@ router.get('/', async (req, res) => {
 
         const whereSql = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
 
+        const sortableFields = {
+            'name': 'p.product_name',
+            'category': 'c.name',
+            'hscode': 'p.hscode',
+            // Note: stock and reorder_point are calculated or not directly on the `products` table, making them harder to sort efficiently.
+        };
+        const sortField = sortableFields[req.query.sort_field] || 'p.product_name';
+        const sortOrder = (String(req.query.sort_order).toLowerCase() === 'desc') ? 'DESC' : 'ASC';
+
         const rows = await q(
             `
                 SELECT
                     p.id,
                     p.pdt_uniqid AS uniqid,
+                    p.item_type,
                     COALESCE(p.product_name, '') AS name,
+                    p.category_id,
                     c.name as category_name,
                     p.reorder_point,
                     COALESCE(p.hscode, '') AS hscode,
@@ -105,24 +120,43 @@ router.get('/', async (req, res) => {
                         ORDER BY i.is_primary DESC, i.id ASC
                         LIMIT 1
                     ) AS image_url
+                    ,
+                    (
+                        SELECT pd.packing_alias
+                        FROM product_details pd 
+                        WHERE pd.product_id = p.id ORDER BY pd.id ASC LIMIT 1
+                    ) as packing_alias,
+                    (
+                        SELECT pd.packing_text
+                        FROM product_details pd
+                        WHERE pd.product_id = p.id ORDER BY pd.id ASC LIMIT 1
+                    ) as packing_text
  -- pk.name AS packing_name
                 FROM products p
                 LEFT JOIN categories c ON c.id = p.category_id
                     ${whereSql}        -- <- WHERE should come AFTER joins
-                ORDER BY name ASC
-                    LIMIT ? OFFSET ?
+                ORDER BY ${sortField} ${sortOrder}
+                LIMIT ? OFFSET ?
       `,
             [...params, limit, offset]
         );
 
-        const totalRows = (await q(`SELECT COUNT(*) AS c FROM products p ${whereSql}`, params))[0]?.c || 0;
+        const totalRows = (await q(
+            `SELECT COUNT(*) AS c FROM products p 
+             LEFT JOIN categories c ON c.id = p.category_id 
+             ${whereSql}`,
+            params))[0]?.c || 0;
 
         res.json({
             data: rows.map(r => ({
                 id: r.id,
                 uniqid: r.uniqid || null,
                 name: r.name,
+                packing_text: r.packing_text || null,
+                item_type: r.item_type || 'Goods',
+                packing_alias: r.packing_alias || null,
                 category: r.category_name || '',
+                category_id: r.category_id || null,
                 reorder_point: r.reorder_point,
                 hscode: r.hscode || '',
                 unit_price: 0,
@@ -1034,8 +1068,8 @@ router.get('/:id/packings', async (req, res) => {
         const data = rows.map(r => ({
             id: r.id,
             origin_country_id: r.origin_id ?? '',
-            origin_name:r.origin_name ?? '',
-            packing_id: r.packing_text || '',
+            origin_name: r.origin_name ?? '',
+            packing_text: r.packing_text || '',
             dimensions: r.dimensions || '',
             dim_unit: r.dim_unit || 'cm',
             net_weight: r.net_wt != null ? String(r.net_wt) : '',
