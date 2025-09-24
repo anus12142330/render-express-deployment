@@ -43,6 +43,7 @@ const relPath = (full) => `/uploads/product/${path.basename(full)}`;
 router.get('/', async (req, res) => {
     try {
         const search = String(req.query.search || '').trim();
+        const categoryFilterId = req.query.category ? Number(req.query.category) : null;
         const inStockOnly = ['1', 'true', 1, true].includes(req.query.in_stock_only);
 
         const asInt = (v, def, min = 0, max = 1000000000) => {
@@ -83,6 +84,27 @@ router.get('/', async (req, res) => {
         WHERE s.product_id = p.id
           AND COALESCE(s.qty, 0) > 0
       )`);
+        }
+
+        if (categoryFilterId) {
+            // To filter by a category and all its descendants, we first fetch the hierarchy.
+            const allCategories = await q('SELECT id, parent_id FROM categories');
+            const childIds = new Set();
+
+            const findChildrenRecursive = (parentId) => {
+                const children = allCategories.filter(c => c.parent_id === parentId);
+                for (const child of children) {
+                    if (!childIds.has(child.id)) {
+                        childIds.add(child.id);
+                        findChildrenRecursive(child.id);
+                    }
+                }
+            };
+
+            findChildrenRecursive(categoryFilterId);
+            const idsToFilter = [categoryFilterId, ...Array.from(childIds)];
+            conds.push(`p.category_id IN (?)`);
+            params.push(idsToFilter);
         }
 
         const whereSql = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
@@ -131,6 +153,14 @@ router.get('/', async (req, res) => {
                         FROM product_details pd
                         WHERE pd.product_id = p.id ORDER BY pd.id ASC LIMIT 1
                     ) as packing_text
+                    ,
+                    (
+                        SELECT um.name
+                        FROM product_details pd_uom
+                        JOIN uom_master um ON um.id = pd_uom.uom_id
+                        WHERE pd_uom.product_id = p.id AND pd_uom.uom_id IS NOT NULL
+                        ORDER BY pd_uom.id ASC LIMIT 1
+                    ) as uom
  -- pk.name AS packing_name
                 FROM products p
                 LEFT JOIN categories c ON c.id = p.category_id
@@ -160,8 +190,9 @@ router.get('/', async (req, res) => {
                 reorder_point: r.reorder_point,
                 hscode: r.hscode || '',
                 unit_price: 0,
-                stock: Number(r.stock || 0),
-                image_url: r.image_url || null
+                stock_on_hand: Number(r.stock || 0),
+                image_url: r.image_url || null,
+                uom: r.uom || ''
             })),
             totalRows
         });
