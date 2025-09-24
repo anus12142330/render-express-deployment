@@ -22,6 +22,16 @@ const MASTER_CONFIG = {
         listOrderBy: 'brand_name'
     },
 
+    uom: {
+        table: 'uom_master',
+        id: 'id',
+        fields: [
+            { name: 'name', type: 'string', required: true },
+            { name: 'acronyms', type: 'string', required: true }
+        ],
+        listOrderBy: 'name'
+    },
+
     category: {
         table: 'categories',
         id: 'id',

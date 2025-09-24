@@ -108,6 +108,18 @@ router.get('/next-bill-number', requireAuth, async (req, res) => {
     }
 });
 
+// GET payment terms
+router.get('/payment-terms', requireAuth, async (req, res) => {
+    try {
+        // Assuming a table named 'payment_terms' exists
+        const [terms] = await db.promise().query('SELECT id, name FROM payment_terms ORDER BY name');
+        res.json(terms);
+    } catch (err) {
+        console.error('Error fetching payment terms:', err);
+        res.status(500).json({ error: 'Failed to fetch payment terms' });
+    }
+});
+
 // GET pre-filled bill data from a specific Purchase Order
 router.get('/from-po/:poId', requireAuth, async (req, res) => {
     const { poId } = req.params;
@@ -144,6 +156,10 @@ router.get('/from-po/:poId', requireAuth, async (req, res) => {
             JOIN products p ON p.id = poi.item_id
             WHERE poi.purchase_order_id = ?
         `, [poId]);
+
+        // Add the current date as the default bill_date
+        const today = new Date().toISOString().slice(0, 10);
+        po.bill_date = today;
 
         res.json({ po, items });
     } catch (err) {
