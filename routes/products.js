@@ -4,6 +4,7 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
+import sharp from 'sharp';
 import db from '../db.js';
 
 const router = Router();
@@ -11,7 +12,9 @@ const router = Router();
 // ---------- uploads/product (multer) ----------
 const ensureDir = (p) => { if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true }); };
 const UP_DIR = path.join(process.cwd(), 'uploads', 'product');
+const THUMB_DIR = path.join(UP_DIR, 'thumbnail');
 ensureDir(UP_DIR);
+ensureDir(THUMB_DIR);
 
 const storage = multer.diskStorage({
     destination: (_req, _file, cb) => cb(null, UP_DIR),
@@ -35,7 +38,10 @@ const q = async (sql, params = []) => (await db.promise().query(sql, params))[0]
 const read = (b, keys, def = '') => { for (const k of keys) if (b[k] !== undefined) return b[k]; return def; };
 const readNum = (b, keys, def = 0) => { const v = read(b, keys, def); const n = Number(v); return Number.isFinite(n) ? n : def; };
 const readBool01 = (b, keys) => { const v = read(b, keys, 0); return (v === 1 || v === '1' || v === true || v === 'true') ? 1 : 0; };
-const relPath = (full) => `/uploads/product/${path.basename(full)}`;
+const relPath = (full, isThumb = false) => {
+    const base = path.basename(full);
+    return isThumb ? `/uploads/product/thumbnail/${base}` : `/uploads/product/${base}`;
+};
 
 // ==================================================
 // GET /api/products  (list with search/sort/pager)
@@ -144,6 +150,14 @@ router.get('/', async (req, res) => {
                     ) AS image_url
                     ,
                     (
+                        SELECT i.thumbnail_path
+                        FROM product_images i
+                        WHERE i.product_id = p.id
+                        ORDER BY i.is_primary DESC, i.id ASC
+                        LIMIT 1
+                    ) AS thumbnail_url
+                    ,
+                    (
                         SELECT pd.packing_alias
                         FROM product_details pd 
                         WHERE pd.product_id = p.id ORDER BY pd.id ASC LIMIT 1
@@ -192,6 +206,7 @@ router.get('/', async (req, res) => {
                 unit_price: 0,
                 stock_on_hand: Number(r.stock || 0),
                 image_url: r.image_url || null,
+                thumbnail_url: r.thumbnail_url || r.image_url || null,
                 uom: r.uom || ''
             })),
             totalRows
@@ -238,7 +253,7 @@ router.get('/:id', async (req, res) => {
 
         // 2) images (unchanged)
         const images = (await q(
-            `SELECT id, file_path, is_primary
+            `SELECT id, file_path, thumbnail_path, is_primary
        FROM product_images
        WHERE product_id=?
        ORDER BY is_primary DESC, id ASC`,
@@ -599,20 +614,28 @@ router.post('/', uploadFields, async (req, res) => {
             ...(req.files?.['new_images[]'] || req.files?.['new_images'] || []),
         ];
         if (files.length) {
-            const existPrimary =
-                (await conn.query(
-                    'SELECT COUNT(*) AS c FROM product_images WHERE product_id=? AND is_primary=1',
-                    [productId]
-                ))[0][0].c > 0;
+            const [[{ c: existingPrimaryCount }]] = await conn.query(
+                'SELECT COUNT(*) AS c FROM product_images WHERE product_id=? AND is_primary=1',
+                [productId]
+            );
 
-            let primarySet = existPrimary;
+            let primarySet = existingPrimaryCount > 0;
             const now = new Date();
-            const vals = files.map((f, i) => {
+
+            const imageInsertData = await Promise.all(files.map(async (f, i) => {
+                const thumbName = `thumb_${f.filename}`;
+                const thumbDiskPath = path.join(THUMB_DIR, thumbName);
+                await sharp(f.path)
+                    .resize(200, 200, { fit: 'inside', withoutEnlargement: true })
+                    .toFile(thumbDiskPath);
+
                 const is_primary = primarySet ? 0 : (i === 0 ? 1 : 0);
                 if (!primarySet && is_primary === 1) primarySet = true;
+                
                 return [
                     productId,
                     relPath(f.path),
+                    relPath(thumbDiskPath),
                     is_primary,
                     f.originalname || null,
                     f.mimetype || null,
@@ -620,13 +643,12 @@ router.post('/', uploadFields, async (req, res) => {
                     i,
                     now,
                 ];
-            });
+            }));
 
             await conn.query(
-                `INSERT INTO product_images
-         (product_id, file_path, is_primary, original_name, mime_type, size_bytes, sort_order, created_at)
+                `INSERT INTO product_images (product_id, file_path, thumbnail_path, is_primary, original_name, mime_type, size_bytes, sort_order, created_at)
          VALUES ?`,
-                [vals]
+                [imageInsertData]
             );
         }
 
@@ -979,29 +1001,38 @@ router.put('/:id', uploadFields, async (req, res) => {
         ];
 
         if (files.length) {
-            const vals = files.map((f, i) => ([
-                productId,
-                relPath(f.path),                   // keep original extension already handled by your storage config
-                0,                                 // is_primary set later in step 3
-                f.originalname || null,
-                f.mimetype || null,
-                f.size || null,
-                i,                                 // sort_order for new ones
-                now,
-            ]));
+            const imageInsertData = await Promise.all(files.map(async (f, i) => {
+                const thumbName = `thumb_${f.filename}`; // Keep same name logic
+                const thumbDiskPath = path.join(THUMB_DIR, thumbName); // Save to thumb dir
+                await sharp(f.path)
+                    .resize(200, 200, { fit: 'inside', withoutEnlargement: true })
+                    .toFile(thumbDiskPath);
+
+                return [
+                    productId,
+                    relPath(f.path),
+                    relPath(thumbDiskPath, true), // Use the new relPath logic
+                    0, // is_primary is handled later
+                    f.originalname || null,
+                    f.mimetype || null,
+                    f.size || null,
+                    i,
+                    now,
+                ];
+            }));
 
             await conn.query(
                 `INSERT INTO product_images
-          (product_id, file_path, is_primary, original_name, mime_type, size_bytes, sort_order, created_at)
+          (product_id, file_path, thumbnail_path, is_primary, original_name, mime_type, size_bytes, sort_order, created_at)
          VALUES ?`,
-                [vals]
+                [imageInsertData]
             );
         }
 
         // 3) ensure there is exactly one primary
         //    - if requestedPrimaryId exists (and belongs to this product), set it
         //    - else if none primary exists, pick the first by sort_order (or lowest id)
-        const [[{ c: primCount }]] = await conn.query(
+        const [[{ c: primCount }]] = await conn.query( // This check is not strictly needed anymore but is harmless
             'SELECT COUNT(*) AS c FROM product_images WHERE product_id=? AND is_primary=1',
             [productId]
         );
@@ -1044,6 +1075,39 @@ router.put('/:id', uploadFields, async (req, res) => {
          LIMIT 1`,
                 [productId]
             );
+        }
+
+        // ----- Thumbnail Generation for Existing Images -----
+        // After all other updates, check if any existing images are missing thumbnails.
+        const [imagesWithoutThumbnails] = await conn.query(
+            `SELECT id, file_path FROM product_images WHERE product_id = ? AND (thumbnail_path IS NULL OR thumbnail_path = '')`,
+            [productId]
+        );
+
+        if (imagesWithoutThumbnails.length > 0) {
+            for (const image of imagesWithoutThumbnails) {
+                try {
+                    const originalRelativePath = image.file_path;
+                    if (!originalRelativePath) continue;
+
+                    const originalFileName = path.basename(originalRelativePath);
+                    const originalDiskPath = path.join(UP_DIR, originalFileName);
+
+                    if (fs.existsSync(originalDiskPath)) {
+                        const thumbName = `thumb_${originalFileName}`;
+                        const thumbDiskPath = path.join(THUMB_DIR, thumbName);
+
+                        await sharp(originalDiskPath)
+                            .resize(200, 200, { fit: 'inside', withoutEnlargement: true })
+                            .toFile(thumbDiskPath);
+
+                        const thumbRelativePath = relPath(thumbDiskPath, true);
+                        await conn.query(`UPDATE product_images SET thumbnail_path = ? WHERE id = ?`, [thumbRelativePath, image.id]);
+                    }
+                } catch (thumbError) {
+                    console.error(`Failed to generate thumbnail for image ID ${image.id}:`, thumbError);
+                }
+            }
         }
 
         await conn.commit();
@@ -1141,11 +1205,17 @@ router.post('/:id/images', uploadFields, async (req, res) => {
     ];
     try {
         const count = (await q(`SELECT COUNT(*) c FROM product_images WHERE product_id=?`, [id]))[0]?.c || 0;
-        for (let i = 0; i < files.length; i++) {
+        for (const [i, file] of files.entries()) {
+            const thumbName = `thumb_${file.filename}`; // Keep same name logic
+            const thumbDiskPath = path.join(THUMB_DIR, thumbName); // Save to thumb dir
+            await sharp(file.path)
+                .resize(200, 200, { fit: 'inside', withoutEnlargement: true })
+                .toFile(thumbDiskPath);
+
             await q(
-                `INSERT INTO product_images (product_id, file_path, is_primary, created_at)
-         VALUES (?, ?, ?, NOW())`,
-                [id, relPath(files[i].path), (count === 0 && i === 0) ? 1 : 0]
+                `INSERT INTO product_images (product_id, file_path, thumbnail_path, is_primary, created_at)
+                 VALUES (?, ?, ?, ?, NOW())`,
+                [id, relPath(file.path), relPath(thumbDiskPath, true), (count === 0 && i === 0) ? 1 : 0]
             );
         }
         res.json({ success: true, added: files.length });

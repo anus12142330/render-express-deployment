@@ -19,7 +19,10 @@ const MASTER_CONFIG = {
             { name: 'brand_name', type: 'string', required: true },
             { name: 'manufacture_name', type: 'string' }
         ],
-        listOrderBy: 'brand_name'
+        listOrderBy: 'brand_name',
+        inUseChecks: [
+            { table: 'product_details', field: 'brand_id', message: 'in use by products' }
+        ]
     },
 
     uom: {
@@ -29,7 +32,10 @@ const MASTER_CONFIG = {
             { name: 'name', type: 'string', required: true },
             { name: 'acronyms', type: 'string', required: true }
         ],
-        listOrderBy: 'name'
+        listOrderBy: 'name',
+        inUseChecks: [
+            { table: 'product_details', field: 'uom_id', message: 'in use by products' }
+        ]
     },
 
     category: {
@@ -48,7 +54,11 @@ const MASTER_CONFIG = {
             LEFT JOIN categories p ON p.id = c.parent_id
         `,
         listSearchIn: ['c.name', 'p.name'],
-        listOrderBy: 'c.name'
+        listOrderBy: 'c.name',
+        inUseChecks: [
+            { table: 'products', field: 'category_id', message: 'in use by products' },
+           // { table: 'categories', field: 'parent_id', message: 'in use as a parent category' }
+        ]
     },
 
     tax_treatment: {
@@ -345,12 +355,26 @@ router.get('/:type', (req, res, next) => {
         const q = (req.query.q || '').trim();
         const all = req.query.all === '1';
 
+        // --- In-use check subquery ---
+        const inUseChecks = cfg.inUseChecks || [];
+        let inUseSubQuery = 'FALSE';
+        if (inUseChecks.length > 0) {
+            // Assuming the main table has an alias which is the first part of the first search column
+            const mainTableAlias = cfg.listFrom ? (cfg.listSearchIn?.[0]?.split('.')[0] || 'c') : `\`${cfg.table}\``;
+            const subQueries = inUseChecks.map(check =>
+                `(EXISTS (SELECT 1 FROM \`${check.table}\` WHERE \`${check.field}\` = ${mainTableAlias}.\`${cfg.id}\`))`
+            );
+            inUseSubQuery = subQueries.join(' OR ');
+        }
+        const inUseSelect = `, (${inUseSubQuery}) AS in_use`;
+
         // JOIN-enabled path
         if (cfg.listFrom && cfg.listSelect) {
             const orderBy = cfg.listOrderBy || cfg.id;
             // Ignore search query `q` when `all` is requested for dropdowns
             const { whereSql, params } = buildSearchClause(cfg.listSearchIn, all ? '' : q);
 
+            // For dropdowns, we don't need the in_use check.
             if (all) {
                 const dataSql = `SELECT ${cfg.listSelect} FROM ${cfg.listFrom} ${whereSql} ORDER BY ${orderBy} ASC`;
                 db.query(dataSql, params, (err, rows) => {
@@ -368,7 +392,7 @@ router.get('/:type', (req, res, next) => {
 
                 const offset = (page - 1) * pageSize;
                 const dataSql = `
-          SELECT ${cfg.listSelect}
+          SELECT ${cfg.listSelect} ${inUseSelect}
           FROM ${cfg.listFrom}
           ${whereSql}
           ORDER BY ${orderBy} ASC
@@ -388,6 +412,7 @@ router.get('/:type', (req, res, next) => {
         // Ignore search query `q` when `all` is requested for dropdowns
         const { whereSql, params } = buildSearchClause(searchCols, all ? '' : q);
 
+        // For dropdowns, we don't need the in_use check.
         if (all) {
             const dataSql = `SELECT * FROM \`${cfg.table}\` ${whereSql} ORDER BY \`${orderBy}\` ASC`;
             db.query(dataSql, params, (err, rows) => {
@@ -403,7 +428,7 @@ router.get('/:type', (req, res, next) => {
 
             const offset = (page - 1) * pageSize;
             db.query(
-                `SELECT * FROM \`${cfg.table}\` ${whereSql} ORDER BY \`${orderBy}\` ASC LIMIT ? OFFSET ?`,
+                `SELECT * ${inUseSelect} FROM \`${cfg.table}\` ${whereSql} ORDER BY \`${orderBy}\` ASC LIMIT ? OFFSET ?`,
                 [...params, pageSize, offset],
                 (err2, rows) => {
                     if (err2) return next(err2);
@@ -476,13 +501,31 @@ router.put('/:type/:id', (req, res, next) => {
 
 /* ----------------------------- DELETE ----------------------------- */
 // DELETE /api/master/:type/:id
-router.delete('/:type/:id', (req, res, next) => {
+router.delete('/:type/:id', async (req, res, next) => {
     try {
         const cfg = getCfg(req.params.type);
-        db.query(`DELETE FROM \`${cfg.table}\` WHERE \`${cfg.id}\`=?`, [req.params.id], (err) => {
-            if (err) return next(err);
-            res.json({ success: true });
-        });
+        const { id } = req.params;
+
+        // In-use checks
+        if (Array.isArray(cfg.inUseChecks)) {
+            for (const check of cfg.inUseChecks) {
+                const { table, field, message } = check;
+                // eslint-disable-next-line no-await-in-loop
+                const [inUseRows] = await db.promise().query(
+                    `SELECT \`${field}\` FROM \`${table}\` WHERE \`${field}\` = ? LIMIT 1`,
+                    [id]
+                );
+                if (inUseRows.length > 0) {
+                    const err = new Error(`Cannot delete. This record is ${message || 'in use'}.`);
+                    err.status = 400;
+                    throw err;
+                }
+            }
+        }
+
+        await db.promise().query(`DELETE FROM \`${cfg.table}\` WHERE \`${cfg.id}\`=?`, [id]);
+
+        res.json({ success: true });
     } catch (e) { next(e); }
 });
 
