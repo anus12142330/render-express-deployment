@@ -267,7 +267,6 @@ app.get('/api/login-debug', (req, res) => {
   );
 });
 
-
 app.post('/api/login', (req, res) => {
  
   const email = String(req.body?.email ?? '').trim();

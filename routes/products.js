@@ -116,12 +116,13 @@ router.get('/', async (req, res) => {
         const whereSql = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
 
         const sortableFields = {
+            'id': 'p.id',
             'name': 'p.product_name',
             'category': 'c.name',
             'hscode': 'p.hscode',
             // Note: stock and reorder_point are calculated or not directly on the `products` table, making them harder to sort efficiently.
         };
-        const sortField = sortableFields[req.query.sort_field] || 'p.product_name';
+        const sortField = sortableFields[req.query.sort_field] || 'p.id';
         const sortOrder = (String(req.query.sort_order).toLowerCase() === 'desc') ? 'DESC' : 'ASC';
 
         const rows = await q(
@@ -222,9 +223,12 @@ router.get('/', async (req, res) => {
 // ==================================================
 // GET /api/products/:id (details + images + opening + dimension_rows + origins array)
 // ==================================================
-router.get('/:id', async (req, res) => {
-    const { id } = req.params;
+router.get('/:identifier', async (req, res) => {
+    const { identifier } = req.params;
     try {
+        const isNumericId = /^\d+$/.test(identifier);
+        const whereField = isNumericId ? 'p.id' : 'p.pdt_uniqid';
+
         // 1) main product
         const rows = await q(
             `
@@ -243,12 +247,13 @@ router.get('/:id', async (req, res) => {
       LEFT JOIN mode_of_shipment mos ON mos.id = p.mode_of_shipment_id
       LEFT JOIN valuation_methods vm ON vm.id = p.valuation_method_id
       LEFT JOIN \`user\` creator ON creator.id = p.created_by
-      WHERE p.id = ?
+      WHERE ${whereField} = ?
       `,
-            [id]
+            [identifier]
         );
         if (!rows.length) return res.status(404).json({ error: 'Not found' });
         const product = rows[0];
+        const productId = product.id; // Use the numeric ID for subsequent queries
 
         // 2) images (unchanged)
         const images = (await q(
@@ -256,7 +261,7 @@ router.get('/:id', async (req, res) => {
        FROM product_images
        WHERE product_id=?
        ORDER BY is_primary DESC, id ASC`,
-            [id]
+            [productId]
         )).map(r => ({ ...r, file_path: r.file_path }));
 
         // 3) opening stocks (unchanged)
@@ -270,7 +275,7 @@ router.get('/:id', async (req, res) => {
          ON s.warehouse_id=w.id AND s.product_id=?
        WHERE w.is_inactive = 0
        ORDER BY w.warehouse_name`,
-            [id]
+            [productId]
         );
 
         const openingStocksForEdit = await q(
@@ -283,7 +288,7 @@ router.get('/:id', async (req, res) => {
             JOIN warehouses w ON w.id = s.warehouse_id
             WHERE s.product_id = ?
             ORDER BY w.warehouse_name`,
-            [id]
+            [productId]
         );
 
         // 4) dimension rows  (JOIN packing IF available; otherwise drop the join)
@@ -317,7 +322,7 @@ router.get('/:id', async (req, res) => {
       WHERE d.product_id=?
       ORDER BY d.id ASC
       `,
-            [id]
+            [productId]
         );
 
         // 5) normalize for frontend (keep field names the UI expects)
@@ -369,7 +374,7 @@ router.get('/:id', async (req, res) => {
              LEFT JOIN user u ON u.id = ph.user_id
              WHERE ph.product_id = ?
              ORDER BY ph.created_at DESC`,
-            [id]
+            [productId]
         );
 
         res.json({
@@ -538,47 +543,49 @@ router.post('/', uploadFields, async (req, res) => {
         // ---- product_details ----
         // ---- product_details ----
         const rows = parseJSON(p, 'dimension_rows', []);
-        if (Array.isArray(rows) && rows.length) {
-            const values = rows.map((r) => {
-                // which file (if any) belongs to this row?
-                const idx = Number.isFinite(Number(r.image_upload_index)) ? Number(r.image_upload_index) : -1;
-                const pack_image_path =
-                    idx >= 0 && rowFiles[idx] ? relPath(rowFiles[idx].path)
-                        : (r.pack_image_url || null);
-
-                return [
-                    productId,
-                    numOrNull(r.origin_country_id),
-                    (r.packing_id || null),                // free-text packing
-                    r.dimensions || null,
-                    r.dim_unit || r.dimensions_unit || 'cm',
-                    r.net_weight === ''  ? null : numOrNull(r.net_weight),
-                    r.gross_weight === ''? null : numOrNull(r.gross_weight),
-                    r.weight_unit || 'kg',
-                    numOrNull(r.brand_id),
-                  //  numOrNull(r.manufacturer_id),
-                    r.mpn || null,
-                    r.isbn || null,
-                    r.upc || null,
-                    r.ean || null,
-                    numOrNull(r.uom_id),
-                    pack_image_path,                        // <-- NEW
-                    r.variety || null,
-                    r.grade_and_size_code || null,
-                    r.packing_alias || null
-                ];
-            });
-
-            await conn.query(
-                `INSERT INTO product_details
-      (product_id, origin_id, packing_text, dimensions, dim_unit,
-       net_wt, gross_wt, wt_unit, brand_id,
-       mpn, isbn, upc, ean, uom_id, pack_image_path,
-       variety, grade_and_size_code, packing_alias)
-     VALUES ?`,
-                [values]
-            );
+        if (!Array.isArray(rows) || rows.length === 0 || !rows[0].uom_id) {
+            await conn.rollback();
+            return res.status(400).json({ ok: false, error: 'VALIDATION_ERROR', error_details: { message: 'UOM (Unit of Measure) is a required field.' } });
         }
+
+        const values = rows.map((r) => {
+            // which file (if any) belongs to this row?
+            const idx = Number.isFinite(Number(r.image_upload_index)) ? Number(r.image_upload_index) : -1;
+            const pack_image_path =
+                idx >= 0 && rowFiles[idx] ? relPath(rowFiles[idx].path)
+                    : (r.pack_image_url || null);
+
+            return [
+                productId,
+                numOrNull(r.origin_country_id),
+                (r.packing_id || null),                // free-text packing
+                r.dimensions || null,
+                r.dim_unit || r.dimensions_unit || 'cm',
+                r.net_weight === ''  ? null : numOrNull(r.net_weight),
+                r.gross_weight === ''? null : numOrNull(r.gross_weight),
+                r.weight_unit || 'kg',
+                numOrNull(r.brand_id),
+                r.mpn || null,
+                r.isbn || null,
+                r.upc || null,
+                r.ean || null,
+                numOrNull(r.uom_id),
+                pack_image_path,                        // <-- NEW
+                r.variety || null,
+                r.grade_and_size_code || null,
+                r.packing_alias || null
+            ];
+        });
+
+        await conn.query(
+            `INSERT INTO product_details
+  (product_id, origin_id, packing_text, dimensions, dim_unit,
+   net_wt, gross_wt, wt_unit, brand_id,
+   mpn, isbn, upc, ean, uom_id, pack_image_path,
+   variety, grade_and_size_code, packing_alias)
+ VALUES ?`,
+            [values]
+        );
 
 
         // ---- product_opening_stock ----
@@ -632,7 +639,8 @@ router.post('/', uploadFields, async (req, res) => {
                 return [
                     productId,
                     relPath(f.path),
-                    relPath(thumbDiskPath),
+                    //relPath(thumbDiskPath),
+                    relPath(thumbDiskPath, true), 
                     is_primary,
                     f.originalname || null,
                     f.mimetype || null,
@@ -875,6 +883,10 @@ router.put('/:id', uploadFields, async (req, res) => {
         // ----- product_details: Smarter update to preserve IDs -----
         const rowFiles = (req.files?.['row_images[]'] || []);
         const incomingRows = parseJSON(p, 'dimension_rows', []);
+        if (!Array.isArray(incomingRows) || incomingRows.length === 0 || !incomingRows[0].uom_id) {
+            await conn.rollback();
+            return res.status(400).json({ ok: false, error: 'VALIDATION_ERROR', error_details: { message: 'UOM (Unit of Measure) is a required field.' } });
+        }
 
         // 1. Get existing detail IDs for this product to compare against
         const [existingDetailRows] = await conn.query('SELECT id FROM product_details WHERE product_id=?', [productId]);
