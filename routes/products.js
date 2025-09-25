@@ -129,7 +129,6 @@ router.get('/', async (req, res) => {
                 SELECT
                     p.id,
                     p.pdt_uniqid AS uniqid,
-                    p.item_type,
                     COALESCE(p.product_name, '') AS name,
                     p.category_id,
                     c.name as category_name,
@@ -486,19 +485,17 @@ router.post('/', uploadFields, async (req, res) => {
 
         const [r1] = await conn.query(
             `INSERT INTO products
-       (pdt_uniqid, category_id, is_taxable, mode_of_shipment_id,
-        item_type, product_name, hscode, created_by,
+       (pdt_uniqid, category_id, is_taxable, mode_of_shipment_id, product_name, hscode, created_by,
         returnable, excise,
         enable_sales, selling_currency_id, selling_price, sales_account_id, sales_description, sales_tax_id,
         enable_purchase, cost_currency_id, cost_price, purchase_account_id, purchase_tax_id, purchase_description, preferred_vendor_id,
         track_inventory, track_batches, valuation_method_id, reorder_point,
         description, created_at, updated_at)
        VALUES
-       (?,?,?, ?, ?,?,?,?,  ?,?,  ?,?,?,?,?, ?,?,  ?,?,?,?,?,?, ?,?,  ?,?,?, NOW(), NOW())`,
+       (?,?,?, ?, ?,?,?,  ?,?,  ?,?,?,?,?, ?,?,  ?,?,?,?,?,?, ?,?,  ?,?,?, NOW(), NOW())`,
             [
                 pdt_uniqid, category_id, readBool01(p, ['is_taxable']), mode_of_shipment_id,
 
-                read(p, ['item_type'], 'Goods'),
                 read(p, ['product_name']),
                 read(p, ['hscode'], null),
                 created_by_id,
@@ -774,7 +771,6 @@ router.put('/:id', uploadFields, async (req, res) => {
 
         const newValuesForHistory = {
             category_id,
-            item_type: read(p, ['item_type'], 'Goods'),
             product_name: read(p, ['product_name']),
             hscode: read(p, ['hscode'], null),
             mode_of_shipment_id,
@@ -807,7 +803,6 @@ router.put('/:id', uploadFields, async (req, res) => {
         await conn.query(
             `UPDATE products SET
         category_id=?,
-        item_type=?,
         product_name=?,
         mode_of_shipment_id=?,
         hscode=?,
@@ -836,7 +831,6 @@ router.put('/:id', uploadFields, async (req, res) => {
       WHERE id=?`,
             [
                 category_id,
-                read(p, ['item_type'], 'Goods'),
                 read(p, ['product_name']),
                 mode_of_shipment_id,
                 read(p, ['hscode'], null),
