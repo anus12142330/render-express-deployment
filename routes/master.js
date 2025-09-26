@@ -97,6 +97,35 @@ const MASTER_CONFIG = {
         listOrderBy: 'terms'
     },
 
+    delivery_place: {
+        table: 'delivery_place',
+        id: 'id',
+        fields: [
+            { name: 'name', type: 'string', required: true },
+            { name: 'country_id', type: 'number', required: true, lookup: 'countries' }
+        ],
+        listSelect: `
+            dp.id, dp.name, dp.country_id,
+            c.name AS country_name
+        `,
+        listFrom: `
+            delivery_place dp
+            LEFT JOIN country c ON c.id = dp.country_id
+        `,
+        listSearchIn: ['dp.name', 'c.name'],
+        listOrderBy: 'dp.name'
+    },
+    kyc_documents: {
+        table: 'kyc_documents',
+        id: 'id',
+        fields: [
+            { name: 'name', type: 'string', required: true },
+            { name: 'has_expiry', type: 'boolean', default: false }
+        ],
+        listOrderBy: 'name',
+        inUseChecks: [] // Add in-use checks later if needed
+    },
+
     tax: {
         table: 'taxes',
         id: 'id',
@@ -352,7 +381,7 @@ router.get('/:type', async (req, res, next) => {
 
         const page = Math.max(parseInt(req.query.page || '1', 10), 1);
         const pageSize = Math.min(Math.max(parseInt(req.query.pageSize || '25', 10), 1), 200);
-        const q = (req.query.q || '').trim();
+        const q = (req.query.search || req.query.q || '').trim();
         const all = req.query.all === '1';
 
         if (type === 'category') {
@@ -402,13 +431,13 @@ router.get('/:type', async (req, res, next) => {
 
         // JOIN-enabled path
         if (cfg.listFrom && cfg.listSelect) {
-            const orderBy = cfg.listOrderBy || cfg.id;
+            const orderBy = `${cfg.listSearchIn?.[0]?.split('.')[0] || 'c'}.${cfg.id}`;
             // Ignore search query `q` when `all` is requested for dropdowns
             const { whereSql, params } = buildSearchClause(cfg.listSearchIn, all ? '' : q);
 
             // For dropdowns, we don't need the in_use check.
             if (all) {
-                const dataSql = `SELECT ${cfg.listSelect} FROM ${cfg.listFrom} ${whereSql} ORDER BY ${orderBy} ASC`;
+                const dataSql = `SELECT ${cfg.listSelect} FROM ${cfg.listFrom} ${whereSql} ORDER BY ${orderBy} DESC`;
                 db.query(dataSql, params, (err, rows) => {
                     if (err) return next(err);
                     // For `all=1`, we return a flat array, not the {rows, total} object
@@ -427,7 +456,7 @@ router.get('/:type', async (req, res, next) => {
           SELECT ${cfg.listSelect} ${inUseSelect}
           FROM ${cfg.listFrom}
           ${whereSql}
-          ORDER BY ${orderBy} ASC
+          ORDER BY ${orderBy} DESC
           LIMIT ? OFFSET ?
         `;
                 db.query(dataSql, [...params, pageSize, offset], (err2, rows) => {
@@ -439,14 +468,14 @@ router.get('/:type', async (req, res, next) => {
         }
 
         // Simple table path
-        const orderBy = cfg.listOrderBy || cfg.id;
+        const orderBy = cfg.id;
         const searchCols = cfg.fields?.map(f => `\`${f.name}\``) || ['`name`'];
         // Ignore search query `q` when `all` is requested for dropdowns
         const { whereSql, params } = buildSearchClause(searchCols, all ? '' : q);
 
         // For dropdowns, we don't need the in_use check.
         if (all) {
-            const dataSql = `SELECT * FROM \`${cfg.table}\` ${whereSql} ORDER BY \`${orderBy}\` ASC`;
+            const dataSql = `SELECT * FROM \`${cfg.table}\` ${whereSql} ORDER BY \`${orderBy}\` DESC`;
             db.query(dataSql, params, (err, rows) => {
                 if (err) return next(err);
                 return res.json(rows);
@@ -460,7 +489,7 @@ router.get('/:type', async (req, res, next) => {
 
             const offset = (page - 1) * pageSize;
             db.query(
-                `SELECT * ${inUseSelect} FROM \`${cfg.table}\` ${whereSql} ORDER BY \`${orderBy}\` ASC LIMIT ? OFFSET ?`,
+                `SELECT * ${inUseSelect} FROM \`${cfg.table}\` ${whereSql} ORDER BY \`${orderBy}\` DESC LIMIT ? OFFSET ?`,
                 [...params, pageSize, offset],
                 (err2, rows) => {
                     if (err2) return next(err2);

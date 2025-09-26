@@ -31,6 +31,22 @@ const uploadVendor = multer({ storage: vendorStorage });
  */
 const COMPANY_TYPE_VENDOR = '0';
 
+/* ================================
+   GET /api/document-types
+================================ */
+router.get('/document-types', async (req, res) => {
+    try {
+        const [rows] = await db.promise().query(
+            `SELECT id, name, has_expiry FROM document_type ORDER BY name ASC`
+        );
+        res.json(rows);
+    } catch (err) {
+        console.error('document-types:', err);
+        res.status(500).json(errPayload('Failed to load document types', 'DB_ERROR', err.message));
+    }
+});
+
+
 // Utility
 const like = (s = '') => `%${s}%`;
 
@@ -85,8 +101,11 @@ router.get('/', async (req, res) => {
           SELECT COUNT(*)
           FROM vendor_attachment va
           WHERE va.vendor_id = v.id AND va.expiry_date < CURDATE()
-        ) AS expired_attachments_count
+        ) AS expired_attachments_count,
+         currency.name as currency_name
       FROM vendor v
+      LEFT JOIN vendor_other as vo ON vo.vendor_id=v.id
+      LEFT JOIN currency ON currency.id=vo.currency_id      
       WHERE v.company_type_id = ?
         AND (
           v.display_name LIKE ? OR
@@ -132,7 +151,7 @@ router.get('/', async (req, res) => {
 ================================ */
 router.post('/', uploadVendor.array('attachments'), async (req, res) => {
     const {
-        company_name, display_name, email_address, phone_work, phone_mobile, remarks,
+        company_name, display_name, email_address, phone_work, phone_mobile, remarks, website,
         tax_treatment_id, tax_registration_number, source_supply_id,
         currency_id, payment_terms_id,
         bill_attention, bill_country_id, bill_address_1, bill_address_2,
@@ -160,12 +179,12 @@ router.post('/', uploadVendor.array('attachments'), async (req, res) => {
         const [ins] = await conn.query(
             `
       INSERT INTO vendor
-        (company_name, display_name, email_address, phone_work, phone_mobile, remarks,
+        (company_name, display_name, email_address, phone_work, phone_mobile, remarks, website,
          uniqid, user_id, updated_user, company_type_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
             [
-                company_name, display_name, email_address, phone_work, phone_mobile, remarks,
+                company_name, display_name, email_address, phone_work, phone_mobile, remarks, website,
                 uniqid, userId, userId, COMPANY_TYPE_VENDOR
             ]
         );
@@ -197,10 +216,11 @@ router.post('/', uploadVendor.array('attachments'), async (req, res) => {
         for (const p of contactPersons) {
             await conn.query(
                 `INSERT INTO vendor_contact
-           (vendor_id, salutation_id, first_name, last_name, email, phone, mobile, skype_name_number, designation, department)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (vendor_id, is_primary, salutation_id, first_name, last_name, email, phone, mobile, skype_name_number, designation, department)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     vendorId,
+                    p.is_primary ? 1 : 0,
                     p.salutation_id, p.first_name, p.last_name,
                     p.email, p.phone, p.mobile,
                     p.skype_name_number, p.designation, p.department
@@ -211,13 +231,19 @@ router.post('/', uploadVendor.array('attachments'), async (req, res) => {
         for (let i = 0; i < files.length; i++) {
             const f = files[i];
             const expiry = req.body[`attachment_expiry_${i}`] || null; // "YYYY-MM-DD" from UI
+            const docTypeId = req.body[`attachment_doctype_${i}`] || null;
 
             await conn.query(
-                `INSERT INTO vendor_attachment (vendor_id, attachment_path, attachment_name, expiry_date)
-         VALUES (?, ?, ?, ?)`,
-                [vendorId, (f.path || '').replace(/\\/g, '/'), f.originalname, expiry]
+                `INSERT INTO vendor_attachment (vendor_id, attachment_path, attachment_name, expiry_date, document_type_id)
+         VALUES (?, ?, ?, ?, ?)`,
+                [vendorId, (f.path || '').replace(/\\/g, '/'), f.originalname, expiry, docTypeId]
             );
         }
+
+        await conn.query(
+            `INSERT INTO vendor_history (vendor_id, user_id, action) VALUES (?, ?, ?)`,
+            [vendorId, userId, 'CREATED']
+        );
 
         await conn.commit();
         res.json({ success: true, message: 'Vendor created successfully', vendorId, uniqid });
@@ -309,7 +335,21 @@ router.get('/:uniqid/full', async (req, res) => {
             [id]
         );
 
-        res.json({ vendor, contacts, attachments, transactions: transactions || [] });
+        const [history] = await db.promise().query(
+            `
+            SELECT
+                vh.id,
+                vh.action,
+                vh.details,
+                vh.created_at,
+                u.name AS user_name
+            FROM vendor_history vh
+            LEFT JOIN user u ON u.id = vh.user_id
+            WHERE vh.vendor_id = ? ORDER BY vh.created_at DESC`,
+            [id]
+        );
+
+        res.json({ vendor, contacts, attachments, transactions: transactions || [], history: history || [] });
     } catch (err) {
         console.error('vendors/:uniqid/full:', err);
         res.status(500).json(errPayload('Failed to load vendor', 'DB_ERROR', err.message));
@@ -320,15 +360,15 @@ router.get('/:uniqid/full', async (req, res) => {
    POST /api/vendors/upload
 ================================ */
 router.post('/upload', uploadVendor.single('file'), async (req, res) => {
-    const { vendor_id, expiry_date } = req.body;
+    const { vendor_id, expiry_date, document_type_id } = req.body;
     const file = req.file;
     if (!file || !vendor_id) return res.status(400).json(errPayload('Missing file or vendor_id'));
 
     try {
         await db.promise().query(
-            `INSERT INTO vendor_attachment (vendor_id, attachment_path, attachment_name, expiry_date)
-       VALUES (?, ?, ?, ?)`,
-            [vendor_id, file.path, file.originalname, expiry_date || null]
+            `INSERT INTO vendor_attachment (vendor_id, attachment_path, attachment_name, expiry_date, document_type_id)
+       VALUES (?, ?, ?, ?, ?)`,
+            [vendor_id, file.path, file.originalname, expiry_date || null, document_type_id || null]
         );
         res.json({ success: true, message: 'File uploaded successfully' });
     } catch (err) {
@@ -354,7 +394,7 @@ router.put('/:id', uploadVendor.array('attachments'), async (req, res) => {
     }
 
     const {
-        company_name, display_name, email_address, phone_work, phone_mobile, remarks,
+        company_name, display_name, email_address, phone_work, phone_mobile, remarks, website,
         tax_treatment_id, tax_registration_number, source_supply_id,
         currency_id, payment_terms_id,
         bill_attention, bill_country_id, bill_address_1, bill_address_2,
@@ -368,12 +408,79 @@ router.put('/:id', uploadVendor.array('attachments'), async (req, res) => {
 
     try {
         await conn.beginTransaction();
+        
+        // --- History Logging: Fetch old state before update ---
+        const [oldVendorRows] = await conn.query(`
+            SELECT 
+                v.*, vo.*,
+                tt.name as tax_treatment_name,
+                ss.source as source_supply_name,
+                c.name as currency_name,
+                pt.terms as payment_terms_name
+            FROM vendor v 
+            LEFT JOIN vendor_other vo ON v.id = vo.vendor_id
+            LEFT JOIN tax_treatment tt ON tt.id = vo.tax_treatment_id
+            LEFT JOIN source_supply ss ON ss.id = vo.source_supply_id
+            LEFT JOIN currency c ON c.id = vo.currency_id
+            LEFT JOIN payment_terms pt ON pt.id = vo.payment_terms_id
+            WHERE v.id = ?`, [vendorId]);
+        const oldVendor = oldVendorRows[0] || {};
+
+        const generateDiff = async (oldObj, newObj, fieldsToCompare) => {
+            const diff = [];
+            for (const key of fieldsToCompare) {
+                const oldValueId = oldObj[key] ?? '';
+                const newValueId = newObj[key] ?? '';
+
+                if (String(oldValueId) !== String(newValueId)) {
+                    let from = oldValueId;
+                    let to = newValueId;
+
+                    // For select fields, get the text representation
+                    if (key.endsWith('_id')) {
+                        const nameKey = key.replace(/_id$/, '_name');
+                        from = oldObj[nameKey] || oldValueId;
+                        // For the 'to' value, we need to fetch it based on the new ID
+                        const lookupTable = { tax_treatment_id: 'tax_treatment', source_supply_id: 'source_supply', currency_id: 'currency', payment_terms_id: 'payment_terms' }[key];
+                        const lookupField = { tax_treatment_id: 'name', source_supply_id: 'source', currency_id: 'name', payment_terms_id: 'terms' }[key];
+                        if (lookupTable && newValueId) {
+                            const [toRows] = await conn.query(`SELECT ${lookupField} as name FROM ${lookupTable} WHERE id = ?`, [newValueId]);
+                            to = toRows[0]?.name || newValueId;
+                        }
+                    }
+
+                    diff.push({
+                        field: key,
+                        from: from,
+                        to: to
+                    });
+                }
+            }
+            return diff;
+        };
+
+        const fieldsToTrack = [
+            'company_name', 'display_name', 'email_address', 'phone_work', 'phone_mobile', 'website', 'remarks',
+            'tax_treatment_id', 'tax_registration_number', 'source_supply_id', 'currency_id', 'payment_terms_id'
+        ];
+
+        const changes = await generateDiff(oldVendor, req.body, fieldsToTrack);
+
+        // We will log changes for contacts and addresses later if needed.
+        // For now, we log if any of the main fields changed.
+        if (changes.length > 0) {
+            await conn.query(
+                `INSERT INTO vendor_history (vendor_id, user_id, action, details) VALUES (?, ?, ?, ?)`,
+                [vendorId, userId, 'UPDATED', JSON.stringify(changes)]
+            );
+        }
+        // --- End History Logging ---
 
         await conn.query(
             `UPDATE vendor
-       SET company_name = ?, display_name = ?, email_address = ?, phone_work = ?, phone_mobile = ?, remarks = ?, updated_user = ?
+       SET company_name = ?, display_name = ?, email_address = ?, phone_work = ?, phone_mobile = ?, remarks = ?, website = ?, updated_user = ?
        WHERE id = ? AND company_type_id = ?`,
-            [company_name, display_name, email_address, phone_work, phone_mobile, remarks, userId, vendorId, COMPANY_TYPE_VENDOR]
+            [company_name, display_name, email_address, phone_work, phone_mobile, remarks, website, userId, vendorId, COMPANY_TYPE_VENDOR]
         );
 
         await conn.query(`DELETE FROM vendor_other WHERE vendor_id = ?`, [vendorId]);
@@ -405,10 +512,11 @@ router.put('/:id', uploadVendor.array('attachments'), async (req, res) => {
         for (const p of contactPersons) {
             await conn.query(
                 `INSERT INTO vendor_contact
-           (vendor_id, salutation_id, first_name, last_name, email, phone, mobile, skype_name_number, designation, department)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (vendor_id, is_primary, salutation_id, first_name, last_name, email, phone, mobile, skype_name_number, designation, department)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     vendorId,
+                    p.is_primary ? 1 : 0,
                     p.salutation_id, p.first_name, p.last_name,
                     p.email, p.phone, p.mobile,
                     p.skype_name_number, p.designation, p.department
@@ -423,10 +531,11 @@ router.put('/:id', uploadVendor.array('attachments'), async (req, res) => {
         for (let i = 0; i < files.length; i++) {
             const f = files[i];
             const expiry = req.body[`attachment_expiry_${i}`] || null;
+            const docTypeId = req.body[`attachment_doctype_${i}`] || null;
             await conn.query(
-                `INSERT INTO vendor_attachment (vendor_id, attachment_path, attachment_name, expiry_date)
-         VALUES (?, ?, ?, ?)`,
-                [vendorId, f.path, f.originalname, expiry]
+                `INSERT INTO vendor_attachment (vendor_id, attachment_path, attachment_name, expiry_date, document_type_id)
+         VALUES (?, ?, ?, ?, ?)`,
+                [vendorId, f.path, f.originalname, expiry, docTypeId]
             );
         }
 
@@ -435,7 +544,10 @@ router.put('/:id', uploadVendor.array('attachments'), async (req, res) => {
             const attId = req.body[`existing_attachment_id_${i}`];
             if (!attId) break;
             const expiry = req.body[`attachment_expiry_existing_${i}`] || null;
-            await conn.query(`UPDATE vendor_attachment SET expiry_date = ? WHERE id = ?`, [expiry, attId]);
+            const docTypeId = req.body[`attachment_doctype_existing_${i}`] || null;
+            await conn.query(
+                `UPDATE vendor_attachment SET expiry_date = ?, document_type_id = ? WHERE id = ?`,
+                [expiry, docTypeId, attId]);
         }
 
         await conn.commit();
@@ -468,7 +580,7 @@ router.delete('/attachments/:id', async (req, res) => {
 ================================ */
 router.post('/attachment/:id/update', uploadVendor.single('file'), async (req, res) => {
     const { id } = req.params;
-    const { expiry_date } = req.body;
+    const { expiry_date, document_type_id } = req.body;
     const file = req.file;
 
     const updates = [];
@@ -479,7 +591,9 @@ router.post('/attachment/:id/update', uploadVendor.single('file'), async (req, r
         values.push(file.originalname, `uploads/vendor/${file.filename}`);
     }
     updates.push('expiry_date = ?');
+    updates.push('document_type_id = ?');
     values.push(expiry_date || null);
+    values.push(document_type_id || null);
     values.push(id);
 
     try {
