@@ -345,7 +345,7 @@ function buildSearchClause(cols, q) {
 
 /* ----------------------------- LIST ----------------------------- */
 // GET /api/master/:type  (pagination + search; JOIN-aware)
-router.get('/:type', (req, res, next) => {
+router.get('/:type', async (req, res, next) => {
     try {
         const type = req.params.type;
         const cfg = getCfg(type);
@@ -354,6 +354,38 @@ router.get('/:type', (req, res, next) => {
         const pageSize = Math.min(Math.max(parseInt(req.query.pageSize || '25', 10), 1), 200);
         const q = (req.query.q || '').trim();
         const all = req.query.all === '1';
+
+        if (type === 'category') {
+            try {
+                const [allCategories] = await db.promise().query(`SELECT c.id, c.name, c.parent_id, p.name AS parent_name FROM categories c LEFT JOIN categories p ON p.id = c.parent_id ORDER BY c.name ASC`);
+                const [usedCategories] = await db.promise().query(`SELECT DISTINCT category_id FROM products WHERE category_id IS NOT NULL`);
+                const usedIds = new Set(usedCategories.map(c => c.category_id));
+
+                const categoryMap = {};
+                allCategories.forEach(c => {
+                    categoryMap[c.id] = { ...c, children: [], in_use: false };
+                });
+
+                const checkInUseRecursive = (catId) => {
+                    if (!catId || !categoryMap[catId] || categoryMap[catId].in_use) return;
+
+                    categoryMap[catId].in_use = true;
+                    if (categoryMap[catId].parent_id) {
+                        checkInUseRecursive(categoryMap[catId].parent_id);
+                    }
+                };
+
+                for (const catId of usedIds) {
+                    checkInUseRecursive(catId);
+                }
+
+                const result = Object.values(categoryMap);
+                return res.json(all ? result : { rows: result, total: result.length });
+
+            } catch (dbErr) {
+                return next(dbErr);
+            }
+        }
 
         // --- In-use check subquery ---
         const inUseChecks = cfg.inUseChecks || [];
