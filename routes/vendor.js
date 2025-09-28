@@ -213,17 +213,22 @@ router.post('/', uploadVendor.array('attachments'), async (req, res) => {
             ]
         );
 
+        const fullAddress = [bill_address_1, bill_address_2, bill_city, bill_zip_code].filter(Boolean).join(', ');
+
         for (const p of contactPersons) {
             await conn.query(
-                `INSERT INTO vendor_contact
-           (vendor_id, is_primary, salutation_id, first_name, last_name, email, phone, mobile, skype_name_number, designation, department)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                `INSERT INTO contact
+           (vendor_id, is_primary, salutation_id, first_name, last_name, email, phone, mobile, skype_name_number, designation, department, customer_name, address, company_type_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     vendorId,
                     p.is_primary ? 1 : 0,
                     p.salutation_id, p.first_name, p.last_name,
                     p.email, p.phone, p.mobile,
-                    p.skype_name_number, p.designation, p.department
+                    p.skype_name_number, p.designation, p.department,
+                    display_name, // customer_name
+                    fullAddress,  // address
+                    COMPANY_TYPE_VENDOR // company_type_id
                 ]
             );
         }
@@ -323,8 +328,14 @@ router.get('/:uniqid/full', async (req, res) => {
         const id = vendor.id;
 
         const [contacts] = await db.promise().query(
-            `SELECT * FROM vendor_contact WHERE vendor_id = ?`,
-            [id]
+            `
+            SELECT 
+                c.*,
+                s.name as salutation_name
+            FROM contact c
+            LEFT JOIN salutation s ON c.salutation_id = s.id
+            WHERE c.vendor_id = ?`,
+            [id] 
         );
         const [attachments] = await db.promise().query(
             `SELECT * FROM vendor_attachment WHERE vendor_id = ?`,
@@ -508,18 +519,23 @@ router.put('/:id', uploadVendor.array('attachments'), async (req, res) => {
             ]
         );
 
-        await conn.query(`DELETE FROM vendor_contact WHERE vendor_id = ?`, [vendorId]);
+        const fullAddress = [bill_address_1, bill_address_2, bill_city, bill_zip_code].filter(Boolean).join(', ');
+
+        await conn.query(`DELETE FROM contact WHERE vendor_id = ?`, [vendorId]);
         for (const p of contactPersons) {
             await conn.query(
-                `INSERT INTO vendor_contact
-           (vendor_id, is_primary, salutation_id, first_name, last_name, email, phone, mobile, skype_name_number, designation, department)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                `INSERT INTO contact
+           (vendor_id, is_primary, salutation_id, first_name, last_name, email, phone, mobile, skype_name_number, designation, department, customer_name, address, company_type_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     vendorId,
                     p.is_primary ? 1 : 0,
                     p.salutation_id, p.first_name, p.last_name,
                     p.email, p.phone, p.mobile,
-                    p.skype_name_number, p.designation, p.department
+                    p.skype_name_number, p.designation, p.department,
+                    display_name, // customer_name
+                    fullAddress,  // address
+                    COMPANY_TYPE_VENDOR // company_type_id
                 ]
             );
         }
@@ -656,17 +672,17 @@ router.post('/:id/update-address', async (req, res) => {
 ================================ */
 router.post('/contacts', async (req, res) => {
     const {
-        vendor_id, salutation, first_name, last_name,
+        vendor_id, salutation_id, first_name, last_name,
         email, phone, mobile, skype_name_number,
         designation, department
     } = req.body;
 
     try {
         await db.promise().query(
-            `INSERT INTO vendor_contact
+            `INSERT INTO contact
          (vendor_id, salutation_id, first_name, last_name, email, phone, mobile, skype_name_number, designation, department)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [vendor_id, salutation, first_name, last_name, email, phone, mobile, skype_name_number, designation, department]
+            [vendor_id, salutation_id, first_name, last_name, email, phone, mobile, skype_name_number, designation, department]
         );
         res.status(200).json({ message: 'Contact added' });
     } catch (err) {
@@ -677,18 +693,18 @@ router.post('/contacts', async (req, res) => {
 
 router.put('/contacts/:id', async (req, res) => {
     const {
-        salutation, first_name, last_name, email,
+        salutation_id, first_name, last_name, email,
         phone, mobile, skype_name_number, designation, department
     } = req.body;
     const id = req.params.id;
 
     try {
         await db.promise().query(
-            `UPDATE vendor_contact SET
+            `UPDATE contact SET
          salutation_id = ?, first_name = ?, last_name = ?, email = ?,
          phone = ?, mobile = ?, skype_name_number = ?, designation = ?, department = ?
        WHERE id = ?`,
-            [salutation, first_name, last_name, email, phone, mobile, skype_name_number, designation, department, id]
+            [salutation_id, first_name, last_name, email, phone, mobile, skype_name_number, designation, department, id]
         );
         res.json({ message: 'Contact updated' });
     } catch (err) {
