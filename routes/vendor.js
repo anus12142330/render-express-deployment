@@ -37,7 +37,7 @@ const COMPANY_TYPE_VENDOR = '0';
 router.get('/document-types', async (req, res) => {
     try {
         const [rows] = await db.promise().query(
-            `SELECT id, name, has_expiry FROM document_type ORDER BY name ASC`
+            `SELECT id, name, has_expiry FROM kyc_documents ORDER BY name ASC`
         );
         res.json(rows);
     } catch (err) {
