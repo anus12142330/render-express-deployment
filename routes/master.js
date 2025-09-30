@@ -115,6 +115,30 @@ const MASTER_CONFIG = {
         listSearchIn: ['dp.name', 'c.name'],
         listOrderBy: 'dp.name'
     },
+    state: {
+        table: 'state',
+        id: 'id',
+        fields: [
+            { name: 'name', type: 'string', required: true },
+            { name: 'country_id', type: 'number', required: true, lookup: 'countries' }
+        ],
+        listSelect: `
+            s.id, s.name, s.country_id,
+            c.name AS country_name
+        `,
+        listFrom: `
+            state s
+            LEFT JOIN country c ON c.id = s.country_id
+        `,
+        listSearchIn: ['s.name', 'c.name'],
+        listOrderBy: 's.name'
+    },
+    country: {
+        table: 'country',
+        id: 'id',
+        fields: [{ name: 'name', type: 'string', required: true }],
+        listOrderBy: 'name'
+    },
     kyc_documents: {
         table: 'kyc_documents',
         id: 'id',

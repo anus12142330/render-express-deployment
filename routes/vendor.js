@@ -152,7 +152,7 @@ router.get('/', async (req, res) => {
 router.post('/', uploadVendor.array('attachments'), async (req, res) => {
     const {
         company_name, display_name, email_address, phone_work, phone_mobile, remarks, website,
-        tax_treatment_id, tax_registration_number, source_supply_id,
+        tags, tax_treatment_id, tax_registration_number, source_supply_id,
         currency_id, payment_terms_id,
         bill_attention, bill_country_id, bill_address_1, bill_address_2,
         bill_city, bill_state_id, bill_zip_code, bill_phone, bill_fax,
@@ -163,6 +163,8 @@ router.post('/', uploadVendor.array('attachments'), async (req, res) => {
     const uniqid = `vnd_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
     const userId = req.session?.user?.id || null;
     const files = req.files || [];
+    const tagsRaw = req.body.tags;
+    const safeTags = typeof tagsRaw === 'string' ? tagsRaw : JSON.stringify(tagsRaw || []);
 
     let contactPersons = [];
     try {
@@ -179,12 +181,12 @@ router.post('/', uploadVendor.array('attachments'), async (req, res) => {
         const [ins] = await conn.query(
             `
       INSERT INTO vendor
-        (company_name, display_name, email_address, phone_work, phone_mobile, remarks, website,
+        (company_name, display_name, email_address, phone_work, phone_mobile,tags , remarks, website,
          uniqid, user_id, updated_user, company_type_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
             [
-                company_name, display_name, email_address, phone_work, phone_mobile, remarks, website,
+                company_name, display_name, email_address, phone_work, phone_mobile, safeTags, remarks, website,
                 uniqid, userId, userId, COMPANY_TYPE_VENDOR
             ]
         );
@@ -406,7 +408,7 @@ router.put('/:id', uploadVendor.array('attachments'), async (req, res) => {
 
     const {
         company_name, display_name, email_address, phone_work, phone_mobile, remarks, website,
-        tax_treatment_id, tax_registration_number, source_supply_id,
+        tags, tax_treatment_id, tax_registration_number, source_supply_id,
         currency_id, payment_terms_id,
         bill_attention, bill_country_id, bill_address_1, bill_address_2,
         bill_city, bill_state_id, bill_zip_code, bill_phone, bill_fax,
@@ -416,6 +418,8 @@ router.put('/:id', uploadVendor.array('attachments'), async (req, res) => {
 
     const files = req.files || [];
     const conn = await db.promise().getConnection();
+    const tagsRaw = req.body.tags;
+    const safeTags = typeof tagsRaw === 'string' ? tagsRaw : JSON.stringify(tagsRaw || []);
 
     try {
         await conn.beginTransaction();
@@ -489,9 +493,9 @@ router.put('/:id', uploadVendor.array('attachments'), async (req, res) => {
 
         await conn.query(
             `UPDATE vendor
-       SET company_name = ?, display_name = ?, email_address = ?, phone_work = ?, phone_mobile = ?, remarks = ?, website = ?, updated_user = ?
+       SET company_name = ?, display_name = ?, email_address = ?, phone_work = ?, phone_mobile = ?, tags = ?, remarks = ?, website = ?, updated_user = ?
        WHERE id = ? AND company_type_id = ?`,
-            [company_name, display_name, email_address, phone_work, phone_mobile, remarks, website, userId, vendorId, COMPANY_TYPE_VENDOR]
+            [company_name, display_name, email_address, phone_work, phone_mobile, safeTags,   remarks, website, userId, vendorId, COMPANY_TYPE_VENDOR]
         );
 
         await conn.query(`DELETE FROM vendor_other WHERE vendor_id = ?`, [vendorId]);

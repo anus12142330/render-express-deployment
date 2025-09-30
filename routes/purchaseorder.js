@@ -449,15 +449,23 @@ router.post("/", uploadFields, async (req, res) => {
         });
 
         subtotal = +subtotal.toFixed(2);
-        const discount_amount = +(subtotal * (discountPct / 100)).toFixed(2);
-        const taxable = Math.max(0, +(subtotal - discount_amount).toFixed(2));
+
+        // Correctly calculate discount based on type
+        const discount_type = payload.discount_type === 'fixed' ? 'fixed' : 'percentage';
+        const discount_input_value = toNum(payload.discount_amount, 0); // The value from the input field
+        const calculated_discount_amount = discount_type === 'fixed'
+            ? discount_input_value
+            : +(subtotal * (discount_input_value / 100)).toFixed(2);
+        const discount_percent = discount_type === 'percentage' ? discount_input_value : 0; // for legacy
+
+        const taxable = Math.max(0, +(subtotal - calculated_discount_amount).toFixed(2));
 
         // Distribute discount proportionally; compute per-row VAT on discounted base
         const safeSub = subtotal || 1;
         let vat_total = 0;
 
         const normalizedRows = baseRows.map((br) => {
-            const discountShare = +(discount_amount * (br.amount_row_net / safeSub)).toFixed(2);
+            const discountShare = +(calculated_discount_amount * (br.amount_row_net / safeSub)).toFixed(2);
             const amount_net = +(br.amount_row_net - discountShare).toFixed(2); // discounted base
             const vat_amount = +((amount_net * br.vat_percent) / 100).toFixed(2);
             vat_total += vat_amount;
@@ -513,14 +521,14 @@ router.post("/", uploadFields, async (req, res) => {
         const [ins] = await conn.query(
             `INSERT INTO purchase_orders (
         po_uniqid, po_number, reference_no,
-        vendor_id, currency_id, is_organization, customer_id,
+        vendor_id, currency_id, is_organization, customer_id, discount_type, discount_amount,
         delivery_address, billing_address, shipping_address,
         po_date, delivery_date,
         port_loading, port_discharge, inco_terms_id, no_containers,
         mode_shipment_id, partial_shipment_id, container_type_id, container_load_id,
         payment_terms, documents_payment, documents_payment_ids, documents_payment_labels, documents_payment_text,
         termscondition, notes,
-        subtotal, discount_percent, taxable, vat_total, total,
+        subtotal, discount_percent, taxable, vat_total, total, 
         vat_id, vat_rate, vat_amount,
         status_id, created_at, updated_at
       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW(),NOW())`,
@@ -533,6 +541,8 @@ router.post("/", uploadFields, async (req, res) => {
                 payload.currencyId || null,
                 payload.deliverTo === "org" ? 1 : 0,
                 payload.customerId || null,
+                discount_type,
+                discount_input_value, // <-- Save the raw input value
 
                 cleanStr(payload.deliveryAddress),
                 cleanStr(payload.vendorBillAddrText) || cleanStr(payload.billing_address),
@@ -564,7 +574,7 @@ router.post("/", uploadFields, async (req, res) => {
                 cleanStr(payload.customerNotes) || cleanStr(payload.notes),
 
                 subtotal,
-                discountPct,
+                discount_percent, // Save legacy field
                 taxable,
                 vat_total,
                 total,
@@ -645,8 +655,8 @@ router.post("/", uploadFields, async (req, res) => {
                 po_uniqid,
                 po_number,
                 po_date: payload.poDate,
-                subtotal,
-                discount_percent: discountPct,
+                subtotal, 
+                discount_percent: discount_percent,
                 taxable,
                 vat_total,
                 total,
@@ -857,15 +867,22 @@ router.put("/:uniqid", uploadFields, async (req, res) => {
         });
 
         subtotal = +subtotal.toFixed(2);
-        const discountPct = toNum(payload.discountPct, 0);
-        const discount_amount = +(subtotal * (discountPct / 100)).toFixed(2);
-        const taxable = Math.max(0, +(subtotal - discount_amount).toFixed(2));
+
+        // Correctly calculate discount based on type
+        const discount_type = payload.discount_type === 'fixed' ? 'fixed' : 'percentage';
+        const discount_input_value = toNum(payload.discount_amount, 0); // The value from the input field
+        const calculated_discount_amount = discount_type === 'fixed'
+            ? discount_input_value
+            : +(subtotal * (discount_input_value / 100)).toFixed(2);
+        const discount_percent = discount_type === 'percentage' ? discount_input_value : 0; // for legacy
+
+        const taxable = Math.max(0, +(subtotal - calculated_discount_amount).toFixed(2));
 
         const safeSub = subtotal || 1;
         let vat_total = 0;
 
         const normalizedRows = baseRows.map((br) => {
-            const discountShare = +(discount_amount * (br.amount_row_net / safeSub)).toFixed(2);
+            const discountShare = +(calculated_discount_amount * (br.amount_row_net / safeSub)).toFixed(2);
             const amount_net = +(br.amount_row_net - discountShare).toFixed(2);
             const vat_amount = +((amount_net * nz(br.vat_percent, 0)) / 100).toFixed(2);
             vat_total += vat_amount;
@@ -903,7 +920,7 @@ router.put("/:uniqid", uploadFields, async (req, res) => {
         // ===== header update =====
         await conn.query(
             `UPDATE purchase_orders SET
-         po_number=?, reference_no=?,
+         po_number=?, reference_no=?, discount_type=?, discount_amount=?,
          vendor_id=?, currency_id=?, is_organization=?, customer_id=?,
          delivery_address=?, billing_address=?, shipping_address=?,
          po_date=?, delivery_date=?,
@@ -911,7 +928,7 @@ router.put("/:uniqid", uploadFields, async (req, res) => {
          mode_shipment_id=?, partial_shipment_id=?, container_type_id=?, container_load_id=?,
          payment_terms=?, documents_payment=?, documents_payment_ids=?, documents_payment_labels=?, documents_payment_text=?,
          termscondition=?, notes=?,
-         subtotal=?, discount_percent=?, taxable=?, vat_total=?, total=?,
+         subtotal=?, discount_percent=?, taxable=?, vat_total=?, total=?, 
          vat_id=?, vat_rate=?, vat_amount=?,
          status_id = COALESCE(?, status_id),
          updated_at=NOW()
@@ -919,6 +936,8 @@ router.put("/:uniqid", uploadFields, async (req, res) => {
             [
                 incomingPoNumber || po.po_number,
                 cleanStr(payload.reference),
+                discount_type,
+                discount_input_value, // <-- Save the raw input value
 
                 payload.vendorId || null,
                 payload.currencyId || null,
@@ -956,7 +975,7 @@ router.put("/:uniqid", uploadFields, async (req, res) => {
                 cleanStr(payload.customerNotes) || cleanStr(payload.notes),
 
                 subtotal,
-                discountPct,
+                discount_percent, // Save legacy field
                 taxable,
                 vat_total,
                 total,
@@ -1052,7 +1071,7 @@ router.put("/:uniqid", uploadFields, async (req, res) => {
         await conn.commit();
         res.json({
             ok: true,
-            totals: { subtotal, discount_percent: discountPct, taxable, vat_total, total },
+            totals: { subtotal, discount_percent: discount_percent, taxable, vat_total, total },
             items_saved: normalizedRows.length,
         });
     } catch (err) {
