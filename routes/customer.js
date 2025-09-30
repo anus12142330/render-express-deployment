@@ -147,6 +147,8 @@ router.post('/', uploadCustomer.array('attachments'), async (req, res) => {
     const uniqid = `cus_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
     const userId = req.session?.user?.id || null;
     const files = req.files || [];
+    const tagsRaw = req.body.tags;
+    const safeTags = typeof tagsRaw === 'string' ? tagsRaw : JSON.stringify(tagsRaw || []);
 
     let contactPersons = [];
     try {
@@ -163,12 +165,12 @@ router.post('/', uploadCustomer.array('attachments'), async (req, res) => {
         const [ins] = await conn.query(
             `
       INSERT INTO vendor
-        (company_name, display_name, email_address, phone_work, phone_mobile, remarks,
+        (company_name, display_name, email_address, phone_work, phone_mobile, tags, remarks, website,
          uniqid, user_id, updated_user, company_type_id, customer_type)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
             [
-                company_name, display_name, email_address, phone_work, phone_mobile, remarks,
+                company_name, display_name, email_address, phone_work, phone_mobile, safeTags, remarks, website,
                 uniqid, userId, userId, COMPANY_TYPE_CUSTOMER, customer_type || 'individual'
             ]
         );
@@ -197,16 +199,22 @@ router.post('/', uploadCustomer.array('attachments'), async (req, res) => {
             ]
         );
 
+        const fullAddress = [bill_address_1, bill_address_2, bill_city, bill_zip_code].filter(Boolean).join(', ');
+
         for (const p of contactPersons) {
             await conn.query(
-                `INSERT INTO vendor_contact
-           (vendor_id, salutation_id, first_name, last_name, email, phone, mobile, skype_name_number, designation, department)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                `INSERT INTO contact
+           (vendor_id, is_primary, salutation_id, first_name, last_name, email, phone, mobile, skype_name_number, designation, department, customer_name, address, company_type_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     customerId,
+                    p.is_primary ? 1 : 0,
                     p.salutation_id, p.first_name, p.last_name,
                     p.email, p.phone, p.mobile,
-                    p.skype_name_number, p.designation, p.department
+                    p.skype_name_number, p.designation, p.department,
+                    display_name,
+                    fullAddress,
+                    COMPANY_TYPE_CUSTOMER
                 ]
             );
         }
@@ -214,16 +222,28 @@ router.post('/', uploadCustomer.array('attachments'), async (req, res) => {
         for (let i = 0; i < files.length; i++) {
             const f = files[i];
             const expiry = req.body[`attachment_expiry_${i}`] || null; // "YYYY-MM-DD" from UI
+            const docTypeId = req.body[`attachment_doctype_${i}`] || null;
 
             await conn.query(
-                `INSERT INTO vendor_attachment (vendor_id, attachment_path, attachment_name, expiry_date)
-                 VALUES (?, ?, ?, ?)`,
-                [customerId, (f.path || '').replace(/\\/g, '/'), f.originalname, expiry]
+                `INSERT INTO vendor_attachment (vendor_id, attachment_path, attachment_name, expiry_date, document_type_id)
+                 VALUES (?, ?, ?, ?, ?)`,
+                [customerId, (f.path || '').replace(/\\/g, '/'), f.originalname, expiry, docTypeId]
             );
         }
 
+        // History Logging
+        await conn.query(
+            `INSERT INTO vendor_history (vendor_id, user_id, action, details) VALUES (?, ?, ?, ?)`,
+            [customerId, userId, 'CREATED', JSON.stringify({ name: display_name })]
+        );
+
         await conn.commit();
-        res.json({ success: true, message: 'Customer created successfully', customerId, uniqid });
+        res.json({
+            success: true,
+            message: 'Customer created successfully',
+            id: customerId, // Send back numeric ID
+            uniqid
+        });
     } catch (err) {
         await conn.rollback();
         console.error('Create customer failed:', err);
@@ -245,6 +265,7 @@ router.get('/:uniqid/full', async (req, res) => {
       SELECT 
         v.*,
         currency.name AS currency_name,
+        pt.terms AS payment_terms,
         tax_treatment.name AS tax_name,
         CONCAT_WS(', ', va.bill_address_1, va.bill_address_2, va.bill_city, va.bill_zip_code) AS billing_address,
         CONCAT_WS(', ', va.ship_address_1, va.ship_address_2, va.ship_city, va.ship_zip_code) AS shipping_address,
@@ -284,6 +305,7 @@ router.get('/:uniqid/full', async (req, res) => {
       LEFT JOIN vendor_other vo ON v.id = vo.vendor_id
       LEFT JOIN vendor_address va ON v.id = va.vendor_id
       LEFT JOIN currency ON currency.id = vo.currency_id
+      LEFT JOIN payment_terms pt ON pt.id = vo.payment_terms_id
       LEFT JOIN tax_treatment ON tax_treatment.id = vo.tax_treatment_id
       LEFT JOIN state AS bill_state ON bill_state.id = va.bill_state_id
       LEFT JOIN country AS bill_country ON bill_country.id = va.bill_country_id
@@ -300,7 +322,13 @@ router.get('/:uniqid/full', async (req, res) => {
         const id = customer.id;
 
         const [contacts] = await db.promise().query(
-            `SELECT * FROM vendor_contact WHERE vendor_id = ?`,
+            `
+            SELECT 
+                c.*,
+                s.name as salutation_name
+            FROM contact c
+            LEFT JOIN salutation s ON c.salutation_id = s.id
+            WHERE c.vendor_id = ?`,
             [id]
         );
         const [attachments] = await db.promise().query(
@@ -308,11 +336,27 @@ router.get('/:uniqid/full', async (req, res) => {
             [id]
         );
         const [transactions] = await db.promise().query(
-            `SELECT * FROM vendor_transactions WHERE vendor_id = ?`,
+            // This table likely doesn't exist, using a placeholder.
+            // Using proforma_invoice as the source for customer transactions.
+            `SELECT * FROM proforma_invoice WHERE buyer_id = ?`,
+            [id]
+        );
+        const [history] = await db.promise().query(
+            `
+            SELECT
+                vh.id,
+                vh.action,
+                vh.details,
+                vh.created_at,
+                u.name AS user_name
+            FROM vendor_history vh
+            LEFT JOIN user u ON u.id = vh.user_id
+            WHERE vh.vendor_id = ? ORDER BY vh.created_at DESC`,
             [id]
         );
 
-        res.json({ customer, contacts, attachments, transactions: transactions || [] });
+
+        res.json({ customer, contacts, attachments, transactions: transactions || [], history: history || [] });
     } catch (err) {
         console.error('customers/:uniqid/full:', err);
         res.status(500).json(errPayload('Failed to load customer', 'DB_ERROR', err.message));
@@ -323,15 +367,15 @@ router.get('/:uniqid/full', async (req, res) => {
    POST /api/customers/upload
 ================================ */
 router.post('/upload', uploadCustomer.single('file'), async (req, res) => {
-    const { customer_id, expiry_date } = req.body;
+    const { customer_id, expiry_date, document_type_id } = req.body;
     const file = req.file;
     if (!file || !customer_id) return res.status(400).json(errPayload('Missing file or customer_id'));
 
     try {
         await db.promise().query(
-            `INSERT INTO vendor_attachment (vendor_id, attachment_path, attachment_name, expiry_date)
-       VALUES (?, ?, ?, ?)`,
-            [customer_id, file.path, file.originalname, expiry_date || null]
+            `INSERT INTO vendor_attachment (vendor_id, attachment_path, attachment_name, expiry_date, document_type_id)
+       VALUES (?, ?, ?, ?, ?)`,
+            [customer_id, file.path, file.originalname, expiry_date || null, document_type_id || null]
         );
         res.json({ success: true, message: 'File uploaded successfully' });
     } catch (err) {
@@ -357,7 +401,7 @@ router.put('/:id', uploadCustomer.array('attachments'), async (req, res) => {
     }
 
     const {
-        company_name, display_name, email_address, phone_work, phone_mobile, remarks,
+        company_name, display_name, email_address, phone_work, phone_mobile, remarks, website,
         tax_treatment_id, tax_registration_number, source_supply_id,
         currency_id, payment_terms_id,
         bill_attention, bill_country_id, bill_address_1, bill_address_2,
@@ -369,15 +413,72 @@ router.put('/:id', uploadCustomer.array('attachments'), async (req, res) => {
 
     const files = req.files || [];
     const conn = await db.promise().getConnection();
+    const tagsRaw = req.body.tags;
+    const safeTags = typeof tagsRaw === 'string' ? tagsRaw : JSON.stringify(tagsRaw || []);
 
     try {
         await conn.beginTransaction();
 
+        // --- History Logging: Fetch old state before update ---
+        const [oldVendorRows] = await conn.query(`
+            SELECT 
+                v.*, vo.*,
+                tt.name as tax_treatment_name,
+                ss.source as source_supply_name,
+                c.name as currency_name,
+                pt.terms as payment_terms_name
+            FROM vendor v 
+            LEFT JOIN vendor_other vo ON v.id = vo.vendor_id
+            LEFT JOIN tax_treatment tt ON tt.id = vo.tax_treatment_id
+            LEFT JOIN source_supply ss ON ss.id = vo.source_supply_id
+            LEFT JOIN currency c ON c.id = vo.currency_id
+            LEFT JOIN payment_terms pt ON pt.id = vo.payment_terms_id
+            WHERE v.id = ?`, [customerId]);
+        const oldVendor = oldVendorRows[0] || {};
+
+        const generateDiff = async (oldObj, newObj, fieldsToCompare) => {
+            const diff = [];
+            for (const key of fieldsToCompare) {
+                const oldValueId = oldObj[key] ?? '';
+                const newValueId = newObj[key] ?? '';
+
+                if (String(oldValueId) !== String(newValueId)) {
+                    let from = oldValueId;
+                    let to = newValueId;
+
+                    if (key.endsWith('_id')) {
+                        const nameKey = key.replace(/_id$/, '_name');
+                        from = oldObj[nameKey] || oldValueId;
+                        const lookupTable = { tax_treatment_id: 'tax_treatment', source_supply_id: 'source_supply', currency_id: 'currency', payment_terms_id: 'payment_terms' }[key];
+                        const lookupField = { tax_treatment_id: 'name', source_supply_id: 'source', currency_id: 'name', payment_terms_id: 'terms' }[key];
+                        if (lookupTable && newValueId) {
+                            const [toRows] = await conn.query(`SELECT ${lookupField} as name FROM ${lookupTable} WHERE id = ?`, [newValueId]);
+                            to = toRows[0]?.name || newValueId;
+                        }
+                    }
+                    diff.push({ field: key, from: from, to: to });
+                }
+            }
+            return diff;
+        };
+
+        const fieldsToTrack = [
+            'company_name', 'display_name', 'email_address', 'phone_work', 'phone_mobile', 'website', 'remarks',
+            'tax_treatment_id', 'tax_registration_number', 'source_supply_id', 'currency_id', 'payment_terms_id'
+        ];
+        const changes = await generateDiff(oldVendor, req.body, fieldsToTrack);
+        if (changes.length > 0) {
+            await conn.query(
+                `INSERT INTO vendor_history (vendor_id, user_id, action, details) VALUES (?, ?, ?, ?)`,
+                [customerId, userId, 'UPDATED', JSON.stringify(changes)]
+            );
+        }
+
         await conn.query(
             `UPDATE vendor
-       SET company_name = ?, display_name = ?, email_address = ?, phone_work = ?, phone_mobile = ?, remarks = ?, updated_user = ?, customer_type = ?
+       SET company_name = ?, display_name = ?, email_address = ?, phone_work = ?, phone_mobile = ?, tags = ?, remarks = ?, website = ?, updated_user = ?, customer_type = ?
        WHERE id = ? AND company_type_id = ?`,
-            [company_name, display_name, email_address, phone_work, phone_mobile, remarks, userId, customer_type || 'individual', customerId, COMPANY_TYPE_CUSTOMER]
+            [company_name, display_name, email_address, phone_work, phone_mobile, safeTags, remarks, website, userId, customer_type || 'individual', customerId, COMPANY_TYPE_CUSTOMER]
         );
 
         await conn.query(`DELETE FROM vendor_other WHERE vendor_id = ?`, [customerId]);
@@ -405,17 +506,23 @@ router.put('/:id', uploadCustomer.array('attachments'), async (req, res) => {
             ]
         );
 
-        await conn.query(`DELETE FROM vendor_contact WHERE vendor_id = ?`, [customerId]);
+        const fullAddress = [bill_address_1, bill_address_2, bill_city, bill_zip_code].filter(Boolean).join(', ');
+
+        await conn.query(`DELETE FROM contact WHERE vendor_id = ?`, [customerId]);
         for (const p of contactPersons) {
             await conn.query(
-                `INSERT INTO vendor_contact
-           (vendor_id, salutation_id, first_name, last_name, email, phone, mobile, skype_name_number, designation, department)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                `INSERT INTO contact
+           (vendor_id, is_primary, salutation_id, first_name, last_name, email, phone, mobile, skype_name_number, designation, department, customer_name, address, company_type_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     customerId,
+                    p.is_primary ? 1 : 0,
                     p.salutation_id, p.first_name, p.last_name,
                     p.email, p.phone, p.mobile,
-                    p.skype_name_number, p.designation, p.department
+                    p.skype_name_number, p.designation, p.department,
+                    display_name,
+                    fullAddress,
+                    COMPANY_TYPE_CUSTOMER
                 ]
             );
         }
@@ -427,10 +534,11 @@ router.put('/:id', uploadCustomer.array('attachments'), async (req, res) => {
         for (let i = 0; i < files.length; i++) {
             const f = files[i];
             const expiry = req.body[`attachment_expiry_${i}`] || null;
+            const docTypeId = req.body[`attachment_doctype_${i}`] || null;
             await conn.query(
-                `INSERT INTO vendor_attachment (vendor_id, attachment_path, attachment_name, expiry_date)
-         VALUES (?, ?, ?, ?)`,
-                [customerId, f.path, f.originalname, expiry]
+                `INSERT INTO vendor_attachment (vendor_id, attachment_path, attachment_name, expiry_date, document_type_id)
+         VALUES (?, ?, ?, ?, ?)`,
+                [customerId, f.path, f.originalname, expiry, docTypeId]
             );
         }
 
@@ -438,7 +546,10 @@ router.put('/:id', uploadCustomer.array('attachments'), async (req, res) => {
             const attId = req.body[`existing_attachment_id_${i}`];
             if (!attId) break;
             const expiry = req.body[`attachment_expiry_existing_${i}`] || null;
-            await conn.query(`UPDATE vendor_attachment SET expiry_date = ? WHERE id = ?`, [expiry, attId]);
+            const docTypeId = req.body[`attachment_doctype_existing_${i}`] || null;
+            await conn.query(
+                `UPDATE vendor_attachment SET expiry_date = ?, document_type_id = ? WHERE id = ?`,
+                [expiry, docTypeId, attId]);
         }
 
         await conn.commit();
@@ -471,7 +582,7 @@ router.delete('/attachments/:id', async (req, res) => {
 ================================ */
 router.post('/attachment/:id/update', uploadCustomer.single('file'), async (req, res) => {
     const { id } = req.params;
-    const { expiry_date } = req.body;
+    const { expiry_date, document_type_id } = req.body;
     const file = req.file;
 
     const updates = [];
@@ -482,7 +593,9 @@ router.post('/attachment/:id/update', uploadCustomer.single('file'), async (req,
         values.push(file.originalname, `uploads/customer/${file.filename}`);
     }
     updates.push('expiry_date = ?');
+    updates.push('document_type_id = ?');
     values.push(expiry_date || null);
+    values.push(document_type_id || null);
     values.push(id);
 
     try {
@@ -552,7 +665,7 @@ router.post('/contacts', async (req, res) => {
 
     try {
         await db.promise().query(
-            `INSERT INTO vendor_contact
+            `INSERT INTO contact
          (vendor_id, salutation_id, first_name, last_name, email, phone, mobile, skype_name_number, designation, department)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [customer_id, salutation, first_name, last_name, email, phone, mobile, skype_name_number, designation, department]
@@ -566,18 +679,18 @@ router.post('/contacts', async (req, res) => {
 
 router.put('/contacts/:id', async (req, res) => {
     const {
-        salutation, first_name, last_name, email,
+        salutation_id, first_name, last_name, email,
         phone, mobile, skype_name_number, designation, department
     } = req.body;
     const id = req.params.id;
 
     try {
         await db.promise().query(
-            `UPDATE vendor_contact SET
+            `UPDATE contact SET
          salutation_id = ?, first_name = ?, last_name = ?, email = ?,
          phone = ?, mobile = ?, skype_name_number = ?, designation = ?, department = ?
        WHERE id = ?`,
-            [salutation, first_name, last_name, email, phone, mobile, skype_name_number, designation, department, id]
+            [salutation_id, first_name, last_name, email, phone, mobile, skype_name_number, designation, department, id]
         );
         res.json({ message: 'Contact updated' });
     } catch (err) {
