@@ -520,30 +520,40 @@ router.post("/", uploadFields, async (req, res) => {
         // ===== Header insert =====
         const [ins] = await conn.query(
             `INSERT INTO purchase_orders (
-        po_uniqid, po_number, reference_no,
-        vendor_id, currency_id, is_organization, customer_id, discount_type, discount_amount,
+        po_uniqid, po_number, reference_no, trade_type_id, vendor_id, 
+        currency_id, is_organization, customer_id, customer, discount_type, discount_amount,
         delivery_address, billing_address, shipping_address,
         po_date, delivery_date,
         port_loading, port_discharge, inco_terms_id, no_containers,
         mode_shipment_id, partial_shipment_id, container_type_id, container_load_id,
-        payment_terms, documents_payment, documents_payment_ids, documents_payment_labels, documents_payment_text,
+        payment_terms_id, payment_description, documents_payment, documents_payment_ids, documents_payment_labels, documents_payment_text,
         termscondition, notes,
         subtotal, discount_percent, taxable, vat_total, total, 
         vat_id, vat_rate, vat_amount,
         status_id, created_at, updated_at
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW(),NOW())`,
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW(),NOW())`,
             [
                 po_uniqid,
                 po_number,
                 cleanStr(payload.reference),
-
+                payload.tradeTypeId || null,
                 payload.vendorId || null,
+
                 payload.currencyId || null,
                 payload.deliverTo === "org" ? 1 : 0,
                 payload.customerId || null,
+                // Add the customer JSON object to the INSERT statement
+                payload.customerDetail
+                    ? {
+                          name: payload.customerDetail.name,
+                          full_address: payload.customerDetail.full_address,
+                          telephone: payload.customerDetail.telephone,
+                          fax: payload.customerDetail.fax,
+                          country: payload.customerDetail.country,
+                      }
+                    : null,
                 discount_type,
                 discount_input_value, // <-- Save the raw input value
-
                 cleanStr(payload.deliveryAddress),
                 cleanStr(payload.vendorBillAddrText) || cleanStr(payload.billing_address),
                 cleanStr(payload.vendorShipAddrText) || cleanStr(payload.shipping_address),
@@ -563,6 +573,7 @@ router.post("/", uploadFields, async (req, res) => {
                 payload.container_type_id || null,
                 payload.container_load_id || null,
 
+                payload.paymentTermsId || null,
                 cleanStr(payload.paymentTermsText) || cleanStr(payload.payment_terms),
                 // keep legacy string too (if used elsewhere)
                 cleanStr(payload.documentsForPayment) || cleanStr(payload.documents_payment),
@@ -676,7 +687,7 @@ router.post("/", uploadFields, async (req, res) => {
             errPayload(
                 "Failed to create purchase order",
                 err?.code || "DB_ERROR",
-                err?.sqlMessage || err?.message
+                err?.sqlMessage || err?.message // The detailed message will now be the hint
             )
         );
     } finally {
@@ -915,18 +926,28 @@ router.put("/:uniqid", uploadFields, async (req, res) => {
             cleanStr(payload.documentsForPayment) ||
             cleanStr(payload.documents_payment);
 
+        // Correctly build the customer JSON object for the update
+        const customerObject = payload.customerDetail
+            ? {
+                  name: payload.customerDetail.name,
+                  full_address: payload.customerDetail.full_address,
+                  telephone: payload.customerDetail.telephone,
+                  fax: payload.customerDetail.fax,
+                  country: payload.customerDetail.country,
+              }
+            : null;
 
 
         // ===== header update =====
         await conn.query(
             `UPDATE purchase_orders SET
-         po_number=?, reference_no=?, discount_type=?, discount_amount=?,
+         po_number=?, reference_no=?, trade_type_id=?, discount_type=?, discount_amount=?,
          vendor_id=?, currency_id=?, is_organization=?, customer_id=?,
-         delivery_address=?, billing_address=?, shipping_address=?,
+         customer=?, delivery_address=?, billing_address=?, shipping_address=?,
          po_date=?, delivery_date=?,
          port_loading=?, port_discharge=?, inco_terms_id=?, no_containers=?,
-         mode_shipment_id=?, partial_shipment_id=?, container_type_id=?, container_load_id=?,
-         payment_terms=?, documents_payment=?, documents_payment_ids=?, documents_payment_labels=?, documents_payment_text=?,
+         mode_shipment_id=?, partial_shipment_id=?, container_type_id=?, container_load_id=?, 
+         payment_terms_id=?, payment_description=?, documents_payment=?, documents_payment_ids=?, documents_payment_labels=?, documents_payment_text=?,
          termscondition=?, notes=?,
          subtotal=?, discount_percent=?, taxable=?, vat_total=?, total=?, 
          vat_id=?, vat_rate=?, vat_amount=?,
@@ -936,6 +957,7 @@ router.put("/:uniqid", uploadFields, async (req, res) => {
             [
                 incomingPoNumber || po.po_number,
                 cleanStr(payload.reference),
+                payload.tradeTypeId || null,
                 discount_type,
                 discount_input_value, // <-- Save the raw input value
 
@@ -943,6 +965,7 @@ router.put("/:uniqid", uploadFields, async (req, res) => {
                 payload.currencyId || null,
                 payload.deliverTo === "org" ? 1 : 0,
                 payload.customerId || null,
+                customerObject, // Add the customer JSON object here
 
                 cleanStr(payload.deliveryAddress),
                 cleanStr(payload.vendorBillAddrText) || cleanStr(payload.billing_address),
@@ -965,7 +988,10 @@ router.put("/:uniqid", uploadFields, async (req, res) => {
                 payload.container_type_id || null,
                 payload.container_load_id || null,
 
-                cleanStr(payload.paymentTermsText) || cleanStr(payload.payment_terms),
+                payload.paymentTermsId || null, // Use new payment_terms_id
+                // Prioritize paymentTermsText, even if it's an empty string.
+                // Use nullish coalescing operator (??) for cleaner logic.
+                cleanStr(payload.paymentTermsText) ?? cleanStr(payload.payment_terms), // Use new payment_description
                 cleanStr(payload.documentsForPayment) || cleanStr(payload.documents_payment),
                 JSON.stringify(docs_ids || []),
                 JSON.stringify(docs_labels || []),
@@ -1084,7 +1110,7 @@ router.put("/:uniqid", uploadFields, async (req, res) => {
                 errPayload(
                     "Failed to update purchase order",
                     err?.code || "DB_ERROR",
-                    err?.sqlMessage || err?.message
+                    err?.sqlMessage || err?.message // The detailed message will now be the hint
                 )
             );
     } finally {

@@ -218,6 +218,20 @@ router.get('/', async (req, res) => {
 });
 
 // ==================================================
+// GET /api/products/count
+// ==================================================
+router.get('/count', async (req, res) => {
+    try {
+        const [rows] = await db.promise().query('SELECT COUNT(*) as total FROM products');
+        res.json({ total: rows[0]?.total || 0 });
+    } catch (err) {
+        console.error('GET /api/products/count failed:', err);
+        res.status(500).json({ error: 'Failed to get product count' });
+    }
+});
+
+
+// ==================================================
 // GET /api/products/:id (details + images + opening)
 // ==================================================
 // ==================================================
@@ -1287,7 +1301,6 @@ router.get('/packings/:packingDetailId/in-use', async (req, res) => {
     res.status(500).json({ inUse: true, error: 'CHECK_FAILED' });
   }
 });
-
 
 
 

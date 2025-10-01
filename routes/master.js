@@ -115,6 +115,19 @@ const MASTER_CONFIG = {
         listSearchIn: ['dp.name', 'c.name'],
         listOrderBy: 'dp.name'
     },
+    mode_of_shipment: {
+        table: 'mode_of_shipment',
+        id: 'id',
+        fields: [
+            { name: 'name', type: 'string', required: true },
+            { name: 'trade_type_id', type: 'number', lookup: 'trade_type' }
+        ],
+        listSelect: 'mos.id, mos.name, mos.trade_type_id, tt.name AS trade_type_name',
+        listFrom: 'mode_of_shipment mos LEFT JOIN trade_type tt ON tt.id = mos.trade_type_id',
+        listSearchIn: ['mos.name', 'tt.name'],
+        listOrderBy: 'mos.name'
+    },
+
     state: {
         table: 'state',
         id: 'id',
@@ -138,6 +151,25 @@ const MASTER_CONFIG = {
         id: 'id',
         fields: [{ name: 'name', type: 'string', required: true }],
         listOrderBy: 'name'
+    },
+    trade_type: {
+        table: 'trade_type',
+        id: 'id',
+        fields: [{ name: 'name', type: 'string', required: true }],
+        listOrderBy: 'name'
+    },
+    inco_terms: {
+        table: 'inco_terms',
+        id: 'id',
+        fields: [
+            { name: 'name', type: 'string', required: true },
+            { name: 'acronyms', type: 'string', required: true },
+            { name: 'trade_type_id', type: 'number', lookup: 'trade_type' }
+        ],
+        listSelect: 'it.id, it.name, it.acronyms, it.trade_type_id, tt.name AS trade_type_name',
+        listFrom: 'inco_terms it LEFT JOIN trade_type tt ON tt.id = it.trade_type_id',
+        listSearchIn: ['it.name', 'it.acronyms', 'tt.name'],
+        listOrderBy: 'it.name'
     },
     kyc_documents: {
         table: 'kyc_documents',

@@ -25,6 +25,7 @@ import shipmentStageRoutes from './routes/shipmentStage.js';
 import modeShipmentRoutes from './routes/modeShipment.js';
 import bankRoutes from './routes/bank.js';
 import partialShipmentRoutes from './routes/partialShipment.js';
+import paymentTermsRoutes from './routes/paymentTerms.js';
 import containerTypeRoutes from './routes/containerType.js';
 import containerLoadRoutes from './routes/containerLoad.js';
 import documentRoutes from './routes/document.js';
@@ -167,6 +168,7 @@ app.use("/api/master", masterRoutes);
 app.use("/api/warehouses", warehousesRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/rbac', rbacRoutes);
+app.use('/api/paymentTerms', paymentTermsRoutes);
 
 //Role permission
 app.get('/api/me', requireAuth, async (req, res) => {
@@ -502,6 +504,8 @@ function query(sql, params = []) {
 
 // Products API
 app.use('/api/products', productRoutes);
+
+
 
 // Your POST route
 app.post('/api/products', upload.array('images', 15), async (req, res) => {
