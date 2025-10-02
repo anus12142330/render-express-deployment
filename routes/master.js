@@ -102,17 +102,18 @@ const MASTER_CONFIG = {
         id: 'id',
         fields: [
             { name: 'name', type: 'string', required: true },
-            { name: 'country_id', type: 'number', required: true, lookup: 'countries' }
+            { name: 'country_id', type: 'number', required: true, lookup: 'countries' },
+            { name: 'port_code', type: 'string', required: false }
         ],
         listSelect: `
-            dp.id, dp.name, dp.country_id,
+            dp.id, dp.name, dp.country_id, dp.port_code,
             c.name AS country_name
         `,
         listFrom: `
             delivery_place dp
             LEFT JOIN country c ON c.id = dp.country_id
         `,
-        listSearchIn: ['dp.name', 'c.name'],
+        listSearchIn: ['dp.name', 'c.name', 'dp.port_code'],
         listOrderBy: 'dp.name'
     },
     mode_of_shipment: {
@@ -439,6 +440,11 @@ router.get('/:type', async (req, res, next) => {
         const pageSize = Math.min(Math.max(parseInt(req.query.pageSize || '25', 10), 1), 200);
         const q = (req.query.search || req.query.q || '').trim();
         const all = req.query.all === '1';
+        
+        // Sorting parameters
+        const sortField = req.query.sort_field;
+        const sortOrder = (req.query.sort_order || 'desc').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+
 
         if (type === 'category') {
             try {
@@ -487,13 +493,18 @@ router.get('/:type', async (req, res, next) => {
 
         // JOIN-enabled path
         if (cfg.listFrom && cfg.listSelect) {
-            const orderBy = `${cfg.listSearchIn?.[0]?.split('.')[0] || 'c'}.${cfg.id}`;
+            // Use requested sort field if valid, otherwise fallback to config or default
+            const defaultSortCol = cfg.listOrderBy || `${cfg.listSearchIn?.[0]?.split('.')[0] || 'c'}.${cfg.id}`;
+            const orderBy = sortField ? `${sortField} ${sortOrder}` : `${defaultSortCol} DESC`;
+
             // Ignore search query `q` when `all` is requested for dropdowns
             const { whereSql, params } = buildSearchClause(cfg.listSearchIn, all ? '' : q);
 
             // For dropdowns, we don't need the in_use check.
             if (all) {
-                const dataSql = `SELECT ${cfg.listSelect} FROM ${cfg.listFrom} ${whereSql} ORDER BY ${orderBy} DESC`;
+                // Dropdowns should still be sorted consistently
+                const dropdownOrderBy = cfg.listOrderBy || cfg.listSearchIn?.[0] || cfg.id;
+                const dataSql = `SELECT ${cfg.listSelect} FROM ${cfg.listFrom} ${whereSql} ORDER BY ${dropdownOrderBy} ASC`;
                 db.query(dataSql, params, (err, rows) => {
                     if (err) return next(err);
                     // For `all=1`, we return a flat array, not the {rows, total} object
@@ -512,7 +523,7 @@ router.get('/:type', async (req, res, next) => {
           SELECT ${cfg.listSelect} ${inUseSelect}
           FROM ${cfg.listFrom}
           ${whereSql}
-          ORDER BY ${orderBy} DESC
+          ORDER BY ${orderBy}
           LIMIT ? OFFSET ?
         `;
                 db.query(dataSql, [...params, pageSize, offset], (err2, rows) => {
@@ -524,14 +535,17 @@ router.get('/:type', async (req, res, next) => {
         }
 
         // Simple table path
-        const orderBy = cfg.id;
+        const defaultSortCol = cfg.listOrderBy || cfg.id;
+        const orderBy = sortField ? `\`${sortField}\` ${sortOrder}` : `\`${defaultSortCol}\` DESC`;
+
         const searchCols = cfg.fields?.map(f => `\`${f.name}\``) || ['`name`'];
         // Ignore search query `q` when `all` is requested for dropdowns
         const { whereSql, params } = buildSearchClause(searchCols, all ? '' : q);
 
         // For dropdowns, we don't need the in_use check.
         if (all) {
-            const dataSql = `SELECT * FROM \`${cfg.table}\` ${whereSql} ORDER BY \`${orderBy}\` DESC`;
+            const dropdownOrderBy = cfg.listOrderBy || cfg.fields[0]?.name || cfg.id;
+            const dataSql = `SELECT * FROM \`${cfg.table}\` ${whereSql} ORDER BY \`${dropdownOrderBy}\` ASC`;
             db.query(dataSql, params, (err, rows) => {
                 if (err) return next(err);
                 return res.json(rows);
@@ -545,7 +559,7 @@ router.get('/:type', async (req, res, next) => {
 
             const offset = (page - 1) * pageSize;
             db.query(
-                `SELECT * ${inUseSelect} FROM \`${cfg.table}\` ${whereSql} ORDER BY \`${orderBy}\` DESC LIMIT ? OFFSET ?`,
+                `SELECT * ${inUseSelect} FROM \`${cfg.table}\` ${whereSql} ORDER BY ${orderBy} LIMIT ? OFFSET ?`,
                 [...params, pageSize, offset],
                 (err2, rows) => {
                     if (err2) return next(err2);

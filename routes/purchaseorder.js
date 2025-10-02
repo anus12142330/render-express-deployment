@@ -242,9 +242,9 @@ router.get("/by-uniqid/:uniqid", async (req, res) => {
             `SELECT
                  po.*, DATE_FORMAT(po.po_date, '%Y-%m-%d')  AS po_date, DATE_FORMAT(po.delivery_date, '%Y-%m-%d') AS delivery_date,
                  s.name AS status_name,
-                 v.display_name AS vendor_name,                
-                 dpl.name as loading_name,
-                 dpd.name as discharge_name,
+                 v.display_name AS vendor_name,
+                 dpl.name as loading_name, dpl.id as port_loading_id,
+                 dpd.name as discharge_name, dpd.id as port_discharge_id,
                  inco.name as inco_name,
                  tax.tax_name,
                  c.display_name as customer_name,
@@ -371,7 +371,7 @@ router.post("/", uploadFields, async (req, res) => {
 
     // --- parse payload ---
     const mode = (req.query.mode || "ISSUE").toUpperCase(); // DRAFT | ISSUE
-    let payload = {};
+    let payload = {}; // DRAFT | SAVE | ISSUE
     try {
         payload = JSON.parse(req.body.payload || "{}");
     } catch {
@@ -501,9 +501,8 @@ router.post("/", uploadFields, async (req, res) => {
             po_number = await ensureUniquePONumber(conn, null, { width: 3 });
         }
 
-        const status_id =
-            payload.status_id ??
-            (await resolveStatusIdByName(conn, mode === "DRAFT" ? "Draft" : "Issued"));
+        // Set status_id: 3 for Draft, 5 for Save (which is like Issue) and Save & Send (Issue)
+        const status_id = payload.status_id ?? (mode === "DRAFT" ? 3 : 5); // SAVE and ISSUE both become 5
 
         // ===== Documents for payment fields =====
         const docs_ids = Array.isArray(payload.documentsForPaymentIds)
@@ -672,7 +671,7 @@ router.post("/", uploadFields, async (req, res) => {
                 vat_total,
                 total,
                 status_id,
-                status_name: srow?.name || (mode === "DRAFT" ? "Draft" : "Issued"),
+                status_name: srow?.name,
             },
         });
     } catch (err) {
@@ -702,6 +701,7 @@ router.post("/", uploadFields, async (req, res) => {
 // UPDATE Purchase Order (header + items + attachments)
 router.put("/:uniqid", uploadFields, async (req, res) => {
     const uniqid = req.params.uniqid;
+    const mode = (req.query.mode || "SAVE").toUpperCase(); // SAVE | DRAFT | ISSUE
 
     // ===== helpers (local, side-effect free) =====
     const nz = (n, d = 0) => {
@@ -909,9 +909,13 @@ router.put("/:uniqid", uploadFields, async (req, res) => {
         const total = +(taxable + vat_total).toFixed(2);
 
         // ----- optional status update -----
-        let status_id = payload.status_id ?? null;
-        if (!status_id && payload.status_name) {
-            status_id = await resolveStatusIdByName(conn, payload.status_name);
+        // Use a consistent and safe way to determine status_id
+        let status_id;
+        const requestedStatusId = parseInt(payload.status_id, 10);
+        if (Number.isFinite(requestedStatusId)) {
+            status_id = requestedStatusId;
+        } else {
+            status_id = mode === "DRAFT" ? 3 : 5; // Default: 3 for Draft, 5 for Save/Issue
         }
 
         // ----- documents for payment -----
@@ -951,7 +955,7 @@ router.put("/:uniqid", uploadFields, async (req, res) => {
          termscondition=?, notes=?,
          subtotal=?, discount_percent=?, taxable=?, vat_total=?, total=?, 
          vat_id=?, vat_rate=?, vat_amount=?,
-         status_id = COALESCE(?, status_id),
+         status_id = ?,
          updated_at=NOW()
        WHERE id=?`,
             [
@@ -1122,23 +1126,23 @@ router.put("/:uniqid", uploadFields, async (req, res) => {
 /* ------------------------------- status update ---------------------------- */
 router.put("/:uniqid/status", async (req, res) => {
     const uniqid = req.params.uniqid;
-    const { status_id, status_name } = req.body;
+    const { status_id } = req.body; // Only use status_id from the request
 
     const conn = await db.promise().getConnection();
     try {
+        await conn.beginTransaction();
         const [[po]] = await conn.query("SELECT id FROM purchase_orders WHERE po_uniqid = ? LIMIT 1", [uniqid]);
         if (!po) return res.status(404).json({ error: { message: "Not found" } });
 
-        let sid = status_id ?? null;
-        if (!sid && status_name) {
-            const [[s]] = await conn.query("SELECT id FROM status WHERE LOWER(name)=LOWER(?) LIMIT 1", [String(status_name)]);
-            sid = s?.id ?? null;
-        }
-        if (!sid) return res.status(400).json({ error: { message: "Invalid status" } });
+        const sid = parseInt(status_id, 10);
+        if (!Number.isFinite(sid)) return res.status(400).json({ error: { message: "Invalid status_id provided. It must be a number." } });
 
-        await conn.query("UPDATE purchase_orders SET status_id=?, updated_at=NOW() WHERE id=?", [sid, po.id]);
+        await conn.query("UPDATE purchase_orders SET status_id = ?, updated_at = NOW() WHERE id = ?", [sid, po.id]);
         const [[srow]] = await conn.query("SELECT name FROM status WHERE id=? LIMIT 1", [sid]);
-        res.json({ ok: true, status_id: sid, status_name: srow?.name || status_name });
+
+        await conn.commit();
+
+        res.json({ ok: true, status_id: sid, status_name: srow?.name || null });
     } catch (err) {
         res.status(500).json({ error: { message: "Failed to update status" } });
     } finally { conn.release(); }

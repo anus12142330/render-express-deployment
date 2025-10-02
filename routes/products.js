@@ -167,7 +167,17 @@ router.get('/', async (req, res) => {
                         FROM product_details pd
                         WHERE pd.product_id = p.id ORDER BY pd.id ASC LIMIT 1
                     ) as packing_text
-                    ,
+                    , 
+                    (
+                        SELECT pd.variety
+                        FROM product_details pd
+                        WHERE pd.product_id = p.id ORDER BY pd.id ASC LIMIT 1
+                    ) as variety,
+                    (
+                        SELECT pd.grade_and_size_code
+                        FROM product_details pd
+                        WHERE pd.product_id = p.id ORDER BY pd.id ASC LIMIT 1
+                    ) as grade_and_size_code,
                     (
                         SELECT um.name
                         FROM product_details pd_uom
@@ -207,6 +217,8 @@ router.get('/', async (req, res) => {
                 stock_on_hand: Number(r.stock || 0),
                 image_url: r.image_url || null,
                 thumbnail_url: r.thumbnail_url || r.image_url || null,
+                variety: r.variety || null,
+                grade_and_size_code: r.grade_and_size_code || null,
                 uom: r.uom || ''
             })),
             totalRows

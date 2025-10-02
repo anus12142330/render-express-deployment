@@ -717,9 +717,10 @@ app.get('/api/salutations', (req, res) => {
 // Load company settings (latest one)
 app.get('/api/company-settings', (req, res) => {
   db.query(
-    `SELECT cs.*, c.id as currency_id, c.name as currency_name 
-     FROM company_settings cs 
-     LEFT JOIN currency c ON cs.base_currency = c.id 
+    `SELECT cs.*, c.id as currency_id, c.name as currency_name, co.id as company_country_id
+     FROM company_settings cs
+     LEFT JOIN currency c ON cs.base_currency = c.id
+     LEFT JOIN country co ON cs.country = co.name -- Join to get country_id from country name
      ORDER BY cs.id DESC LIMIT 1`,
     (err, results) => {
     if (err) return res.status(500).json({ error: err });
