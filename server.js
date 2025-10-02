@@ -745,13 +745,55 @@ app.get('/api/company-settings', (req, res) => {
   });
 });
 
+// ✅ GET a specific company's settings by ID
+app.get('/api/company-settings/:id', (req, res) => {
+  const { id } = req.params;
+  if (!id) return res.status(400).json({ error: 'Company ID is required' });
+
+  db.query(
+    `SELECT cs.*, c.id as currency_id, c.name as currency_name, co.id as company_country_id
+     FROM company_settings cs
+     LEFT JOIN currency c ON cs.base_currency = c.id
+     LEFT JOIN country co ON cs.country = co.name
+     WHERE cs.id = ?`,
+    [id],
+    (err, results) => {
+      if (err) return res.status(500).json({ error: err?.sqlMessage || 'Database error' });
+      if (results.length > 0) {
+        const settings = results[0];
+        if (settings.currency_id && settings.currency_name) {
+          settings.base_currency = { value: settings.currency_id, label: settings.currency_name };
+        } else {
+          settings.base_currency = null;
+        }
+        res.json(settings);
+      } else {
+        res.status(404).json({ error: 'Company not found' });
+      }
+    }
+  );
+});
+
+// ✅ GET all companies for tabbing interface
+app.get('/api/companies', (req, res) => {
+  db.query(
+    `SELECT id, name, industry, logo FROM company_settings ORDER BY id ASC`,
+    (err, results) => {
+      if (err) return res.status(500).json({ error: err?.sqlMessage || 'Database error' });
+      res.json(results || []);
+    }
+  );
+});
+
+
 // Insert company settings
 // Insert company settings (accepts logo and/or company_stamp)
 app.post('/api/company-settings', uploadCompany, (req, res) => {
     const {
         name, industry, full_address, telephone, fax, country, is_tax_registered, trn_no,
         primary_contact_email, base_currency,
-        fiscal_year_id, fiscal_start_day, language_id, timezone_id, date_format_id, company_prefix
+        fiscal_year_id, fiscal_start_day, language_id, timezone_id, date_format_id, company_prefix,
+        existing_logo_path // For copying logo
     } = req.body;
 
     const logoFile  = req.files?.logo?.[0] || null;
@@ -777,7 +819,30 @@ app.post('/api/company-settings', uploadCompany, (req, res) => {
         }
     }
 
-    const logo = logoFile ? `uploads/company/${logoFile.filename}` : null;
+    let base64logo = null;
+    if (logoFile) {
+        try {
+            const fileBuffer = fs.readFileSync(logoFile.path);
+            const ext = path.extname(logoFile.originalname).substring(1) || 'png';
+            base64logo = `data:image/${ext};base64,${fileBuffer.toString('base64')}`;
+        } catch (err) {
+            console.error('Error converting new logo to base64 on create:', err);
+        }
+    } else if (existing_logo_path) {
+        // If copying, generate base64 from the existing file path
+        try {
+            const fullPath = path.join(__dirname, '..', existing_logo_path);
+            if (fs.existsSync(fullPath)) {
+                const fileBuffer = fs.readFileSync(fullPath);
+                const ext = path.extname(existing_logo_path).substring(1) || 'png';
+                base64logo = `data:image/${ext};base64,${fileBuffer.toString('base64')}`;
+            }
+        } catch (err) {
+            console.error('Error converting existing logo to base64 on create:', err);
+        }
+    }
+
+    const logo = logoFile ? `uploads/company/${logoFile.filename}` : (existing_logo_path || null);
     const company_stamp = stampFile ? `uploads/company/${stampFile.filename}` : null;
 
     const sql = `
@@ -785,24 +850,26 @@ app.post('/api/company-settings', uploadCompany, (req, res) => {
       (name, industry, full_address, telephone, fax, country, is_tax_registered, trn_no,
        primary_contact_email, base_currency,
        fiscal_year_id, fiscal_start_day, language_id, timezone_id, date_format_id,
-       logo, company_stamp, company_prefix)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       logo, company_stamp, company_prefix, base64logo)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `;
     const params = [
         name, industry, full_address, telephone, fax, country, is_tax_registered === '1' ? 1 : 0, trn_no || null,
         primary_contact_email, final_base_currency,
         fiscal_year_id || null, fiscal_start_day || 1, language_id || null, timezone_id || null, date_format_id || null,
-        logo, company_stamp, company_prefix || null,
+        logo, company_stamp, company_prefix || null, base64logo,
     ];
 
     db.query(sql, params, (err, result) => {
         if (err) return res.status(500).json({ error: err?.sqlMessage || 'Database error' });
         res.json({
             success: true,
-            id: result.insertId,
+            id: result.insertId, // Keep id for frontend logic
+            name: name, // Return the saved name
+            industry: industry, // Return the saved industry
+            logo: logo, // Return the new logo path
             message: 'Company settings saved successfully',
-            logo_path: logo,
-            company_stamp_path: company_stamp
+            company_stamp_path: company_stamp // Keep this if used elsewhere
         });
     });
 });
@@ -845,7 +912,7 @@ app.put('/api/company-settings/:id', uploadCompany, (req, res) => {
     ];
     const values = [
         name, industry, full_address, telephone, fax, country, is_tax_registered === '1' ? 1 : 0, trn_no || null,
-        primary_contact_email, base_currency,
+        primary_contact_email, final_base_currency,
         fiscal_year_id || null, fiscal_start_day || 1, language_id || null, timezone_id || null, date_format_id || null,
         company_prefix || null,
     ];
@@ -858,14 +925,14 @@ app.put('/api/company-settings/:id', uploadCompany, (req, res) => {
         values.push(logoPath);
 
         try {
-            const fileBuffer = fs.readFileSync(logoFile.path);
+            const fileBuffer = fs.readFileSync(logoFile.path); // Read file from disk path provided by multer
             const ext = path.extname(logoFile.originalname).substring(1) || 'png';
             const base64logo = `data:image/${ext};base64,${fileBuffer.toString('base64')}`;
             fields.push('base64logo = ?');
             values.push(base64logo);
         } catch (err) {
-            console.error('❌ Error converting logo to base64:', err);
-            return res.status(500).json({ error: 'Failed to process uploaded logo.' });
+            console.error('Error converting logo to base64 on update:', err);
+            // Don't add base64 if conversion fails
         }
     }
 
@@ -882,7 +949,11 @@ app.put('/api/company-settings/:id', uploadCompany, (req, res) => {
 
     db.query(sql, values, (err) => {
         if (err) return res.status(500).json({ error: err?.sqlMessage || 'Database error' });
-        res.json({ success: true, message: 'Company settings updated successfully' });
+        res.json({
+            success: true,
+            message: 'Company settings updated successfully',
+            logo: logoFile ? `uploads/company/${logoFile.filename}` : req.body.existing_logo_path || null
+        });
     });
 });
 

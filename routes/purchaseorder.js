@@ -257,7 +257,7 @@ router.get("/by-uniqid/:uniqid", async (req, res) => {
                  COALESCE(po.documents_payment_text, po.documents_payment) AS documents_payment_display
              FROM purchase_orders po
                  LEFT JOIN vendor v ON v.id = po.vendor_id
-                 LEFT JOIN customer c ON c.id=po.customer_id
+                 LEFT JOIN vendor c ON c.id=po.customer_id
                  LEFT JOIN status s ON s.id = po.status_id
                  LEFT JOIN delivery_place as dpl ON dpl.id=po.port_loading
                  LEFT JOIN delivery_place as dpd ON dpd.id=po.port_discharge

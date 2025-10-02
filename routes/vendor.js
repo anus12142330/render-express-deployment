@@ -26,10 +26,10 @@ const uploadVendor = multer({ storage: vendorStorage });
 
 // ---------- Constants ----------
 /**
- * company_type_id: '0' => vendor
+ * company_type_id: '1' => vendor
  * (matches your DB which stores company/customer in the same `vendor` table)
  */
-const COMPANY_TYPE_VENDOR = '0';
+const COMPANY_TYPE_VENDOR = '1';
 
 /* ================================
    GET /api/document-types
@@ -155,7 +155,7 @@ router.post('/', uploadVendor.array('attachments'), async (req, res) => {
         tags, tax_treatment_id, tax_registration_number, source_supply_id,
         currency_id, payment_terms_id,
         bill_attention, bill_country_id, bill_address_1, bill_address_2,
-        bill_city, bill_state_id, bill_zip_code, bill_phone, bill_fax,
+        bill_city, bill_state_id, bill_zip_code, bill_phone, bill_fax, customer_of,
         ship_attention, ship_country_id, ship_address_1, ship_address_2,
         ship_city, ship_state_id, ship_zip_code, ship_phone, ship_fax
     } = req.body;
@@ -181,13 +181,13 @@ router.post('/', uploadVendor.array('attachments'), async (req, res) => {
         const [ins] = await conn.query(
             `
       INSERT INTO vendor
-        (company_name, display_name, email_address, phone_work, phone_mobile,tags , remarks, website,
-         uniqid, user_id, updated_user, company_type_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (company_name, display_name, email_address, phone_work, phone_mobile, tags, remarks, website,
+         uniqid, user_id, updated_user, company_type_id, customer_of)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
             [
                 company_name, display_name, email_address, phone_work, phone_mobile, safeTags, remarks, website,
-                uniqid, userId, userId, COMPANY_TYPE_VENDOR
+                uniqid, userId, userId, COMPANY_TYPE_VENDOR, customer_of || null
             ]
         );
         const vendorId = ins.insertId;
@@ -411,7 +411,7 @@ router.put('/:id', uploadVendor.array('attachments'), async (req, res) => {
         tags, tax_treatment_id, tax_registration_number, source_supply_id,
         currency_id, payment_terms_id,
         bill_attention, bill_country_id, bill_address_1, bill_address_2,
-        bill_city, bill_state_id, bill_zip_code, bill_phone, bill_fax,
+        bill_city, bill_state_id, bill_zip_code, bill_phone, bill_fax, customer_of,
         ship_attention, ship_country_id, ship_address_1, ship_address_2,
         ship_city, ship_state_id, ship_zip_code, ship_phone, ship_fax
     } = req.body;
@@ -493,9 +493,9 @@ router.put('/:id', uploadVendor.array('attachments'), async (req, res) => {
 
         await conn.query(
             `UPDATE vendor
-       SET company_name = ?, display_name = ?, email_address = ?, phone_work = ?, phone_mobile = ?, tags = ?, remarks = ?, website = ?, updated_user = ?
+       SET company_name = ?, display_name = ?, email_address = ?, phone_work = ?, phone_mobile = ?, tags = ?, remarks = ?, website = ?, updated_user = ?, customer_of = ?
        WHERE id = ? AND company_type_id = ?`,
-            [company_name, display_name, email_address, phone_work, phone_mobile, safeTags,   remarks, website, userId, vendorId, COMPANY_TYPE_VENDOR]
+            [company_name, display_name, email_address, phone_work, phone_mobile, safeTags, remarks, website, userId, customer_of || null, vendorId, COMPANY_TYPE_VENDOR]
         );
 
         await conn.query(`DELETE FROM vendor_other WHERE vendor_id = ?`, [vendorId]);
