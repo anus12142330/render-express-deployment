@@ -532,7 +532,7 @@ router.put('/:id', uploadVendor.array('attachments'), async (req, res) => {
                         from = oldObj[nameKey] || oldValueId;
                         // For the 'to' value, we need to fetch it based on the new ID
                         const lookupTable = { tax_treatment_id: 'tax_treatment', source_supply_id: 'source_supply', currency_id: 'currency', payment_terms_id: 'payment_terms' }[key];
-                        const lookupField = { tax_treatment_id: 'name', source_supply_id: 'source', currency_id: 'name', payment_terms_id: 'terms' }[key];
+                        const lookupField = { tax_treatment_id: 'name', source_supply_id: 'source', currency_id: 'name', payment_terms_id: 'name' }[key];
                         if (lookupTable && newValueId) {
                             const [toRows] = await conn.query(`SELECT ${lookupField} as name FROM ${lookupTable} WHERE id = ?`, [newValueId]);
                             to = toRows[0]?.name || newValueId;
@@ -791,5 +791,6 @@ router.put('/contacts/:id', async (req, res) => {
         res.status(500).json(errPayload('Failed to update contact', 'DB_ERROR', err.message));
     }
 });
+
 
 export default router;

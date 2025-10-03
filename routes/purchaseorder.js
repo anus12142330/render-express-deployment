@@ -246,7 +246,9 @@ router.get("/by-uniqid/:uniqid", async (req, res) => {
                  s.name AS status_name,
                  v.display_name AS vendor_name,
                  dpl.name as loading_name, dpl.id as port_loading_id,
-                 po.company_id, comp.name as company_name,
+                 po.company_id,
+                comp.name  as company_name,
+                comp.logo  as company_logo,               
                  dpd.name as discharge_name, dpd.id as port_discharge_id,
                  inco.name as inco_name,
                  tax.tax_name,
@@ -257,7 +259,8 @@ router.get("/by-uniqid/:uniqid", async (req, res) => {
                  ms.name as mode_shipment_name,
                    ct.label as container_type_label,
                    cl.label as container_load_label,
-                 COALESCE(po.documents_payment_text, po.documents_payment) AS documents_payment_display
+                 COALESCE(po.documents_payment_text, po.documents_payment) AS documents_payment_display,
+                 pt.terms as payment_terms_name
              FROM purchase_orders po
                  LEFT JOIN vendor v ON v.id = po.vendor_id
                  LEFT JOIN vendor c ON c.id=po.customer_id
@@ -271,6 +274,7 @@ router.get("/by-uniqid/:uniqid", async (req, res) => {
                  LEFT JOIN mode_of_shipment as ms ON ms.id=po.mode_shipment_id
                 LEFT JOIN container_type as ct ON ct.id=po.container_type_id
                 LEFT JOIN container_load cl ON cl.id=po.container_load_id
+                LEFT JOIN payment_terms pt ON pt.id = po.payment_terms_id
              WHERE po.po_uniqid = ?
                  LIMIT 1`,
             [uniqid]
@@ -341,7 +345,49 @@ router.get("/by-uniqid/:uniqid", async (req, res) => {
             [header.id]
         );
 
-        res.json({ header, items: items || [], attachments: attachments || [] });
+        // --- Document Template (for signatures/stamps) ---
+// --- Document Template (signature & stamp) ---
+// Prefer exact company match; fallback to a global template (company_id IS NULL) if you keep one
+let documentTemplate = null;
+try {
+  const poCompanyId = header.company_id; // from your header query
+  const [tplRows] = await db.promise().query(
+    `
+    SELECT
+      id,
+      document_id,
+      company_ids,
+      sign_path      AS signature_path,  -- alias to what frontend expects
+      stamp_path     AS stamp_path,
+      template_attachment_path
+    FROM document_templates
+    WHERE document_id = ?
+      AND (
+            FIND_IN_SET(?, company_ids) > 0   -- exact company match in CSV
+         OR company_ids IS NULL
+         OR company_ids = ''
+      )
+    ORDER BY
+      CASE WHEN FIND_IN_SET(?, company_ids) > 0 THEN 0 ELSE 1 END,
+      id ASC
+    LIMIT 1
+    `,
+    [14, poCompanyId, poCompanyId]
+  );
+
+  documentTemplate = tplRows?.[0] || null;
+} catch (e) {
+  console.error("document_templates fetch error:", e);
+  documentTemplate = null;
+}
+
+
+        return res.json({
+            header,
+            items: items || [],
+            attachments: attachments || [],
+            documentTemplate, // contains stamp_path and signature_path
+            });
     } catch (err) {
         res.status(500).json(errPayload(err?.message || "Failed to fetch by uniqid"));
     }
