@@ -141,14 +141,13 @@ router.post('/', uploadCustomer.array('attachments'), async (req, res) => {
         bill_city, bill_state_id, bill_zip_code, bill_phone, bill_fax,
         ship_attention, ship_country_id, ship_address_1, ship_address_2,
         ship_city, ship_state_id, ship_zip_code, ship_phone, ship_fax, customer_of,
-        customer_type // <-- 'individual' | 'business' from the form
+        customer_type // 'individual' | 'business'
     } = req.body;
 
     const uniqid = `cus_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
     const userId = req.session?.user?.id || null;
     const files = req.files || [];
     const tagsRaw = req.body.tags;
-    const safeTags = typeof tagsRaw === 'string' ? tagsRaw : JSON.stringify(tagsRaw || []);
 
     let contactPersons = [];
     try {
@@ -159,6 +158,18 @@ router.post('/', uploadCustomer.array('attachments'), async (req, res) => {
 
     const conn = await db.promise().getConnection();
     try {
+        let safeCustomerOf = (Array.isArray(customer_of) ? customer_of.join(',') : String(customer_of || ''))
+            .split(',').map(s => s.trim()).filter(Boolean).join(',');
+
+        // If customer_of is not provided, check if there's only one company
+        if (!safeCustomerOf) {
+            const [companies] = await conn.query('SELECT id FROM company_settings');
+            if (companies.length === 1) {
+                safeCustomerOf = String(companies[0].id);
+            }
+        }
+        const safeTags = typeof tagsRaw === 'string' ? tagsRaw : JSON.stringify(tagsRaw || []);
+
         await conn.beginTransaction();
 
         // Insert core record (shared "vendor" table)
@@ -170,8 +181,8 @@ router.post('/', uploadCustomer.array('attachments'), async (req, res) => {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
             [
-                company_name, display_name, email_address, phone_work, phone_mobile, safeTags, remarks,
-                uniqid, userId, userId, COMPANY_TYPE_CUSTOMER, customer_type || 'individual', customer_of || null
+                company_name, display_name, email_address, phone_work, phone_mobile, safeTags, remarks, uniqid,
+                userId, userId, COMPANY_TYPE_CUSTOMER, customer_type || 'individual', safeCustomerOf,
             ]
         );
         const customerId = ins.insertId;
@@ -318,7 +329,13 @@ router.get('/:uniqid/full', async (req, res) => {
 
         if (!rows.length) return res.status(404).json(errPayload('Customer not found', 'NOT_FOUND'));
 
-        const customer = rows[0];
+        const customerData = rows[0];
+        // Convert the comma-separated string from DB back to an array for the frontend
+        const customer = {
+            ...customerData,
+            customer_of: (customerData.customer_of || '').split(',').map(s => s.trim()).filter(Boolean)
+        };
+
         const id = customer.id;
 
         const [contacts] = await db.promise().query(
@@ -413,10 +430,23 @@ router.put('/:id', uploadCustomer.array('attachments'), async (req, res) => {
 
     const files = req.files || [];
     const conn = await db.promise().getConnection();
-    const tagsRaw = req.body.tags;
-    const safeTags = typeof tagsRaw === 'string' ? tagsRaw : JSON.stringify(tagsRaw || []);
 
     try {
+        let safeCustomerOf = (Array.isArray(req.body.customer_of) ? req.body.customer_of.join(',') : String(req.body.customer_of || ''))
+            .split(',').map(s => s.trim()).filter(Boolean).join(',');
+
+        // If customer_of is not provided, check if there's only one company
+        if (!safeCustomerOf) {
+            const [companies] = await conn.query('SELECT id FROM company_settings');
+            if (companies.length === 1) {
+                safeCustomerOf = String(companies[0].id);
+            }
+        }
+
+        const tagsRaw = req.body.tags;
+        const safeTags = typeof tagsRaw === 'string' ? tagsRaw : JSON.stringify(tagsRaw || []);
+
+
         await conn.beginTransaction();
 
         // --- History Logging: Fetch old state before update ---
@@ -478,7 +508,7 @@ router.put('/:id', uploadCustomer.array('attachments'), async (req, res) => {
             `UPDATE vendor
        SET company_name = ?, display_name = ?, email_address = ?, phone_work = ?, phone_mobile = ?, tags = ?, remarks = ?, website = ?, updated_user = ?, customer_type = ?, customer_of = ?
        WHERE id = ? AND company_type_id = ?`,
-            [company_name, display_name, email_address, phone_work, phone_mobile, safeTags, remarks, website, userId, customer_type || 'individual', customer_of || null, customerId, COMPANY_TYPE_CUSTOMER]
+            [company_name, display_name, email_address, phone_work, phone_mobile, safeTags, remarks, website, userId, customer_type || 'individual', safeCustomerOf, customerId, COMPANY_TYPE_CUSTOMER,]
         );
 
         await conn.query(`DELETE FROM vendor_other WHERE vendor_id = ?`, [customerId]);

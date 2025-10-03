@@ -28,11 +28,11 @@ function getPromiseDb() {
 router.get("/", async (_req, res) => {
     try {
         const pdb = getPromiseDb();
-        const [rows] = await pdb.query(
-            `SELECT id, name
-       FROM status
-       ORDER BY id ASC`
-        );
+        const [rows] = await pdb.query(`
+            SELECT id, name, bg_colour, colour
+            FROM status
+            ORDER BY id ASC
+        `);
         res.json(rows || []);
     } catch (err) {
         console.error("GET /status failed:", err);

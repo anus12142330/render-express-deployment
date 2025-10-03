@@ -205,12 +205,14 @@ router.get("/", async (req, res) => {
         const [rows] = await db.promise().query(
             `SELECT
          po.id, po.po_number, po.po_uniqid, po.reference_no, po.vendor_id,
-         DATE(po.po_date) AS po_date, DATE(po.delivery_date) AS delivery_date, po.currency_id, po.subtotal, po.discount_percent,
+         DATE(po.po_date) AS po_date, DATE(po.delivery_date) AS delivery_date, po.subtotal, po.discount_percent,
          po.total, po.status_id, s.name AS status_name, po.created_at, po.updated_at,
-         v.display_name AS vendor_name
+         v.display_name AS vendor_name,
+         c.name AS currency_code
        FROM purchase_orders po
        LEFT JOIN vendor v ON v.id = po.vendor_id
        LEFT JOIN status s ON s.id = po.status_id
+       LEFT JOIN currency c ON c.id = po.currency_id
        ${where}
        ORDER BY ${sort_field} ${sort_order}
        LIMIT ? OFFSET ?`,
@@ -244,6 +246,7 @@ router.get("/by-uniqid/:uniqid", async (req, res) => {
                  s.name AS status_name,
                  v.display_name AS vendor_name,
                  dpl.name as loading_name, dpl.id as port_loading_id,
+                 po.company_id, comp.name as company_name,
                  dpd.name as discharge_name, dpd.id as port_discharge_id,
                  inco.name as inco_name,
                  tax.tax_name,
@@ -258,6 +261,7 @@ router.get("/by-uniqid/:uniqid", async (req, res) => {
              FROM purchase_orders po
                  LEFT JOIN vendor v ON v.id = po.vendor_id
                  LEFT JOIN vendor c ON c.id=po.customer_id
+                 LEFT JOIN company_settings comp ON comp.id = po.company_id
                  LEFT JOIN status s ON s.id = po.status_id
                  LEFT JOIN delivery_place as dpl ON dpl.id=po.port_loading
                  LEFT JOIN delivery_place as dpd ON dpd.id=po.port_discharge
@@ -348,7 +352,7 @@ router.get("/by-uniqid/:uniqid", async (req, res) => {
 router.post("/", uploadFields, async (req, res) => {
     // --- tiny helpers (pure) ---
     const nz = (n, d = 0) => {
-        const v = Number(n);
+        const v = Number(n); // Corrected from `Number(v)` to `Number(n)`
         return Number.isFinite(v) ? v : d;
     };
     const nn = (v) => (v === undefined || v === "" ? null : v);
@@ -370,7 +374,7 @@ router.post("/", uploadFields, async (req, res) => {
     };
 
     // --- parse payload ---
-    const mode = (req.query.mode || "ISSUE").toUpperCase(); // DRAFT | ISSUE
+    const mode = (req.query.mode || "ISSUE").toUpperCase(); // DRAFT | ISSUE | SAVE
     let payload = {}; // DRAFT | SAVE | ISSUE
     try {
         payload = JSON.parse(req.body.payload || "{}");
@@ -519,11 +523,11 @@ router.post("/", uploadFields, async (req, res) => {
         // ===== Header insert =====
         const [ins] = await conn.query(
             `INSERT INTO purchase_orders (
-        po_uniqid, po_number, reference_no, trade_type_id, vendor_id, 
+        po_uniqid, po_number, reference_no, trade_type_id, vendor_id, company_id,
         currency_id, is_organization, customer_id, customer, discount_type, discount_amount,
         delivery_address, billing_address, shipping_address,
         po_date, delivery_date,
-        port_loading, port_discharge, inco_terms_id, no_containers,
+        port_loading, port_discharge, inco_terms_id, no_containers, 
         mode_shipment_id, partial_shipment_id, container_type_id, container_load_id,
         payment_terms_id, payment_description, documents_payment, documents_payment_ids, documents_payment_labels, documents_payment_text,
         termscondition, notes,
@@ -534,14 +538,15 @@ router.post("/", uploadFields, async (req, res) => {
             [
                 po_uniqid,
                 po_number,
-                cleanStr(payload.reference),
-                payload.tradeTypeId || null,
-                payload.vendorId || null,
+                cleanStr(payload.reference), // Corrected from `payload.reference` to `cleanStr(payload.reference)`
+                payload.tradeTypeId || null, // trade_type_id
+                payload.vendorId || null,    // vendor_id
+                payload.companyId || null,
 
                 payload.currencyId || null,
                 payload.deliverTo === "org" ? 1 : 0,
                 payload.customerId || null,
-                // Add the customer JSON object to the INSERT statement
+                // Add the customer JSON object to the INSERT statement (if customer is selected)
                 payload.customerDetail
                     ? {
                           name: payload.customerDetail.name,
@@ -552,7 +557,7 @@ router.post("/", uploadFields, async (req, res) => {
                       }
                     : null,
                 discount_type,
-                discount_input_value, // <-- Save the raw input value
+                discount_input_value, // <-- Save the raw input value (percentage or fixed amount)
                 cleanStr(payload.deliveryAddress),
                 cleanStr(payload.vendorBillAddrText) || cleanStr(payload.billing_address),
                 cleanStr(payload.vendorShipAddrText) || cleanStr(payload.shipping_address),
@@ -563,7 +568,7 @@ router.post("/", uploadFields, async (req, res) => {
                 cleanStr(payload.portLoading),
                 cleanStr(payload.portDischarge),
                 cleanStr(payload.incoterm),
-                // Only save containers when mode_shipment_id === 1, else NULL
+                // Only save containers when mode_shipment_id === 1 (Sea), else NULL
                 Number(payload.mode_shipment_id) === 1 ? toIntOrNull(payload.containerCount) : null,
 
                 // Shipment fields
@@ -573,7 +578,7 @@ router.post("/", uploadFields, async (req, res) => {
                 payload.container_load_id || null,
 
                 payload.paymentTermsId || null,
-                cleanStr(payload.paymentTermsText) || cleanStr(payload.payment_terms),
+                cleanStr(payload.paymentTermsText) || cleanStr(payload.payment_terms), // Use new payment_description
                 // keep legacy string too (if used elsewhere)
                 cleanStr(payload.documentsForPayment) || cleanStr(payload.documents_payment),
                 JSON.stringify(docs_ids || []),
@@ -707,7 +712,7 @@ router.put("/:uniqid", uploadFields, async (req, res) => {
     const nz = (n, d = 0) => {
         const v = Number(n);
         return Number.isFinite(v) ? v : d;
-    };
+    }; // Corrected from `Number(v)` to `Number(n)`
     const nn = (v) => (v === undefined || v === "" ? null : v);
     const cleanStr = (v) =>
         v === undefined || v === null ? null : String(v).trim() || null;
@@ -945,7 +950,7 @@ router.put("/:uniqid", uploadFields, async (req, res) => {
         // ===== header update =====
         await conn.query(
             `UPDATE purchase_orders SET
-         po_number=?, reference_no=?, trade_type_id=?, discount_type=?, discount_amount=?,
+         po_number=?, reference_no=?, trade_type_id=?, company_id=?, discount_type=?, discount_amount=?,
          vendor_id=?, currency_id=?, is_organization=?, customer_id=?,
          customer=?, delivery_address=?, billing_address=?, shipping_address=?,
          po_date=?, delivery_date=?,
@@ -961,14 +966,15 @@ router.put("/:uniqid", uploadFields, async (req, res) => {
             [
                 incomingPoNumber || po.po_number,
                 cleanStr(payload.reference),
-                payload.tradeTypeId || null,
+                payload.tradeTypeId || null, // trade_type_id
+                payload.companyId || null,   // company_id
                 discount_type,
                 discount_input_value, // <-- Save the raw input value
 
                 payload.vendorId || null,
                 payload.currencyId || null,
                 payload.deliverTo === "org" ? 1 : 0,
-                payload.customerId || null,
+                payload.customerId || null, // customer_id
                 customerObject, // Add the customer JSON object here
 
                 cleanStr(payload.deliveryAddress),

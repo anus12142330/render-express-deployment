@@ -785,6 +785,39 @@ app.get('/api/companies', (req, res) => {
   );
 });
 
+// ✅ DELETE a company by ID
+app.delete('/api/company-settings/:id', async (req, res) => {
+    const { id } = req.params;
+    if (!id) return res.status(400).json({ error: 'Company ID is required' });
+
+    const conn = await db.promise().getConnection();
+    try {
+        await conn.beginTransaction();
+
+        // Check if the company is in use in the vendor table's customer_of field
+        // The customer_of field stores a JSON array of company IDs, e.g., '[1, 2]'
+        // We use JSON_SEARCH to find if the ID exists in the array. It returns a path string if found, or NULL if not.
+        // The previous JSON_SEARCH was incorrect as it searched for a string in an array of numbers.
+        // JSON_CONTAINS is the correct function. We check if the numeric ID exists in the array.
+        const inUseSql = `SELECT 1 FROM vendor WHERE JSON_CONTAINS(customer_of, ?, '$') LIMIT 1`;
+        const [inUseRows] = await conn.query(inUseSql, [id]);
+
+        if (inUseRows.length > 0) {
+            await conn.rollback();
+            return res.status(400).json({ error: 'Cannot delete company. It is currently associated with one or more vendors or customers.' });
+        }
+
+        await conn.query('DELETE FROM company_settings WHERE id = ?', [id]);
+        await conn.commit();
+        res.json({ success: true, message: 'Company deleted successfully.' });
+    } catch (err) {
+        await conn.rollback();
+        res.status(500).json({ error: err?.sqlMessage || 'Database error during deletion.' });
+    } finally {
+        conn.release();
+    }
+});
+
 
 // Insert company settings
 // Insert company settings (accepts logo and/or company_stamp)

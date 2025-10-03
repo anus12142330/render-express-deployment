@@ -374,7 +374,7 @@ chart_of_accounts: {
   fields: [
     { name: 'name', type: 'string', required: true },
     { name: 'content', type: 'string' },
-    { name: 'company_id', type: 'number' },
+    { name: 'company_ids', type: 'string' },
     { name: 'document_id', type: 'number' },
     { name: 'template_attachment_path', type: 'string' },
     { name: 'sign_path', type: 'string' },
@@ -388,10 +388,8 @@ chart_of_accounts: {
   listFrom: `
     document_templates dtmpl
     LEFT JOIN document_type dt ON dt.id = dtmpl.document_id
-    LEFT JOIN company_settings cs ON cs.id = dtmpl.company_id
   `,
   listSearchIn: ['dtmpl.name', 'dt.name'],
-  // ✅ remove ASC here (let the router add direction)
   listOrderBy: 'dtmpl.name'
 }
 
@@ -581,41 +579,21 @@ router.post('/:type', async (req, res, next) => {
 
         // Build insert payload from cfg.fields only
         const payload = {};
-        let final_company_id = req.body.company_id || null;
-
-        // Special handling for document_template to enforce company_id logic
-        if (type === 'document_templates') {
-            try {
-                const [companies] = await db.promise().query('SELECT id FROM company_settings');
-                if (companies.length === 1) {
-                    // If only one company exists, always assign this template to it.
-                    final_company_id = companies[0].id;
-                } else if (companies.length > 1 && !final_company_id) {
-                    // If multiple companies exist, company_id is required.
-                    return res.status(400).json({ error: 'Company ID is required when multiple companies exist.' });
-                }
-            } catch (dbErr) {
-                return next(dbErr);
-            }
-        }
 
         for (const f of cfg.fields) {
             const has = Object.prototype.hasOwnProperty.call(req.body, f.name);
             const raw = has ? req.body[f.name] : (f.default !== undefined ? f.default : undefined);
 
-            // Skip company_id as we handle it separately
-            if (type === 'document_templates' && f.name === 'company_id') continue;
+            if (type === 'document_templates' && f.name === 'company_ids') {
+                payload[f.name] = raw; // Use raw stringified JSON
+                continue;
+            }
 
             if ((raw === undefined || raw === null || raw === '') && f.required) {
                 const err = new Error(`Missing required field "${f.name}"`);
                 err.status = 400; throw err;
             }
             if (raw !== undefined) payload[f.name] = coerceField(f, raw);
-        }
-        
-        // Add the processed company_id back to the payload for document_template
-        if (type === 'document_templates') {
-            payload.company_id = final_company_id;
         }
 
         const sql = `INSERT INTO \`${cfg.table}\` SET ?`;
@@ -639,35 +617,16 @@ router.put('/:type/:id', async (req, res, next) => {
         const cfg = getCfg(req.params.type);
         const type = req.params.type;
         const updates = {};
-        let final_company_id = req.body.company_id || null;
-
-        // Special handling for document_template to enforce company_id logic
-        if (type === 'document_templates') {
-            try {
-                const [companies] = await db.promise().query('SELECT id FROM company_settings');
-                if (companies.length === 1) {
-                    // If only one company exists, force assignment to it.
-                    final_company_id = companies[0].id;
-                } else if (companies.length > 1 && !final_company_id) {
-                    // If multiple companies exist, company_id is required.
-                    return res.status(400).json({ error: 'Company ID is required when multiple companies exist.' });
-                }
-            } catch (dbErr) {
-                return next(dbErr);
-            }
-        }
 
         for (const f of cfg.fields) {
             if (Object.prototype.hasOwnProperty.call(req.body, f.name)) {
-                // Skip company_id as we handle it separately
-                if (type === 'document_templates' && f.name === 'company_id') continue;
-                updates[f.name] = coerceField(f, req.body[f.name]);
+                if (f.name === 'company_ids' && type === 'document_templates') {
+                    updates[f.name] = req.body[f.name]; // Use raw stringified JSON
+                    continue;
+                } else {
+                    updates[f.name] = coerceField(f, req.body[f.name]);
+                }
             }
-        }
-
-        // Add the processed company_id back to the updates for document_template
-        if (type === 'document_templates') {
-            updates.company_id = final_company_id;
         }
 
         if (!Object.keys(updates).length) {

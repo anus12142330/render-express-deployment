@@ -164,7 +164,6 @@ router.post('/', uploadVendor.array('attachments'), async (req, res) => {
     const userId = req.session?.user?.id || null;
     const files = req.files || [];
     const tagsRaw = req.body.tags;
-    const safeTags = typeof tagsRaw === 'string' ? tagsRaw : JSON.stringify(tagsRaw || []);
 
     let contactPersons = [];
     try {
@@ -175,6 +174,18 @@ router.post('/', uploadVendor.array('attachments'), async (req, res) => {
 
     const conn = await db.promise().getConnection();
     try {
+        let safeCustomerOf = (Array.isArray(customer_of) ? customer_of.join(',') : String(customer_of || ''))
+            .split(',').map(s => s.trim()).filter(Boolean).join(',');
+
+        // If customer_of is not provided, check if there's only one company
+        if (!safeCustomerOf) {
+            const [companies] = await conn.query('SELECT id FROM company_settings');
+            if (companies.length === 1) {
+                safeCustomerOf = String(companies[0].id);
+            }
+        }
+        const safeTags = typeof tagsRaw === 'string' ? tagsRaw : JSON.stringify(tagsRaw || []);
+
         await conn.beginTransaction();
 
         // Insert core (shared table)
@@ -187,7 +198,7 @@ router.post('/', uploadVendor.array('attachments'), async (req, res) => {
       `,
             [
                 company_name, display_name, email_address, phone_work, phone_mobile, safeTags, remarks, website,
-                uniqid, userId, userId, COMPANY_TYPE_VENDOR, customer_of || null
+                uniqid, userId, userId, COMPANY_TYPE_VENDOR, safeCustomerOf
             ]
         );
         const vendorId = ins.insertId;
@@ -326,7 +337,14 @@ router.get('/:uniqid/full', async (req, res) => {
 
         if (!rows.length) return res.status(404).json(errPayload('Vendor not found', 'NOT_FOUND'));
 
-        const vendor = rows[0];
+        const vendorData = rows[0];
+        // Convert the comma-separated string from DB back to an array for the frontend
+        const vendor = {
+            ...vendorData,
+            customer_of: (vendorData.customer_of || '').split(',').map(s => s.trim()).filter(Boolean),
+            tags: (() => { try { return JSON.parse(vendorData.tags); } catch { return []; } })()
+        };
+
         const id = vendor.id;
 
         const [contacts] = await db.promise().query(
@@ -391,6 +409,49 @@ router.post('/upload', uploadVendor.single('file'), async (req, res) => {
 });
 
 /* ================================
+   GET /api/vendors/:id/companies
+   (get companies a vendor is associated with)
+================================ */
+router.get('/:id/companies', async (req, res) => {
+    const vendorId = req.params.id;
+    if (!vendorId) {
+        return res.status(400).json(errPayload('Vendor ID is required', 'BAD_REQUEST'));
+    }
+
+    try {
+        // 1. Get the customer_of JSON array from the vendor table
+        const [[vendorData]] = await db.promise().query(
+            `SELECT customer_of FROM vendor WHERE id = ? LIMIT 1`,
+            [vendorId]
+        );
+
+        if (!vendorData || !vendorData.customer_of) {
+            return res.json([]); // No associated companies
+        }
+
+        // Now parsing a comma-separated string instead of JSON
+        const companyIds = String(vendorData.customer_of).split(',').map(s => s.trim()).filter(Boolean);
+        if (companyIds.length === 0) {
+            return res.json([]); // No associated companies
+        }
+
+        if (!Array.isArray(companyIds) || companyIds.length === 0) {
+            return res.json([]);
+        }
+
+        // 2. Fetch details for those company IDs from company_settings
+        const [companies] = await db.promise().query(
+            `SELECT id, name FROM company_settings WHERE id IN (?) ORDER BY name ASC`,
+            [companyIds]
+        );
+        res.json(companies);
+    } catch (err) {
+        console.error(`Failed to get companies for vendor ${vendorId}:`, err);
+        res.status(500).json(errPayload('Failed to load associated companies', 'DB_ERROR', err.message));
+    }
+});
+
+/* ================================
    PUT /api/vendors/:id
 ================================ */
 router.put('/:id', uploadVendor.array('attachments'), async (req, res) => {
@@ -418,11 +479,25 @@ router.put('/:id', uploadVendor.array('attachments'), async (req, res) => {
 
     const files = req.files || [];
     const conn = await db.promise().getConnection();
-    const tagsRaw = req.body.tags;
-    const safeTags = typeof tagsRaw === 'string' ? tagsRaw : JSON.stringify(tagsRaw || []);
 
     try {
         await conn.beginTransaction();
+
+        let safeCustomerOf = (Array.isArray(customer_of) ? customer_of.join(',') : String(customer_of || ''))
+            .split(',').map(s => s.trim()).filter(Boolean).join(',');
+
+        // If customer_of is not provided, check if there's only one company
+        if (!safeCustomerOf) {
+            const [companies] = await conn.query('SELECT id FROM company_settings');
+            if (companies.length === 1) {
+                safeCustomerOf = String(companies[0].id);
+            }
+        }
+
+        const tagsRaw = req.body.tags;
+        const safeTags = typeof tagsRaw === 'string' ? tagsRaw : JSON.stringify(tagsRaw || []);
+
+
         
         // --- History Logging: Fetch old state before update ---
         const [oldVendorRows] = await conn.query(`
@@ -495,7 +570,7 @@ router.put('/:id', uploadVendor.array('attachments'), async (req, res) => {
             `UPDATE vendor
        SET company_name = ?, display_name = ?, email_address = ?, phone_work = ?, phone_mobile = ?, tags = ?, remarks = ?, website = ?, updated_user = ?, customer_of = ?
        WHERE id = ? AND company_type_id = ?`,
-            [company_name, display_name, email_address, phone_work, phone_mobile, safeTags, remarks, website, userId, customer_of || null, vendorId, COMPANY_TYPE_VENDOR]
+            [company_name, display_name, email_address, phone_work, phone_mobile, safeTags, remarks, website, userId, safeCustomerOf, vendorId, COMPANY_TYPE_VENDOR]
         );
 
         await conn.query(`DELETE FROM vendor_other WHERE vendor_id = ?`, [vendorId]);
