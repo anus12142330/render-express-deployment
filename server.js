@@ -37,6 +37,7 @@ import warehousesRoutes from "./routes/warehouses.js";
 import router from "./routes/customer.js"; // ✅ ES module import
 import uploadRoutes from "./routes/upload.js";
 import rbacRoutes from './routes/rbac.js';
+import documentTemplateRoutes from './routes/documentTemplate.js';
 import db from "./db.js";
 import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -169,6 +170,8 @@ app.use("/api/warehouses", warehousesRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/rbac', rbacRoutes);
 app.use('/api/paymentTerms', paymentTermsRoutes);
+app.use('/api/document-template', documentTemplateRoutes);
+
 
 //Role permission
 app.get('/api/me', requireAuth, async (req, res) => {
