@@ -569,18 +569,18 @@ router.post("/", uploadFields, async (req, res) => {
         // ===== Header insert =====
         const [ins] = await conn.query(
             `INSERT INTO purchase_orders (
-        po_uniqid, po_number, reference_no, trade_type_id, vendor_id, company_id,
+        po_uniqid, po_number, reference_no, trade_type_id, vendor_id, company_id, partial_shipment_id,
         currency_id, is_organization, customer_id, customer, discount_type, discount_amount,
         delivery_address, billing_address, shipping_address,
         po_date, delivery_date,
         port_loading, port_discharge, inco_terms_id, no_containers, 
-        mode_shipment_id, partial_shipment_id, container_type_id, container_load_id,
+        mode_shipment_id, container_type_id, container_load_id,
         payment_terms_id, payment_description, documents_payment, documents_payment_ids, documents_payment_labels, documents_payment_text,
         termscondition, notes,
         subtotal, discount_percent, taxable, vat_total, total, 
         vat_id, vat_rate, vat_amount,
         status_id, created_at, updated_at
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW(),NOW())`,
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW(),NOW())`,
             [
                 po_uniqid,
                 po_number,
@@ -588,20 +588,13 @@ router.post("/", uploadFields, async (req, res) => {
                 payload.tradeTypeId || null, // trade_type_id
                 payload.vendorId || null,    // vendor_id
                 payload.companyId || null,
+                payload.partial_shipment_allowed || null,
 
                 payload.currencyId || null,
                 payload.deliverTo === "org" ? 1 : 0,
                 payload.customerId || null,
                 // Add the customer JSON object to the INSERT statement (if customer is selected)
-                payload.customerDetail
-                    ? {
-                          name: payload.customerDetail.name,
-                          full_address: payload.customerDetail.full_address,
-                          telephone: payload.customerDetail.telephone,
-                          fax: payload.customerDetail.fax,
-                          country: payload.customerDetail.country,
-                      }
-                    : null,
+                payload.customerDetail ? JSON.stringify(payload.customerDetail) : null,
                 discount_type,
                 discount_input_value, // <-- Save the raw input value (percentage or fixed amount)
                 cleanStr(payload.deliveryAddress),
@@ -619,7 +612,6 @@ router.post("/", uploadFields, async (req, res) => {
 
                 // Shipment fields
                 payload.mode_shipment_id || null,
-                payload.partial_shipment_id || null,
                 payload.container_type_id || null,
                 payload.container_load_id || null,
 
@@ -996,7 +988,7 @@ router.put("/:uniqid", uploadFields, async (req, res) => {
         // ===== header update =====
         await conn.query(
             `UPDATE purchase_orders SET
-         po_number=?, reference_no=?, trade_type_id=?, company_id=?, discount_type=?, discount_amount=?,
+         po_number=?, reference_no=?, trade_type_id=?, company_id=?, discount_type=?, discount_amount=?, 
          vendor_id=?, currency_id=?, is_organization=?, customer_id=?,
          customer=?, delivery_address=?, billing_address=?, shipping_address=?,
          po_date=?, delivery_date=?,
