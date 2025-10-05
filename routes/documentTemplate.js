@@ -25,7 +25,7 @@ const templateUpload = multer({ storage: templateStorage }).fields([
     { name: 'template_attachment_file', maxCount: 1 },
 ]);
 
-const relPath = (f) => (f ? `uploads/templates/${path.basename(f.path)}` : null);
+const relPath = (f) => (f ? `/uploads/templates/${path.basename(f.path)}` : null);
 
 const coerceField = (name, value) => {
     if (value === undefined || value === null || value === '') return null;
