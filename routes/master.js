@@ -1,29 +1,10 @@
 // server/routes/lookups.js  (ESM)
 import { Router } from 'express';
 import db from '../db.js';
-import multer from 'multer';
-import path from 'path';
-import fs from 'fs';
-import crypto from 'crypto';
+import multer from 'multer'; 
 
 const upload = multer();
 const router = Router();
-
-// --- Multer setup for document_templates ---
-const TEMPLATE_UPLOAD_DIR = path.resolve("uploads/templates");
-fs.mkdirSync(TEMPLATE_UPLOAD_DIR, { recursive: true });
-
-const templateStorage = multer.diskStorage({
-    destination: (_req, _file, cb) => cb(null, TEMPLATE_UPLOAD_DIR),
-    filename: (_req, file, cb) =>
-        cb(null, crypto.randomBytes(16).toString("hex") + path.extname(file.originalname)),
-});
-
-const templateUpload = multer({ storage: templateStorage }).fields([
-    { name: 'sign_file', maxCount: 1 },
-    { name: 'stamp_file', maxCount: 1 },
-    { name: 'template_attachment_file', maxCount: 1 },
-]);
 
 /**
  * Config supports:
@@ -593,11 +574,7 @@ router.get('/:type', async (req, res, next) => {
 
 /* ----------------------------- CREATE ----------------------------- */
 // POST /api/master/:type
-const createMiddleware = (req, res, next) => {
-    if (req.params.type === 'document_templates') return templateUpload(req, res, next);
-    return upload.none()(req, res, next);
-};
-router.post('/:type', createMiddleware, async (req, res, next) => {
+router.post('/:type', upload.none(), async (req, res, next) => {
     try {
         const cfg = getCfg(req.params.type);
         const type = req.params.type;
@@ -609,31 +586,11 @@ router.post('/:type', createMiddleware, async (req, res, next) => {
             const has = Object.prototype.hasOwnProperty.call(req.body, f.name);
             const raw = has ? req.body[f.name] : (f.default !== undefined ? f.default : undefined);
 
-            if (type === 'document_templates' && f.name === 'company_ids') {
-                payload[f.name] = raw; // Use raw stringified JSON
-                continue;
-            }
-
             if ((raw === undefined || raw === null || raw === '') && f.required) {
                 const err = new Error(`Missing required field "${f.name}"`);
                 err.status = 400; throw err;
             }
 
-            // Handle file paths for document_templates
-            if (type === 'document_templates') {
-                if (f.name === 'sign_path' && req.files?.sign_file?.[0]) {
-                    payload[f.name] = `/uploads/templates/${req.files.sign_file[0].filename}`;
-                    continue;
-                }
-                if (f.name === 'stamp_path' && req.files?.stamp_file?.[0]) {
-                    payload[f.name] = `/uploads/templates/${req.files.stamp_file[0].filename}`;
-                    continue;
-                }
-                if (f.name === 'template_attachment_path' && req.files?.template_attachment_file?.[0]) {
-                    payload[f.name] = `/uploads/templates/${req.files.template_attachment_file[0].filename}`;
-                    continue;
-                }
-            }
             if (raw !== undefined) payload[f.name] = coerceField(f, raw);
         }
 
@@ -653,40 +610,14 @@ router.post('/:type', createMiddleware, async (req, res, next) => {
 
 /* ----------------------------- UPDATE ----------------------------- */
 // PUT /api/master/:type/:id
-const updateMiddleware = (req, res, next) => {
-    if (req.params.type === 'document_templates') return templateUpload(req, res, next);
-    return upload.none()(req, res, next);
-};
-router.put('/:type/:id', updateMiddleware, async (req, res, next) => {
+router.put('/:type/:id', upload.none(), async (req, res, next) => {
     try {
         const cfg = getCfg(req.params.type);
-        const type = req.params.type;
         const updates = {};
 
         for (const f of cfg.fields) {
             if (Object.prototype.hasOwnProperty.call(req.body, f.name)) {
-                if (f.name === 'company_ids' && type === 'document_templates') {
-                    updates[f.name] = req.body[f.name]; // Use raw stringified JSON
-                    continue;
-                } else if (type === 'document_templates') {
-                    // Handle file paths for document_templates on update
-                    if (f.name === 'sign_path') {
-                        updates[f.name] = req.files?.sign_file?.[0]
-                            ? `/uploads/templates/${req.files.sign_file[0].filename}`
-                            : req.body.sign_path; // Keep existing if no new file
-                        continue;
-                    }
-                    if (f.name === 'stamp_path') {
-                        updates[f.name] = req.files?.stamp_file?.[0]
-                            ? `/uploads/templates/${req.files.stamp_file[0].filename}`
-                            : req.body.stamp_path;
-                    }
-                    if (f.name === 'template_attachment_path' && req.files?.template_attachment_file?.[0]) {
-                        updates[f.name] = `/uploads/templates/${req.files.template_attachment_file[0].filename}`;
-                    }
-                } else {
-                    updates[f.name] = coerceField(f, req.body[f.name]);
-                }
+                updates[f.name] = coerceField(f, req.body[f.name]);
             }
         }
 

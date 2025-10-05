@@ -8,7 +8,7 @@ import crypto from 'crypto';
 const router = Router();
 
 // --- Multer setup for document_templates ---
-const TEMPLATE_UPLOAD_DIR = path.resolve("uploads/templates");
+const TEMPLATE_UPLOAD_DIR = path.resolve("uploads/signatures");
 if (!fs.existsSync(TEMPLATE_UPLOAD_DIR)) {
     fs.mkdirSync(TEMPLATE_UPLOAD_DIR, { recursive: true });
 }
@@ -25,7 +25,7 @@ const templateUpload = multer({ storage: templateStorage }).fields([
     { name: 'template_attachment_file', maxCount: 1 },
 ]);
 
-const relPath = (f) => (f ? `/uploads/templates/${path.basename(f.path)}` : null);
+const relPath = (f) => (f ? `/uploads/signatures/${path.basename(f.path)}` : null);
 
 const coerceField = (name, value) => {
     if (value === undefined || value === null || value === '') return null;
