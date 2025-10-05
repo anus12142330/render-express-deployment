@@ -149,13 +149,13 @@ router.get('/', async (req, res) => {
                         LIMIT 1
                     ) AS image_url
                     ,
-                    (
-                        SELECT i.thumbnail_path
-                        FROM product_images i
-                        WHERE i.product_id = p.id
-                        ORDER BY i.is_primary DESC, i.id ASC
-                        LIMIT 1
-                    ) AS thumbnail_url
+                    COALESCE((
+                                 SELECT i.thumbnail_path
+                                 FROM product_images i
+                                 WHERE i.product_id = p.id
+                                 ORDER BY i.is_primary DESC, i.id ASC
+                                 LIMIT 1
+                             ), '') AS thumbnail_url
                     ,
                     (
                         SELECT pd.packing_alias
