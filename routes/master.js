@@ -1,7 +1,9 @@
 // server/routes/lookups.js  (ESM)
 import { Router } from 'express';
 import db from '../db.js';
+import multer from 'multer';
 
+const upload = multer();
 const router = Router();
 
 /**
@@ -572,7 +574,7 @@ router.get('/:type', async (req, res, next) => {
 
 /* ----------------------------- CREATE ----------------------------- */
 // POST /api/master/:type
-router.post('/:type', async (req, res, next) => {
+router.post('/:type', upload.none(), async (req, res, next) => {
     try {
         const cfg = getCfg(req.params.type);
         const type = req.params.type;
@@ -612,7 +614,7 @@ router.post('/:type', async (req, res, next) => {
 
 /* ----------------------------- UPDATE ----------------------------- */
 // PUT /api/master/:type/:id
-router.put('/:type/:id', async (req, res, next) => {
+router.put('/:type/:id', upload.none(), async (req, res, next) => {
     try {
         const cfg = getCfg(req.params.type);
         const type = req.params.type;
