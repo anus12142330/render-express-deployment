@@ -5,6 +5,7 @@ import multer from "multer";
 import path from "path";
 import fs from "fs";
 import crypto from "crypto";
+import dayjs from "dayjs";
 
 const router = express.Router();
 
@@ -33,6 +34,46 @@ const toIntOrNull = (v) => {
       const n = Number(v);
       return Number.isFinite(n) ? Math.trunc(n) : null;
     };
+
+const addHistory = async (conn, { module, moduleId, userId, action, details }) => {
+    if (!module || !moduleId || !userId || !action) return;
+    await conn.query(
+        'INSERT INTO history (module, module_id, user_id, action, details, created_at) VALUES (?, ?, ?, ?, ?, NOW())',
+        [module, moduleId, userId, action, JSON.stringify(details || {})]
+    );
+};
+
+function getPOChangedFields(oldValues, newValues) {
+    const changes = [];
+    // Add currency_id to the list of fields to compare
+    const fieldsToCompare = {
+        po_number: 'PO Number',
+        po_date: 'PO Date',
+        currency_id: 'Currency',
+        total: 'Total',
+        notes: 'Notes',
+    };
+
+    for (const key in fieldsToCompare) {
+        let oldStr;
+        if (key === 'po_date' && oldValues[key] instanceof Date) {
+            // Use dayjs to format the database date to YYYY-MM-DD, ignoring time/timezone
+            oldStr = dayjs(oldValues[key]).format('YYYY-MM-DD');
+        } else if (key === 'total') {
+            // Compare numbers by parsing them to floats with a fixed precision
+            oldStr = parseFloat(oldValues[key] || 0).toFixed(2);
+        } else {
+            oldStr = String(oldValues[key] || '');
+        }
+        const newStr = String(newValues[key] || '');
+
+        if (oldStr !== newStr) {
+            changes.push({ field: fieldsToCompare[key], from: oldValues[key] || 'empty', to: newValues[key] || 'empty' });
+        }
+    }
+    return changes;
+}
+
 const cleanStr = (v) => {
     const s = v == null ? "" : String(v).trim();
     if (!s || s.toLowerCase() === "undefined" || s.toLowerCase() === "null") return null;
@@ -238,6 +279,7 @@ router.get("/", async (req, res) => {
 router.get("/by-uniqid/:uniqid", async (req, res) => {
     try {
         const uniqid = req.params.uniqid;
+        const fetchHistory = req.query.history === 'true';
         if (!uniqid) return res.status(400).json(errPayload("Invalid uniqid"));
 
         const [[header]] = await db.promise().query(
@@ -345,12 +387,26 @@ router.get("/by-uniqid/:uniqid", async (req, res) => {
             [header.id]
         );
 
+        let history = [];
+        if (fetchHistory) {
+            const [historyRows] = await db.promise().query(
+                `SELECT h.id, h.action, h.details, h.created_at, u.name as user_name
+                 FROM history h
+                 LEFT JOIN user u ON u.id = h.user_id
+                 WHERE h.module = 'purchase_order' AND h.module_id = ?
+                 ORDER BY h.created_at DESC`,
+                [header.id]
+            );
+            history = historyRows || [];
+        }
+
         // --- Document Template (for signatures/stamps) ---
 // --- Document Template (signature & stamp) ---
 // Prefer exact company match; fallback to a global template (company_id IS NULL) if you keep one
 let documentTemplate = null;
 try {
   const poCompanyId = header.company_id; // from your header query
+  // The document_id for Purchase Order is 14
   const [tplRows] = await db.promise().query(
     `
     SELECT
@@ -386,6 +442,7 @@ try {
             header,
             items: items || [],
             attachments: attachments || [],
+            history,
             documentTemplate, // contains stamp_path and signature_path
             });
     } catch (err) {
@@ -745,6 +802,7 @@ router.post("/", uploadFields, async (req, res) => {
 router.put("/:uniqid", uploadFields, async (req, res) => {
     const uniqid = req.params.uniqid;
     const mode = (req.query.mode || "SAVE").toUpperCase(); // SAVE | DRAFT | ISSUE
+    const user_id = req.session?.user?.id;
 
     // ===== helpers (local, side-effect free) =====
     const nz = (n, d = 0) => {
@@ -764,13 +822,17 @@ router.put("/:uniqid", uploadFields, async (req, res) => {
 
     try {
         // ===== find PO =====
-        const [[po]] = await conn.query(
-            "SELECT id, po_number FROM purchase_orders WHERE po_uniqid = ? LIMIT 1",
+        const [[oldPO]] = await conn.query(
+            "SELECT * FROM purchase_orders WHERE po_uniqid = ? LIMIT 1",
             [uniqid]
         );
-        if (!po) return res.status(404).json(errPayload("Purchase order not found"));
+        if (!oldPO) return res.status(404).json(errPayload("Purchase order not found"));
 
-        const poId = po.id;
+        const poId = oldPO.id;
+
+        if (!user_id) {
+            return res.status(401).json(errPayload("Unauthorized. User session not found."));
+        }
 
         // ===== attachments-only path =====
         if (attachmentsOnly) {
@@ -827,7 +889,7 @@ router.put("/:uniqid", uploadFields, async (req, res) => {
 
         // ----- duplicate PO number check -----
         const incomingPoNumber = cleanStr(payload.poNumber);
-        if (incomingPoNumber && incomingPoNumber !== po.po_number) {
+        if (incomingPoNumber && incomingPoNumber !== oldPO.po_number) {
             const [[dupe]] = await conn.query(
                 "SELECT id FROM purchase_orders WHERE po_number = ? AND id <> ? LIMIT 1",
                 [incomingPoNumber, poId]
@@ -1002,7 +1064,7 @@ router.put("/:uniqid", uploadFields, async (req, res) => {
          updated_at=NOW()
        WHERE id=?`,
             [
-                incomingPoNumber || po.po_number,
+                incomingPoNumber || oldPO.po_number,
                 cleanStr(payload.reference),
                 payload.tradeTypeId || null, // trade_type_id
                 payload.companyId || null,   // company_id
@@ -1139,6 +1201,44 @@ router.put("/:uniqid", uploadFields, async (req, res) => {
          VALUES ?`,
                 [insertValues]
             );
+        }
+
+        // --- Create History Record for Update ---
+        // Fetch currency names for more descriptive history
+        let oldCurrencyName = 'N/A';
+        if (oldPO.currency_id) {
+            const [[curr]] = await conn.query('SELECT name FROM currency WHERE id = ?', [oldPO.currency_id]);
+            oldCurrencyName = curr?.name || oldPO.currency_id;
+        }
+
+        let newCurrencyName = 'N/A';
+        const newCurrencyId = toIntOrNull(payload.currencyId);
+        if (newCurrencyId) {
+            const [[curr]] = await conn.query('SELECT name FROM currency WHERE id = ?', [newCurrencyId]);
+            newCurrencyName = curr?.name || newCurrencyId;
+        }
+
+        // We create a copy of oldPO and newPayload to pass to the history function,
+        // replacing the currency_id with the resolved name.
+        const oldValuesForHistory = { ...oldPO, currency_id: oldCurrencyName };
+        const newValuesForHistory = {
+            po_number: incomingPoNumber || oldPO.po_number,
+            po_date: cleanStr(payload.poDate),
+            currency_id: newCurrencyName,
+            total: total.toFixed(2),
+            notes: cleanStr(payload.customerNotes) || cleanStr(payload.notes),
+        };
+
+        const changedFields = getPOChangedFields(oldValuesForHistory, newValuesForHistory);
+
+        if (changedFields.length > 0) {
+            await addHistory(conn, {
+                module: 'purchase_order',
+                moduleId: poId,
+                userId: user_id,
+                action: 'UPDATED',
+                details: { changes: changedFields }
+            });
         }
 
         await conn.commit();
