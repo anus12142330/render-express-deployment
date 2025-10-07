@@ -1,199 +1,422 @@
 import { Router } from 'express';
 import db from '../db.js';
-import { requireAuth } from '../middleware/authz.js';
-
-const q = async (sql, p = []) => (await db.promise().query(sql, p))[0];
-
-function pad(n, width = 3) {
-    const s = String(n);
-    return s.length >= width ? s : '0'.repeat(width - s.length) + s;
-}
-
-async function getNextBillNumber(conn) {
-    const queryRunner = conn || db.promise();
-
-    // 1. Get company prefix
-    const [[settings]] = await queryRunner.query("SELECT company_prefix FROM company_settings LIMIT 1");
-    const prefix = settings?.company_prefix ? `${settings.company_prefix}` : '';
-
-    // 2. Prepare date parts
-    const now = new Date();
-    const yy = String(now.getFullYear()).slice(-2);
-    const mm = String(now.getMonth() + 1).padStart(2, '0');
-    const numberPrefix = `${prefix}INV-${yy}-${mm}`; // e.g., AGINV-24-07-
-
-    // 3. Find the last bill number for the current month
-    const [[lastBill]] = await queryRunner.query(
-        `SELECT bill_number FROM purchase_bills WHERE bill_number LIKE ? ORDER BY bill_number DESC LIMIT 1 ${conn ? 'FOR UPDATE' : ''}`,
-        [`${numberPrefix}%`]
-    );
-
-    let lastSeq = 0;
-    if (lastBill && lastBill.bill_number) {
-        const match = lastBill.bill_number.match(/(\d{3})$/);
-        if (match) {
-            lastSeq = parseInt(match[1], 10);
-        }
-    }
-
-    // 4. Format the new number
-    return `${numberPrefix}${pad(lastSeq + 1, 3)}`;
-}
+import multer from 'multer';
+import path from 'path';
+import fs from 'fs';
+import crypto from 'crypto';
 
 const router = Router();
 
-// GET all purchase bills
-router.get('/', requireAuth, async (req, res) => {
-  try {
-    // This is a placeholder query. You will need to adjust the table and column names
-    // to match your actual database schema for purchase bills.
-    const sql = `
-      SELECT 
-        pb.id, 
-        pb.bill_number, 
-        v.display_name as vendor_name, 
-        pb.bill_date, 
-        pb.total,
-        pb.status
-      FROM purchase_bills pb
-      LEFT JOIN vendor v ON v.id = pb.vendor_id
-      ORDER BY pb.bill_date DESC, pb.id DESC
-    `;
-    const [bills] = await db.promise().query(sql);
-    res.json(bills);
-  } catch (err) {
-    // If the table doesn't exist, send an empty array instead of crashing
-    if (err.code === 'ER_NO_SUCH_TABLE') {
-        console.warn("Warning: 'purchase_bills' table not found. Returning empty array.");
-        return res.json([]);
-    }
-    console.error('Error fetching purchase bills:', err);
-    res.status(500).json({ error: 'Failed to fetch purchase bills' });
-  }
+// --- Multer setup for purchase bills ---
+const BILL_UPLOAD_DIR = path.resolve("uploads/bills");
+if (!fs.existsSync(BILL_UPLOAD_DIR)) {
+    fs.mkdirSync(BILL_UPLOAD_DIR, { recursive: true });
+}
+
+const billStorage = multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, BILL_UPLOAD_DIR),
+    filename: (_req, file, cb) =>
+        cb(null, crypto.randomBytes(16).toString("hex") + path.extname(file.originalname)),
 });
 
-// GET Billable Purchase Orders (for dropdown)
-router.get('/source-pos', requireAuth, async (req, res) => {
-    try {
-        const { vendor_id } = req.query;
+const billUpload = multer({ storage: billStorage }).array('attachments', 10); // 'attachments' is the field name
 
-        // If no vendor is selected, return an empty list.
-        // A bill can be created without a PO, so we don't want to show all POs.
-        if (!vendor_id) {
-            return res.json([]);
+const relPath = (f) => (f ? `/uploads/bills/${path.basename(f.path)}` : null);
+
+const toNumOrNull = (v) => {
+    if (v === '' || v === undefined || v === null) return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+};
+
+const fkOrNull = async (conn, table, id) => {
+    const n = toNumOrNull(id);
+    if (n == null) return null;
+    const [[row]] = await conn.query(`SELECT id FROM ${conn.escapeId(table)} WHERE id=?`, [n]);
+    return row ? n : null;
+};
+
+// Helper to add to history
+const addHistory = async (conn, { module, moduleId, userId, action, details }) => {
+    if (!module || !moduleId || !userId || !action) return;
+    await conn.query(
+        'INSERT INTO history (module, module_id, user_id, action, details, created_at) VALUES (?, ?, ?, ?, ?, NOW())',
+        [module, moduleId, userId, action, JSON.stringify(details || {})]
+    );
+};
+
+/* ----------------------------- LIST ----------------------------- */
+router.get('/', async (req, res, next) => {
+    try {
+        const [rows] = await db.promise().query(`
+            SELECT 
+                pb.id, pb.bill_uniqid, pb.bill_number, pb.bill_date, pb.total, pb.status_id, 
+                s.name as status, v.display_name as vendor_name, c.name as currency_code,
+                (SELECT COUNT(*) FROM purchase_bill_attachments pba WHERE pba.purchase_bill_id = pb.id) as attachment_count
+            FROM purchase_bills pb
+            LEFT JOIN vendor v ON v.id = pb.vendor_id
+            LEFT JOIN currency c ON c.id = pb.currency_id
+            LEFT JOIN status s ON s.id = pb.status_id
+            ORDER BY pb.bill_date DESC, pb.id DESC
+        `);
+        res.json(rows || []);
+    } catch (e) {
+        next(e);
+    }
+});
+
+/* ----------------------------- GET NEXT BILL # -------------------- */
+router.get('/next-bill-number', async (req, res, next) => {
+    const { company_id } = req.query;
+    const conn = await db.promise().getConnection();
+    try {
+        let prefix = 'INV'; // Default prefix
+        if (company_id) {
+            const [[company]] = await conn.query('SELECT company_prefix FROM company_settings WHERE id = ?', [company_id]);
+            if (company?.company_prefix) prefix = `${company.company_prefix}INV`;
+        } else {
+            // Fallback: if no company_id, use the first company's prefix
+            const [[firstCompany]] = await conn.query('SELECT company_prefix FROM company_settings ORDER BY id LIMIT 1');
+            if (firstCompany?.company_prefix) prefix = `${firstCompany.company_prefix}INV`;
         }
 
-        const pos = await q(`
-            SELECT po.id, po.po_number, v.display_name as vendor_name
-            FROM purchase_orders po
-            LEFT JOIN vendor v ON v.id = po.vendor_id
-            WHERE po.vendor_id = ?
-            ORDER BY po.po_date DESC
-        `, [vendor_id]);
-        res.json(pos);
-    } catch (err) {
-        console.error('Error fetching source POs:', err);
-        res.status(500).json({ error: 'Failed to fetch source purchase orders' });
+        const now = new Date();
+        const year = String(now.getFullYear()).slice(-2);
+        const month = String(now.getMonth() + 1).padStart(2, '0');
+        const currentPrefix = `${prefix}-${year}-${month}`;
+
+        const [[lastBill]] = await conn.query(
+            "SELECT bill_number FROM purchase_bills WHERE bill_number LIKE ? ORDER BY id DESC LIMIT 1",
+            [`${currentPrefix}%`]
+        );
+
+        let nextSeq = 1;
+        if (lastBill?.bill_number) {
+            const match = lastBill.bill_number.match(/(\d{3})$/);
+            if (match) nextSeq = parseInt(match[1], 10) + 1;
+        }
+
+        const nextNumber = `${currentPrefix}${String(nextSeq).padStart(3, '0')}`;
+        res.json({ bill_number: nextNumber });
+    } catch (e) {
+        next(e);
+    } finally {
+        conn.release();
     }
 });
 
-// GET next bill number for UI
-router.get('/next-bill-number', requireAuth, async (req, res) => {
+/* ----------------------------- GET SOURCE POs ------------------- */
+router.get('/source-pos', async (req, res, next) => {
     try {
-        const billNumber = await getNextBillNumber();
-        res.json({ bill_number: billNumber });
-    } catch (err) {
-        console.error('Error getting next bill number:', err);
-        res.status(500).json({ error: 'Failed to generate next bill number' });
+        const { vendor_id } = req.query;
+        if (!vendor_id) return res.json([]);
+        const [pos] = await db.promise().query(
+            `SELECT po.id, po.po_number, po.po_uniqid, v.display_name as vendor_name
+             FROM purchase_orders po
+             JOIN vendor v ON v.id = po.vendor_id
+             WHERE po.vendor_id = ? AND po.status_id IN (4, 5, 7, 8) -- 4:Issued, 5:Approved, 7:Confirmed, 8:Partially Received
+             ORDER BY po.po_date DESC`,
+            [vendor_id]
+        );
+        res.json(pos || []);
+    } catch (e) {
+        next(e);
     }
 });
 
-// GET payment terms
-router.get('/payment-terms', requireAuth, async (req, res) => {
+/* ----------------------------- GET ONE ---------------------------- */
+router.get('/:id', async (req, res, next) => {
     try {
-        // Assuming a table named 'payment_terms' exists
-        const [terms] = await db.promise().query('SELECT id, name FROM payment_terms ORDER BY name');
-        res.json(terms);
-    } catch (err) {
-        console.error('Error fetching payment terms:', err);
-        res.status(500).json({ error: 'Failed to fetch payment terms' });
+        const { id: identifier } = req.params;
+        const isNumericId = /^\d+$/.test(identifier);
+        const whereField = isNumericId ? 'pb.id' : 'pb.bill_uniqid';
+
+        const [[bill]] = await db.promise().query(`
+            SELECT 
+                pb.*, 
+                v.display_name as vendor_name,
+                v.company_name as vendor_company,
+                va.bill_address_1 as vendor_address_line1,
+                va.bill_address_2 as vendor_address_line2,
+                va.bill_city as vendor_city,
+                vs.name as vendor_state,
+                vc.name as vendor_country,
+                va.bill_zip_code as vendor_postal_code
+            FROM purchase_bills pb
+            LEFT JOIN vendor v ON v.id = pb.vendor_id
+            LEFT JOIN vendor_address va ON va.vendor_id = v.id
+            LEFT JOIN state vs ON vs.id = va.bill_state_id
+            LEFT JOIN country vc ON vc.id = va.bill_country_id
+            WHERE ${whereField} = ?`, [identifier]);
+        if (!bill) return res.status(404).json({ error: 'Bill not found' });
+
+        const billId = bill.id; // Use the numeric ID for subsequent queries
+        const [items] = await db.promise().query(`
+            SELECT pbi.*, um.name as uom_name, um.acronyms as uom_acronyms,
+                   (SELECT pi.thumbnail_path FROM product_images pi WHERE pi.product_id = pbi.product_id ORDER BY pi.is_primary DESC, pi.id ASC LIMIT 1) as thumbnail_url
+            FROM purchase_bill_items pbi
+            LEFT JOIN uom_master um ON um.id = pbi.uom_id            
+            WHERE pbi.purchase_bill_id = ?
+        `, [billId]);
+        const [attachments] = await db.promise().query('SELECT * FROM purchase_bill_attachments WHERE purchase_bill_id = ?', [billId]);
+
+        const [history] = await db.promise().query(`
+            SELECT h.action, h.details, h.created_at, u.name as user_name
+            FROM history h
+            LEFT JOIN user u ON u.id = h.user_id
+            WHERE h.module = 'purchase_bill' AND h.module_id = ?
+            ORDER BY h.created_at DESC
+        `, [billId]);
+
+        res.json({ ...bill, items: items || [], attachments: attachments || [], history: history || [] });
+    } catch (e) {
+        next(e);
     }
 });
 
-// GET pre-filled bill data from a specific Purchase Order
-router.get('/from-po/:poId', requireAuth, async (req, res) => {
-    const { poId } = req.params;
+/* ----------------------------- GET DATA FROM PO ----------------- */
+router.get('/from-po/:poId', async (req, res, next) => {
     try {
-        const [po] = await q(`
-            SELECT po.*, v.display_name as vendor_name 
-            FROM purchase_orders po 
-            JOIN vendor v ON v.id = po.vendor_id 
-            WHERE po.id = ?`, [poId]);
-
+        const { poId } = req.params;
+        const [[po]] = await db.promise().query('SELECT * FROM purchase_orders WHERE id = ?', [poId]);
         if (!po) return res.status(404).json({ error: 'Purchase Order not found' });
 
-        const items = await q(`
+        const [items] = await db.promise().query(`
             SELECT 
-                poi.item_id as product_id,
-                p.product_name as description,
-                p.hscode,
-                poi.packing_label as packing,
-                poi.quantity,
-                poi.uom_id as uom,
-                poi.origin,
-                poi.rate as unit_price,
-                poi.vat_id,
-                poi.vat_amount as tax_amount,
-                poi.amount_net as line_total,
-                (
-                    SELECT pi.file_path
-                    FROM product_images pi
-                    WHERE pi.product_id = poi.item_id
-                    ORDER BY pi.is_primary DESC, pi.id ASC
-                    LIMIT 1
-                ) as image_url
+                poi.*, 
+                um.name as uom_name, 
+                um.acronyms as uom_acronyms,
+                (SELECT pi.thumbnail_path FROM product_images pi WHERE pi.product_id = poi.item_id ORDER BY pi.is_primary DESC, pi.id ASC LIMIT 1) as thumbnail_url
             FROM purchase_order_items poi
-            JOIN products p ON p.id = poi.item_id
+            LEFT JOIN uom_master um ON um.id = poi.uom_id
             WHERE poi.purchase_order_id = ?
         `, [poId]);
 
-        // Add the current date as the default bill_date
-        const today = new Date().toISOString().slice(0, 10);
-        po.bill_date = today;
-
-        res.json({ po, items });
-    } catch (err) {
-        console.error(`Error fetching data from PO ${poId}:`, err);
-        res.status(500).json({ error: 'Failed to fetch data from Purchase Order' });
+        res.json({ po, items: items || [] });
+    } catch (e) {
+        next(e);
     }
 });
 
-// POST a new purchase bill
-router.post('/', requireAuth, async (req, res) => {
-    const { vendor_id, purchase_order_id, bill_date, due_date, billing_address, shipping_address, notes, items, sub_total, total_tax, total } = req.body;
+/* ----------------------------- CREATE ----------------------------- */
+router.post('/', billUpload, async (req, res, next) => {
     const conn = await db.promise().getConnection();
-
     try {
         await conn.beginTransaction();
+        const p = req.body;
+        const items = JSON.parse(p.items || '[]');
+        const user_id = req.session?.user?.id;
 
-        const bill_number = await getNextBillNumber(conn);
+        if (!user_id) {
+            await conn.rollback();
+            return res.status(401).json({ error: 'Unauthorized. User session not found.' });
+        }
 
-        const billResult = await conn.query(
-            `INSERT INTO purchase_bills (purchase_order_id, vendor_id, bill_number, bill_date, due_date, billing_address, shipping_address, notes, sub_total, total_tax, total, status)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Open')`,
-            [purchase_order_id, vendor_id, bill_number, bill_date, due_date, billing_address, shipping_address, notes, sub_total, total_tax, total]
-        );
-        const billId = billResult[0].insertId;
+        const vendor_id = await fkOrNull(conn, 'vendor', p.vendor_id);
+        if (!vendor_id) {
+            throw new Error('The selected vendor is invalid or does not exist.');
+        }
 
-        const itemValues = items.map(item => [billId, item.product_id, item.description, item.hscode, item.packing, item.quantity, item.uom, item.origin, item.unit_price, item.tax_amount, item.line_total]);
-        await conn.query(`INSERT INTO purchase_bill_items (purchase_bill_id, product_id, description, hscode, packing, quantity, uom, origin, unit_price, tax_amount, line_total) VALUES ?`, [itemValues]);
+        const bill_uniqid = `pb_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
+
+        const [result] = await conn.query('INSERT INTO purchase_bills SET ?', [{
+            bill_uniqid: bill_uniqid,
+            vendor_id: vendor_id,
+            purchase_order_id: toNumOrNull(p.purchase_order_id),
+            bill_number: p.bill_number,
+            bill_date: p.bill_date || null,
+            due_date: p.due_date || null,
+            currency_id: toNumOrNull(p.currency_id),
+            subtotal: toNumOrNull(p.subtotal),
+            tax_total: toNumOrNull(p.tax_total),
+            total: toNumOrNull(p.total),
+            notes: p.notes,
+            user_id: user_id,
+            status_id: 3, // Assuming 3 is 'Draft'
+        }]);
+        const billId = result.insertId;
+
+        if (items.length) {
+            const itemValues = items.map(it => [billId, toNumOrNull(it.product_id), it.item_name, it.description, toNumOrNull(it.quantity), toNumOrNull(it.uom_id), toNumOrNull(it.rate), toNumOrNull(it.tax_id)]);
+            await conn.query('INSERT INTO purchase_bill_items (purchase_bill_id, product_id, item_name, description, quantity, uom_id, rate, tax_id) VALUES ?', [itemValues]);
+        }
+
+        if (req.files && req.files.length) {
+            const attachmentValues = req.files.map(f => [billId, f.originalname, relPath(f), f.mimetype, f.size]);
+            await conn.query('INSERT INTO purchase_bill_attachments (purchase_bill_id, file_name, file_path, mime_type, size_bytes) VALUES ?', [attachmentValues]);
+        }
+
+        await addHistory(conn, {
+            module: 'purchase_bill',
+            moduleId: billId,
+            userId: user_id,
+            action: 'CREATED',
+            details: { bill_number: p.bill_number, total: p.total }
+        });
 
         await conn.commit();
-        res.status(201).json({ id: billId, bill_number, message: 'Purchase Bill created successfully' });
-    } catch (err) {
+        const [[newBill]] = await conn.query('SELECT * FROM purchase_bills WHERE id = ?', [billId]);
+        res.status(201).json(newBill);
+    } catch (e) {
         await conn.rollback();
-        console.error('Error creating purchase bill:', err);
-        res.status(500).json({ error: 'Failed to create purchase bill' });
+        next(e);
+    } finally {
+        conn.release();
+    }
+});
+
+/* ----------------------------- UPDATE ----------------------------- */
+router.put('/:id', billUpload, async (req, res, next) => {
+    const conn = await db.promise().getConnection();
+    try {
+        await conn.beginTransaction();
+        const { id: identifier } = req.params;
+        const p = req.body;
+        const items = JSON.parse(p.items || '[]');
+        const updated_by_user_id = req.session?.user?.id; // Good practice to track who updated
+
+        if (!updated_by_user_id) {
+            await conn.rollback();
+            return res.status(401).json({ error: 'Unauthorized. User session not found.' });
+        }
+
+        const vendor_id = await fkOrNull(conn, 'vendor', p.vendor_id);
+        if (!vendor_id) {
+            throw new Error('The selected vendor is invalid or does not exist.');
+        }
+
+        // Fetch old bill for history comparison
+        const [[oldBill]] = await conn.query(`SELECT * FROM purchase_bills WHERE bill_uniqid = ?`, [identifier]);
+        if (!oldBill) return res.status(404).json({ error: 'Bill not found' });
+
+        const billId = oldBill.id; // Use numeric ID for all subsequent operations
+
+        await conn.query('UPDATE purchase_bills SET ? WHERE id = ?', [{
+            user_id: oldBill.user_id, // Preserve original creator
+            vendor_id: vendor_id,
+            purchase_order_id: toNumOrNull(p.purchase_order_id),
+            bill_number: p.bill_number,
+            bill_date: p.bill_date || null,
+            due_date: p.due_date || null,
+            currency_id: toNumOrNull(p.currency_id),
+            subtotal: toNumOrNull(p.subtotal),
+            tax_total: toNumOrNull(p.tax_total),
+            total: toNumOrNull(p.total),
+            notes: p.notes,
+            status_id: toNumOrNull(p.status_id) ?? oldBill.status_id,
+        }, billId]);
+
+        await conn.query('DELETE FROM purchase_bill_items WHERE purchase_bill_id = ?', [billId]);
+        if (items.length) {
+            const itemValues = items.map(it => [billId, toNumOrNull(it.product_id), it.item_name, it.description, toNumOrNull(it.quantity), toNumOrNull(it.uom_id), toNumOrNull(it.rate), toNumOrNull(it.tax_id)]);
+            await conn.query('INSERT INTO purchase_bill_items (purchase_bill_id, product_id, item_name, description, quantity, uom_id, rate, tax_id) VALUES ?', [itemValues]);
+        }
+
+        if (req.files && req.files.length) {
+            const attachmentValues = req.files.map(f => [billId, f.originalname, relPath(f), f.mimetype, f.size]);
+            await conn.query('INSERT INTO purchase_bill_attachments (purchase_bill_id, file_name, file_path, mime_type, size_bytes) VALUES ?', [attachmentValues]);
+        }
+
+        // --- Create History Record for Update ---
+        const changes = [];
+        if (oldBill.bill_number !== p.bill_number) changes.push({ field: 'Bill Number', from: oldBill.bill_number, to: p.bill_number });
+        if (oldBill.bill_date.toISOString().split('T')[0] !== p.bill_date) changes.push({ field: 'Bill Date', from: oldBill.bill_date.toISOString().split('T')[0], to: p.bill_date });
+        if (String(oldBill.total) !== String(p.total)) changes.push({ field: 'Total', from: oldBill.total, to: p.total });
+        if (String(oldBill.status_id) !== String(p.status_id)) changes.push({ field: 'Status ID', from: oldBill.status_id, to: p.status_id });
+        if (oldBill.notes !== p.notes) changes.push({ field: 'Notes', from: '...', to: '...' });
+
+        if (changes.length > 0) {
+            await addHistory(conn, {
+                module: 'purchase_bill',
+                moduleId: billId,
+                userId: updated_by_user_id,
+                action: 'UPDATED',
+                details: { changes }
+            });
+        }
+
+        await conn.commit();
+        const [[updatedBill]] = await conn.query('SELECT * FROM purchase_bills WHERE id = ?', [billId]);
+        res.json(updatedBill);
+    } catch (e) {
+        await conn.rollback();
+        next(e);
+    } finally {
+        conn.release();
+    }
+});
+
+/* ----------------------------- ADD ATTACHMENTS ------------------ */
+router.post('/:id/attachments', billUpload, async (req, res, next) => {
+    const conn = await db.promise().getConnection();
+    try {
+        await conn.beginTransaction();
+        const { id: identifier } = req.params;
+        const user_id = req.session?.user?.id;
+
+        if (!user_id) {
+            await conn.rollback();
+            return res.status(401).json({ error: 'Unauthorized. User session not found.' });
+        }
+
+        const [[bill]] = await conn.query('SELECT id FROM purchase_bills WHERE bill_uniqid = ?', [identifier]);
+        if (!bill) {
+            await conn.rollback();
+            return res.status(404).json({ error: 'Bill not found' });
+        }
+        const billId = bill.id;
+
+        if (req.files && req.files.length) {
+            const attachmentValues = req.files.map(f => [billId, f.originalname, relPath(f), f.mimetype, f.size]);
+            await conn.query('INSERT INTO purchase_bill_attachments (purchase_bill_id, file_name, file_path, mime_type, size_bytes) VALUES ?', [attachmentValues]);
+        } else {
+            await conn.rollback();
+            return res.status(400).json({ error: 'No files were uploaded.' });
+        }
+
+        await conn.commit();
+        res.status(201).json({ success: true, message: 'Attachments added successfully.' });
+    } catch (e) {
+        await conn.rollback();
+        next(e);
+    } finally {
+        conn.release();
+    }
+});
+
+/* ----------------------------- DELETE ATTACHMENT ------------------ */
+router.delete('/:billId/attachments/:attachmentId', async (req, res, next) => {
+    const conn = await db.promise().getConnection();
+    try {
+        await conn.beginTransaction();
+        const { billId, attachmentId } = req.params;
+        const userId = req.session?.user?.id;
+
+        const [[attachment]] = await conn.query(
+            'SELECT * FROM purchase_bill_attachments WHERE id = ? AND purchase_bill_id = ?',
+            [attachmentId, billId]
+        );
+
+        if (!attachment) {
+            await conn.rollback();
+            return res.status(404).json({ error: 'Attachment not found' });
+        }
+
+        // Delete file from disk
+        const diskPath = path.resolve(attachment.file_path.substring(1)); // remove leading '/'
+        if (fs.existsSync(diskPath)) {
+            fs.unlinkSync(diskPath);
+        }
+
+        // Delete record from database
+        await conn.query('DELETE FROM purchase_bill_attachments WHERE id = ?', [attachmentId]);
+
+        await addHistory(conn, { module: 'purchase_bill', moduleId: billId, userId: userId, action: 'ATTACHMENT_DELETED', details: { file_name: attachment.file_name } });
+        await conn.commit();
+        res.json({ success: true, message: 'Attachment deleted successfully.' });
+    } catch (e) {
+        await conn.rollback();
+        next(e);
     } finally {
         conn.release();
     }

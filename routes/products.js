@@ -185,6 +185,7 @@ router.get('/', async (req, res) => {
                         WHERE pd_uom.product_id = p.id AND pd_uom.uom_id IS NOT NULL
                         ORDER BY pd_uom.id ASC LIMIT 1
                     ) as uom
+                    , (SELECT pd.uom_id FROM product_details pd WHERE pd.product_id = p.id AND pd.uom_id IS NOT NULL ORDER BY pd.id ASC LIMIT 1) as uom_id
  -- pk.name AS packing_name
                 FROM products p
                 LEFT JOIN categories c ON c.id = p.category_id
@@ -219,7 +220,8 @@ router.get('/', async (req, res) => {
                 thumbnail_url: r.thumbnail_url || r.image_url || null,
                 variety: r.variety || null,
                 grade_and_size_code: r.grade_and_size_code || null,
-                uom: r.uom || ''
+                uom: r.uom || '',
+                uom_id: r.uom_id || null
             })),
             totalRows
         });

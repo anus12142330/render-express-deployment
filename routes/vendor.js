@@ -95,6 +95,7 @@ router.get('/', async (req, res) => {
         v.company_name,
         v.email_address AS email,
         v.phone_work,
+        vo.currency_id,
         0 AS payables,
         0 AS unused_credits,
         (
