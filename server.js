@@ -16,7 +16,7 @@ import uomRoutes from './routes/uom.js';
 import statusRoutes from './routes/status.js';
 import termsconditionRoutes from './routes/termscondition.js';
 import taxesRoutes from './routes/taxes.js';
-import purchasebillRoutes from './routes/purchasebill.js';
+import purchasebillRoutes from './routes/purchaseBill.js';
 import shipmentRoutes from './routes/shipment.js';
 import proformaRoutes from './routes/proforma.js';
 import documentTypeRoutes from './routes/documentType.js';
