@@ -37,6 +37,10 @@ import warehousesRoutes from "./routes/warehouses.js";
 import router from "./routes/customer.js"; // ✅ ES module import
 import uploadRoutes from "./routes/upload.js";
 import rbacRoutes from './routes/rbac.js';
+<<<<<<< HEAD
+=======
+import roleRoutes from './routes/roles.js';
+>>>>>>> 0a3e18b (09102025)
 import documentTemplateRoutes from './routes/documentTemplate.js';
 import db from "./db.js";
 import { fileURLToPath } from 'url';
@@ -171,7 +175,11 @@ app.use('/api/upload', uploadRoutes);
 app.use('/api/rbac', rbacRoutes);
 app.use('/api/paymentTerms', paymentTermsRoutes);
 app.use('/api/document-template', documentTemplateRoutes);
+<<<<<<< HEAD
 
+=======
+app.use('/api/roles', roleRoutes);
+>>>>>>> 0a3e18b (09102025)
 
 //Role permission
 app.get('/api/me', requireAuth, async (req, res) => {
@@ -228,11 +236,21 @@ app.get('/api/users', (req, res) => {
             u.password,
             u.department_id,
             d.name AS department_name,
+<<<<<<< HEAD
             GROUP_CONCAT(DISTINCT p.name) AS provision_names,
             MAX(u.signature_path) AS signature_path
         FROM \`user\` u
                  LEFT JOIN department d ON d.id = u.department_id
                  LEFT JOIN provision p ON FIND_IN_SET(p.id, IFNULL(u.provision, ''))
+=======
+            MAX(u.signature_path) AS signature_path,
+            GROUP_CONCAT(DISTINCT ur.role_id) as role_ids,
+            GROUP_CONCAT(DISTINCT r.name SEPARATOR ", ") as role_name
+        FROM \`user\` u
+                 LEFT JOIN department d ON d.id = u.department_id
+                 LEFT JOIN user_role ur ON ur.user_id = u.id
+                 LEFT JOIN role r ON r.id = ur.role_id
+>>>>>>> 0a3e18b (09102025)
         WHERE u.is_inactive = 0
         GROUP BY
             u.id, u.name, u.designation, u.email, u.password, u.department_id, d.name
@@ -320,12 +338,17 @@ app.post('/api/user/change-password', (req, res) => {
 
 // ✅ CREATE USER
 app.post("/api/user", uploadSignature.single("signature"), (req, res) => {
+<<<<<<< HEAD
     const { name, designation, department_id, provision, email, password } =
+=======
+    const { name, designation, department_id, role_ids, email, password } =
+>>>>>>> 0a3e18b (09102025)
         req.body;
     const signaturePath = req.file
         ? `/uploads/signatures/${req.file.filename}`
         : null;
 
+<<<<<<< HEAD
     const sql = `
     INSERT INTO \`user\`
       (name, designation, department_id, provision, email, password, signature_path)
@@ -376,11 +399,66 @@ app.put("/api/user/:id", uploadSignature.single("signature"), (req, res) => {
             password && password.trim() !== ""
                 ? password
                 : currentPassword;
+=======
+    db.getConnection(async (err, conn) => {
+        if (err) return res.status(500).json({ success: false, error: 'DB Connection failed' });
+        try {
+            await conn.promise().beginTransaction();
+
+            const userSql = `
+              INSERT INTO \`user\` (name, designation, department_id, email, password, signature_path)
+              VALUES (?, ?, ?, ?, ?, ?)
+            `;
+            const [userResult] = await conn.promise().query(userSql, [name, designation, department_id, email, password, signaturePath]);
+            const userId = userResult.insertId;
+
+            if (role_ids && role_ids.length > 0) {
+                const roles = Array.isArray(role_ids) ? role_ids : role_ids.split(',');
+                const userRoleValues = roles.map(roleId => [userId, roleId]);
+                await conn.promise().query('INSERT INTO user_role (user_id, role_id) VALUES ?', [userRoleValues]);
+            }
+
+            await conn.promise().commit();
+            res.json({ success: true, id: userId });
+
+        } catch (dbErr) {
+            await conn.promise().rollback();
+            console.error("SQL ERROR (POST /api/user):", dbErr);
+            res.status(500).json({ success: false, error: dbErr.message });
+        } finally {
+            conn.release();
+        }
+    });
+});
+
+// === UPDATE USER ===
+app.put("/api/user/:id", uploadSignature.single("signature"), async (req, res) => {
+    const { id } = req.params;
+    const { name, designation, department_id, role_ids, email, password } =
+        req.body;
+
+    const conn = await db.promise().getConnection();
+
+    try {
+        await conn.beginTransaction();
+
+        // Fetch current user data to get existing password and signature
+        const [rows] = await conn.execute("SELECT password, signature_path FROM `user` WHERE id = ?", [id]);
+        if (!rows || rows.length === 0) {
+            await conn.rollback();
+            return res.status(404).json({ success: false, error: "User not found" });
+        }
+
+        const { password: currentPassword, signature_path: currentSignature } = rows[0];
+
+        const nextPassword = password && password.trim() !== "" ? password : currentPassword;
+>>>>>>> 0a3e18b (09102025)
 
         // Signature logic
         let nextSignaturePath = currentSignature;
         if (req.file) {
             nextSignaturePath = `/uploads/signatures/${req.file.filename}`;
+<<<<<<< HEAD
 
             // Delete old file if exists
             if (currentSignature) {
@@ -422,6 +500,34 @@ app.put("/api/user/:id", uploadSignature.single("signature"), (req, res) => {
             return res.json({ success: true });
         });
     });
+=======
+        }
+
+        // Update user table
+        const userUpdateSql = `UPDATE \`user\` SET name = ?, designation = ?, department_id = ?, email = ?, password = ?, signature_path = ? WHERE id = ?`;
+        await conn.execute(userUpdateSql, [name, designation, department_id, email, nextPassword, nextSignaturePath, id]);
+
+        // Update user_role table
+        await conn.execute('DELETE FROM user_role WHERE user_id = ?', [id]);
+        if (role_ids && role_ids.length > 0) {
+            const roles = Array.isArray(role_ids) ? role_ids : role_ids.split(',');
+            const userRoleValues = roles.map(roleId => [id, roleId]);
+            if (userRoleValues.length > 0) {
+                await conn.query('INSERT INTO user_role (user_id, role_id) VALUES ?', [userRoleValues]);
+            }
+        }
+
+        await conn.commit();
+        res.json({ success: true });
+
+    } catch (dbErr) {
+        if (conn) await conn.rollback(); // Check if conn exists before rollback
+        console.error("SQL ERROR (PUT /api/user/:id):", dbErr);
+        res.status(500).json({ success: false, error: dbErr.message });
+    } finally {
+        if (conn) conn.release(); // Check if conn exists before releasing
+    }
+>>>>>>> 0a3e18b (09102025)
 });
 
 // ✅ DEACTIVATE USER
