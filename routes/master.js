@@ -393,7 +393,8 @@ chart_of_accounts: {
   `,
   listSearchIn: ['dtmpl.name', 'dt.name'],
   listOrderBy: 'dtmpl.name'
-}
+},
+ 'vehicle_type': { table: 'master_vehicle_type', idCol: 'id', nameCol: 'name' },
 
 };
 
@@ -443,7 +444,7 @@ router.get('/:type', async (req, res, next) => {
         const q = (req.query.search || req.query.q || '').trim();
         const all = req.query.all === '1';
         
-        // Sorting parameters
+        // Sorting parameters (added for consistency)
         const sortField = req.query.sort_field;
         const sortOrder = (req.query.sort_order || 'desc').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
@@ -537,7 +538,7 @@ router.get('/:type', async (req, res, next) => {
         }
 
         // Simple table path
-        const defaultSortCol = cfg.listOrderBy || cfg.id;
+        const defaultSortCol = cfg.listOrderBy || cfg.id || 'id';
         const orderBy = sortField ? `\`${sortField}\` ${sortOrder}` : `\`${defaultSortCol}\` DESC`;
 
         const searchCols = cfg.fields?.map(f => `\`${f.name}\``) || ['`name`'];
@@ -546,7 +547,7 @@ router.get('/:type', async (req, res, next) => {
 
         // For dropdowns, we don't need the in_use check.
         if (all) {
-            const dropdownOrderBy = cfg.listOrderBy || cfg.fields[0]?.name || cfg.id;
+            const dropdownOrderBy = cfg.listOrderBy || cfg.fields?.[0]?.name || cfg.id || 'id';
             const dataSql = `SELECT * FROM \`${cfg.table}\` ${whereSql} ORDER BY \`${dropdownOrderBy}\` ASC`;
             db.query(dataSql, params, (err, rows) => {
                 if (err) return next(err);
