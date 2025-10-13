@@ -136,7 +136,7 @@ router.get('/:id', async (req, res) => {
         
         // The frontend is expecting the attachments array to be named 'attachments'
         // The table is named 'fleet_documents', so we alias it here.
-        const attachments = await q('SELECT id, fleet_id, document_path as file_path, name as attachment_name, DATE_FORMAT(expiry_date, "%Y-%m-%d") AS expiry_date, mime_type, size_bytes FROM fleet_documents WHERE fleet_id = ?', [req.params.id]);
+        const attachments = await q('SELECT id, fleet_id, document_path as file_path, name as attachment_name, DATE_FORMAT(expiry_date, "%Y-%m-%d") AS expiry_date, mime_type, size_bytes, category FROM fleet_documents WHERE fleet_id = ?', [req.params.id]);
 
         // Combine and send
         res.json({ ...fleet, images, attachments, history });
@@ -219,13 +219,15 @@ router.post('/', upload, async (req, res) => {
         // Handle vehicle documents
         if (req.files.vehicle_documents) {
             const newDocsMeta = JSON.parse(req.body.new_documents_meta || '[]');
-            const docPromises = req.files.vehicle_documents.map((file, index) => {
-                const meta = newDocsMeta[index] || {};
-                const docSql = 'INSERT INTO fleet_documents (fleet_id, document_path, name, expiry_date) VALUES (?, ?, ?, ?)';
-                const normalizedPath = file.path.replace(/\\/g, '/');
-                return conn.query(docSql, [fleetId, normalizedPath, meta.name, meta.expiry_date || null]);
-            });
-            await Promise.all(docPromises);
+            if (req.files.vehicle_documents.length === newDocsMeta.length) {
+                const docPromises = req.files.vehicle_documents.map((file, index) => {
+                    const meta = newDocsMeta[index]; // meta.name is the doc.type from frontend (e.g., "Registration Document")
+                    const docSql = 'INSERT INTO fleet_documents (fleet_id, document_path, name, expiry_date, category, mime_type, size_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)';
+                    const normalizedPath = file.path.replace(/\\/g, '/');
+                    return conn.query(docSql, [fleetId, normalizedPath, meta.name, meta.expiry_date || null, meta.category, file.mimetype, file.size]);
+                });
+                await Promise.all(docPromises);
+            }
         }
 
         await conn.commit();
@@ -383,26 +385,28 @@ router.put('/:id', upload, async (req, res) => {
 
         // Handle new documents
         if (req.files.vehicle_documents) {
-            const newDocsMeta = JSON.parse(new_documents_meta || '[]');
-            const docPromises = req.files.vehicle_documents.map((file, index) => {
-                const meta = newDocsMeta[index] || {};
-                const docSql = 'INSERT INTO fleet_documents (fleet_id, document_path, name, expiry_date) VALUES (?, ?, ?, ?)';
-                // Use 'id' from req.params for the fleet_id when updating
-                const normalizedPath = file.path.replace(/\\/g, '/');
-                return conn.query(docSql, [id, normalizedPath, meta.name, meta.expiry_date || null]);
-            });
-            await Promise.all(docPromises);
+            const newDocsMeta = JSON.parse(req.body.new_documents_meta || '[]');
+            if (req.files.vehicle_documents.length === newDocsMeta.length) {
+                const docPromises = req.files.vehicle_documents.map((file, index) => {
+                    const meta = newDocsMeta[index]; // meta.name is the doc.type from frontend (e.g., "Registration Document")
+                    const docSql = 'INSERT INTO fleet_documents (fleet_id, document_path, name, expiry_date, category, mime_type, size_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)';
+                    const normalizedPath = file.path.replace(/\\/g, '/');
+                    return conn.query(docSql, [id, normalizedPath, meta.name, meta.expiry_date || null, meta.category, file.mimetype, file.size]);
+                });
+                await Promise.all(docPromises);
+            }
         }
 
         // Handle updated documents metadata
         if (updated_documents_meta) {
             const updatedDocs = JSON.parse(updated_documents_meta);
-            const updateDocPromises = updatedDocs.map(doc => {
-                // Assuming 'name' in meta corresponds to 'name' column in DB
-                const updateSql = 'UPDATE fleet_documents SET name = ?, expiry_date = ? WHERE id = ?';
-                return conn.query(updateSql, [doc.name, doc.expiry_date || null, doc.id]);
-            });
-            await Promise.all(updateDocPromises);
+            if (updatedDocs.length > 0) {
+                const updateDocPromises = updatedDocs.map(doc => {
+                    const updateSql = 'UPDATE fleet_documents SET name = ?, expiry_date = ?, category = ? WHERE id = ?';
+                    return conn.query(updateSql, [doc.name, doc.expiry_date || null, doc.category, doc.id]);
+                });
+                await Promise.all(updateDocPromises);
+            }
         }
 
         // Handle deleted images

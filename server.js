@@ -774,7 +774,12 @@ app.get('/api/company-settings/:id', (req, res) => {
 // ✅ GET all companies for tabbing interface
 app.get('/api/companies', (req, res) => {
   db.query(
-    `SELECT id, name, industry, logo FROM company_settings ORDER BY id ASC`,
+    `SELECT 
+        cs.id, cs.name, cs.industry, cs.logo, 
+        cs.country AS country_name, 
+        c.id AS country_id 
+     FROM company_settings cs
+     LEFT JOIN country c ON cs.country = c.name ORDER BY cs.id ASC`,
     (err, results) => {
       if (err) return res.status(500).json({ error: err?.sqlMessage || 'Database error' });
       res.json(results || []);

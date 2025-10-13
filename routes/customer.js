@@ -684,6 +684,31 @@ router.post('/:id/update-address', async (req, res) => {
 });
 
 /* ================================
+   POST /api/customers/:id/update-delivery-details
+================================ */
+router.post('/:id/update-delivery-details', async (req, res) => {
+    const { id: customerId } = req.params;
+    const { latitude, longitude, delivery_window, available_time } = req.body;
+
+    try {
+        const [rows] = await db.promise().query(`SELECT id FROM vendor_address WHERE vendor_id = ?`, [customerId]);
+        if (rows.length === 0) {
+            return res.status(404).json(errPayload('Address record not found for customer', 'NOT_FOUND'));
+        }
+
+        await db.promise().query(
+            `UPDATE vendor_address SET ship_latitude = ?, ship_longitude = ?, delivery_window = ?, available_time = ? WHERE vendor_id = ?`,
+            [latitude || null, longitude || null, delivery_window || null, available_time || null, customerId]
+        );
+
+        res.json({ success: true, message: 'Delivery details updated successfully.' });
+    } catch (err) {
+        console.error('update-delivery-details:', err);
+        res.status(500).json(errPayload('Failed to update delivery details', 'DB_ERROR', err.message));
+    }
+});
+
+/* ================================
    Contacts add/update (unchanged)
 ================================ */
 router.post('/contacts', async (req, res) => {
