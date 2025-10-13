@@ -151,7 +151,7 @@ router.post('/', upload, async (req, res) => {
     try {
         const {
             imei, vehicle_name, vehicle_number, vehicle_type_id, brand, model, chassis_number,
-            plate_number, registration_date, registration_expiry_date,
+            plate_number, registration_date, registration_expiry_date, tc_no,
             insurance_company, insurance_name, insurance_expiry_date, insurance_issue_date,
             ownership_type, starting_km
         } = req.body;
@@ -169,15 +169,15 @@ router.post('/', upload, async (req, res) => {
         const fleetSql = `
             INSERT INTO fleets (
                 imei, vehicle_name, vehicle_number, vehicle_type_id, brand, model, chassis_number, primary_image,
-                plate_number, registration_date, registration_expiry_date,
+                plate_number, registration_date, registration_expiry_date, tc_no,
                 insurance_company, insurance_name, insurance_expiry_date, insurance_issue_date,
                 ownership_type, starting_km
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `;
         const [result] = await conn.query(fleetSql, [
             imei, vehicle_name, vehicle_number, vehicle_type_id, brand, model, chassis_number,
             null, // primary_image path will be updated later
-            plate_number, registration_date || null, registration_expiry_date || null,
+            plate_number, registration_date || null, registration_expiry_date || null, tc_no,
             insurance_company, insurance_name, insurance_expiry_date || null, insurance_issue_date || null,
             ownership_type, starting_km
         ]);
@@ -255,7 +255,7 @@ router.put('/:id', upload, async (req, res) => {
 
         const {
             imei, vehicle_name, vehicle_number, vehicle_type_id, brand, model, chassis_number,
-            plate_number, registration_date, registration_expiry_date, primary_image,
+            plate_number, registration_date, registration_expiry_date, tc_no, primary_image,
             insurance_company, insurance_name, insurance_expiry_date, insurance_issue_date, new_documents_meta, updated_documents_meta,
             ownership_type, starting_km, deleted_images, deleted_documents
             } = req.body;
@@ -276,7 +276,7 @@ router.put('/:id', upload, async (req, res) => {
         const changes = [];
         const fieldsToCompare = {
             imei, vehicle_name, vehicle_number, vehicle_type_id, brand, model, chassis_number,
-            plate_number, registration_date, registration_expiry_date,
+            plate_number, registration_date, registration_expiry_date, tc_no,
             insurance_company, insurance_name, insurance_expiry_date, insurance_issue_date,
             ownership_type, starting_km
         };
@@ -320,14 +320,14 @@ router.put('/:id', upload, async (req, res) => {
         const fleetSql = `
             UPDATE fleets SET
                 imei = ?, vehicle_name = ?, vehicle_number = ?, vehicle_type_id = ?, brand = ?, model = ?, chassis_number = ?, primary_image = ?,
-                plate_number = ?, registration_date = ?, registration_expiry_date = ?,
+                plate_number = ?, registration_date = ?, registration_expiry_date = ?, tc_no = ?,
                 insurance_company = ?, insurance_name = ?, insurance_expiry_date = ?, insurance_issue_date = ?,
                 ownership_type = ?, starting_km = ?
             WHERE id = ?
         `;
         await conn.query(fleetSql, [
             imei, vehicle_name, vehicle_number, vehicle_type_id, brand, model, chassis_number, primary_image,
-            plate_number, registration_date || null, registration_expiry_date || null,
+            plate_number, registration_date || null, registration_expiry_date || null, tc_no,
             insurance_company, insurance_name, insurance_expiry_date || null, insurance_issue_date || null,
             ownership_type, starting_km, id
         ]);
