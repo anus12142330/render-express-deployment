@@ -51,6 +51,7 @@ router.get('/', async (req, res) => {
         const search = String(req.query.search || '').trim();
         const categoryFilterId = req.query.category ? Number(req.query.category) : null;
         const inStockOnly = ['1', 'true', 1, true].includes(req.query.in_stock_only);
+        const isActiveFilter = req.query.is_active;
 
         const asInt = (v, def, min = 0, max = 1000000000) => {
             const n = Number.parseInt(v, 10);
@@ -90,6 +91,10 @@ router.get('/', async (req, res) => {
         WHERE s.product_id = p.id
           AND COALESCE(s.qty, 0) > 0
       )`);
+        }
+
+        if (isActiveFilter === '1' || isActiveFilter === 'true') {
+            conds.push(`p.is_active = 1`);
         }
 
         if (categoryFilterId) {

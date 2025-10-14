@@ -48,6 +48,24 @@ const addHistory = async (conn, { module, moduleId, userId, action, details }) =
 /* ----------------------------- LIST ----------------------------- */
 router.get('/', async (req, res, next) => {
     try {
+        const page = Math.max(parseInt(req.query.page || "1", 10), 1);
+        const per_page = Math.min(Math.max(parseInt(req.query.per_page || "5", 10), 1), 100);
+        const offset = (page - 1) * per_page;
+        const vendorId = req.query.vendor_id ? parseInt(req.query.vendor_id, 10) : null;
+
+        let whereClause = "";
+        const params = [];
+
+        if (vendorId && Number.isFinite(vendorId)) {
+            whereClause = "WHERE pb.vendor_id = ?";
+            params.push(vendorId);
+        }
+
+        const [countResult] = await db.promise().query(
+            `SELECT COUNT(*) as total FROM purchase_bills pb ${whereClause}`, params
+        );
+        const totalRows = countResult[0]?.total || 0;
+
         const [rows] = await db.promise().query(`
             SELECT 
                 pb.id, pb.bill_uniqid, pb.bill_number, pb.bill_date, pb.total, pb.status_id, 
@@ -57,12 +75,51 @@ router.get('/', async (req, res, next) => {
             LEFT JOIN vendor v ON v.id = pb.vendor_id
             LEFT JOIN currency c ON c.id = pb.currency_id
             LEFT JOIN status s ON s.id = pb.status_id
+            ${whereClause}
             ORDER BY pb.bill_date DESC, pb.id DESC
-        `);
-        res.json(rows || []);
+            LIMIT ? OFFSET ?`,
+            [...params, per_page, offset]
+        );
+
+        res.json({ data: rows || [], totalRows });
     } catch (e) {
         next(e);
     }
+});
+
+/* ----------------------------- GET RECENT (for vendor page) ----------------------------- */
+router.get('/recent', async (req, res, next) => {
+    try {
+        const page = Math.max(parseInt(req.query.page || "1", 10), 1);
+        const per_page = Math.min(Math.max(parseInt(req.query.per_page || "5", 10), 1), 100);
+        const offset = (page - 1) * per_page;
+        const vendorId = req.query.vendor_id ? parseInt(req.query.vendor_id, 10) : null;
+
+        if (!vendorId || !Number.isFinite(vendorId)) {
+            return res.json({ data: [], totalRows: 0 });
+        }
+
+        const whereClause = "WHERE pb.vendor_id = ?";
+        const params = [vendorId];
+
+        const [countResult] = await db.promise().query(
+            `SELECT COUNT(*) as total FROM purchase_bills pb ${whereClause}`, params
+        );
+        const totalRows = countResult[0]?.total || 0;
+
+        const [rows] = await db.promise().query(`
+            SELECT 
+                pb.id, pb.bill_uniqid, pb.bill_number, pb.bill_date, pb.total, pb.status_id, 
+                s.name as status, v.display_name as vendor_name, c.name as currency_name
+            FROM purchase_bills pb
+            LEFT JOIN vendor v ON v.id = pb.vendor_id
+            LEFT JOIN currency c ON c.id = pb.currency_id
+            LEFT JOIN status s ON s.id = pb.status_id
+            ${whereClause}
+            ORDER BY pb.bill_date DESC, pb.id DESC
+            LIMIT ? OFFSET ?`, [...params, per_page, offset]);
+        res.json({ data: rows || [], totalRows });
+    } catch (e) { next(e); }
 });
 
 /* ----------------------------- GET NEXT BILL # -------------------- */

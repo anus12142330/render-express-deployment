@@ -275,6 +275,55 @@ router.get("/", async (req, res) => {
     }
 });
 
+/* ---------------------------- get 5 most recent --------------------------- */
+router.get("/recent", async (req, res) => {
+    try {
+        const vendorId = req.query.vendor_id ? parseInt(req.query.vendor_id, 10) : null;
+        const page = Math.max(parseInt(req.query.page || "1", 10), 1);
+        const per_page = Math.min(Math.max(parseInt(req.query.per_page || "5", 10), 1), 100);
+        const offset = (page - 1) * per_page;
+
+        let whereClause = "";
+        const params = [];
+
+        if (vendorId && Number.isFinite(vendorId)) {
+            whereClause = "WHERE po.vendor_id = ?";
+            params.push(vendorId);
+        }
+
+        // Get total count for pagination
+        let totalRows = 0;
+        if (vendorId) {
+            const [countResult] = await db.promise().query(
+                `SELECT COUNT(*) as total FROM purchase_orders po ${whereClause}`, params
+            );
+            totalRows = countResult[0]?.total || 0;
+        }
+
+        const [rows] = await db.promise().query(
+            `SELECT
+                po.id, po.po_number, po.po_uniqid, po.reference_no, po.vendor_id,
+                DATE(po.po_date) AS po_date, DATE(po.delivery_date) AS delivery_date, po.subtotal, po.discount_percent,
+                po.total, po.status_id, s.name AS status_name, po.created_at, po.updated_at,
+                v.display_name AS vendor_name,
+                c.name AS currency_code
+            FROM purchase_orders po
+            LEFT JOIN vendor v ON v.id = po.vendor_id
+            LEFT JOIN status s ON s.id = po.status_id
+            LEFT JOIN currency c ON c.id = po.currency_id
+            ${whereClause}
+            ORDER BY po.po_date DESC, po.id DESC, po.created_at DESC
+            LIMIT ? OFFSET ?`,
+            [...params, per_page, offset]
+        );
+
+        res.json({ data: rows || [], totalRows });
+    } catch (err) {
+        res.status(500).json(errPayload(err?.message || "Failed to fetch recent purchase orders"));
+    }
+});
+
+
 /* --------------------------------- get one -------------------------------- */
 router.get("/by-uniqid/:uniqid", async (req, res) => {
     try {
