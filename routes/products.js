@@ -83,7 +83,7 @@ router.get('/', async (req, res) => {
             params.push(s, s, s, s);
         }
 
-        if (inStockOnly) {
+        if (inStockOnly) { // This condition seems correct as is.
             conds.push(`EXISTS (
         SELECT 1
         FROM product_opening_stock s
@@ -113,7 +113,9 @@ router.get('/', async (req, res) => {
             params.push(idsToFilter);
         }
 
-        const whereSql = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+        // Base condition to exclude deleted products, then add other filters.
+        const baseWhere = 'p.is_deleted = 0';
+        const whereSql = `WHERE ${baseWhere}${conds.length ? ` AND ${conds.join(' AND ')}` : ''}`;
 
         const sortableFields = {
             'id': 'p.id',
@@ -199,7 +201,7 @@ router.get('/', async (req, res) => {
         const totalRows = (await q(
             `SELECT COUNT(*) AS c FROM products p 
              LEFT JOIN categories c ON c.id = p.category_id 
-             ${whereSql}`,
+             ${whereSql}`, // The whereSql already includes the is_deleted check
             params))[0]?.c || 0;
 
         res.json({
@@ -244,7 +246,45 @@ router.get('/count', async (req, res) => {
     }
 });
 
+// ==================================================
+// PATCH /api/products/:id/status (toggle active)
+// ==================================================
+router.patch('/:id/status', async (req, res) => {
+    const { id } = req.params;
+    const { is_active } = req.body;
+    const userId = req.session?.user?.id;
 
+    if (is_active === undefined || !userId) {
+        return res.status(400).json({ error: 'Missing required fields or authentication.' });
+    }
+
+    try {
+        await q('UPDATE products SET is_active = ? WHERE id = ?', [is_active ? 1 : 0, id]);
+        await q('INSERT INTO product_history (product_id, user_id, action, details) VALUES (?, ?, ?, ?)', [id, userId, 'STATUS_CHANGED', JSON.stringify({ to: is_active ? 'active' : 'inactive' })]);
+        res.json({ success: true, id, is_active });
+    } catch (e) {
+        console.error('Failed to update product status:', e);
+        res.status(500).json({ error: 'Database update failed.' });
+    }
+});
+
+// GET /api/products/packings/:packingDetailId/in-use
+// This must come BEFORE the general /:identifier route
+router.get('/packings/:packingDetailId/in-use', async (req, res) => {
+    const { packingDetailId } = req.params;
+    try {
+      // If your schema uses a different table/column, change here:
+      const rows = await q(
+        'SELECT COUNT(*) AS c FROM purchase_order_items WHERE packing_id = ?',
+        [packingDetailId]
+      );
+      const count = rows?.[0]?.c || 0;
+      res.json({ inUse: count > 0, count });
+    } catch (e) {
+      console.error('packings in-use check failed', e);
+      res.status(500).json({ inUse: true, error: 'CHECK_FAILED' });
+    }
+});
 // ==================================================
 // GET /api/products/:id (details + images + opening)
 // ==================================================
@@ -264,6 +304,7 @@ router.get('/:identifier', async (req, res) => {
         p.*,
         cat.name AS category_name,
         sales_acc.name AS sales_account_name,
+        p.is_active,
         purch_acc.name AS purchase_account_name,
         mos.name as mode_of_shipment_name,
         vm.method_name AS valuation_method_name,
@@ -281,7 +322,17 @@ router.get('/:identifier', async (req, res) => {
         );
         if (!rows.length) return res.status(404).json({ error: 'Not found' });
         const product = rows[0];
-        const productId = product.id; // Use the numeric ID for subsequent queries
+        const productId = product.id;
+
+        // Check if the product is used in any transactions
+       const [usage] = await q(
+  `SELECT (
+     (SELECT 1 FROM purchase_order_items WHERE item_id = ? LIMIT 1) IS NOT NULL OR
+     (SELECT 1 FROM purchase_bill_items   WHERE product_id = ? LIMIT 1) IS NOT NULL
+   ) AS in_use`,
+  [productId, productId]
+);
+const is_in_use = !!usage?.in_use;
 
         // 2) images (unchanged)
         const images = (await q(
@@ -415,6 +466,7 @@ router.get('/:identifier', async (req, res) => {
             origin_names,
             dimension_rows,            // fully hydrated packing/origin rows
             history: history || [],
+            in_use: is_in_use,
         });
     } catch (e) {
         console.error('GET /api/products/:id error:', e);
@@ -1260,6 +1312,48 @@ router.post('/:id/images', uploadFields, async (req, res) => {
 });
 
 // ==================================================
+// DELETE /api/products/:id (soft delete)
+// This must come before other DELETE routes with more segments like /:id/images/:imageId
+// ==================================================
+router.delete('/:id', async (req, res) => {
+    const conn = await db.promise().getConnection();
+    try {
+        await conn.beginTransaction();
+        const productId = Number(req.params.id);
+        const userId = req.session?.user?.id;
+
+        if (!productId || !userId) {
+            return res.status(400).json({ error: 'Invalid request or not authenticated.' });
+        }
+
+        // Check if the product is in use before allowing deletion
+        const [usageResult] = await q(
+            `SELECT (
+                (SELECT 1 FROM purchase_order_items WHERE item_id = ? LIMIT 1) IS NOT NULL OR
+                (SELECT 1 FROM purchase_bill_items WHERE product_id = ? LIMIT 1) IS NOT NULL
+            ) AS in_use`,
+            [productId, productId]
+        );
+        const usage = usageResult?.[0];
+
+        if (usage?.in_use) {
+            return res.status(400).json({ error: 'This product cannot be deleted because it is part of one or more transactions.' });
+        }
+
+        await conn.query('UPDATE products SET is_deleted = 1 WHERE id = ?', [productId]);
+        await conn.query('INSERT INTO product_history (product_id, user_id, action, details) VALUES (?, ?, ?, ?)', [productId, userId, 'DELETED', JSON.stringify({ message: 'Product marked as deleted.' })]);
+
+        await conn.commit();
+        res.json({ success: true, message: 'Product deleted successfully.' });
+    } catch (e) {
+        await conn.rollback();
+        res.status(500).json({ error: 'Database operation failed.', details: e.message });
+    } finally {
+        conn.release();
+    }
+});
+
+// ==================================================
 // PATCH /api/products/:id/images/:imageId/primary
 // ==================================================
 router.patch('/:id/images/:imageId/primary', async (req, res) => {
@@ -1295,27 +1389,5 @@ router.delete('/:id/images/:imageId', async (req, res) => {
         res.status(500).json({ error: 'Failed to delete image' });
     }
 });
-
-
-// products.js (or wherever your /api/products routes live)
-
-// make sure you have a helper `q(sql, params)` for MySQL. If not, replace with your pool/query code.
-router.get('/packings/:packingDetailId/in-use', async (req, res) => {
-  const { packingDetailId } = req.params;
-  try {
-    // If your schema uses a different table/column, change here:
-    const rows = await q(
-      'SELECT COUNT(*) AS c FROM purchase_order_items WHERE packing_id = ?',
-      [packingDetailId]
-    );
-    const count = rows?.[0]?.c || 0;
-    res.json({ inUse: count > 0, count });
-  } catch (e) {
-    console.error('packings in-use check failed', e);
-    res.status(500).json({ inUse: true, error: 'CHECK_FAILED' });
-  }
-});
-
-
 
 export default router;
