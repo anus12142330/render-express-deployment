@@ -87,7 +87,8 @@ const MASTER_CONFIG = {
             { name: 'label', type: 'string', required: true },
             { name: 'name', type: 'string', required: true },
             { name: 'currency_fullname', type: 'string' },
-            { name: 'conversion_rate', type: 'number', default: 1 }
+            { name: 'conversion_rate', type: 'number', default: 1 },
+            { name: 'subunit_label', type: 'string' }
         ],
         listOrderBy: 'label'
     },

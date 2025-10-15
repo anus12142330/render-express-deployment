@@ -347,6 +347,7 @@ router.get("/by-uniqid/:uniqid", async (req, res) => {
                  cr.name as currency,
                  cr.label as currency_label,
                  cr.currency_fullname,
+                 cr.subunit_label,
                  ms.name as mode_shipment_name,
                    ct.label as container_type_label,
                    cl.label as container_load_label,
