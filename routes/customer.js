@@ -306,6 +306,13 @@ router.get('/:uniqid/full', async (req, res) => {
         va.ship_state_id,
         va.ship_zip_code,
         va.ship_phone,
+        cdd.latitude AS ship_latitude,
+        cdd.longitude AS ship_longitude,
+        cdd.delivery_window,
+        cdd.available_time_id,
+        cdd.place_name AS ship_place_name,
+        cdd.formatted_address AS ship_formatted_address,
+        cdd.place_id AS ship_place_id,
         va.ship_fax,
         (
           SELECT COUNT(*)
@@ -315,6 +322,7 @@ router.get('/:uniqid/full', async (req, res) => {
       FROM vendor v
       LEFT JOIN vendor_other vo ON v.id = vo.vendor_id
       LEFT JOIN vendor_address va ON v.id = va.vendor_id
+      LEFT JOIN customer_delivery_details cdd ON v.id = cdd.customer_id AND cdd.is_primary = 1
       LEFT JOIN currency ON currency.id = vo.currency_id
       LEFT JOIN payment_terms pt ON pt.id = vo.payment_terms_id
       LEFT JOIN tax_treatment ON tax_treatment.id = vo.tax_treatment_id
@@ -373,7 +381,13 @@ router.get('/:uniqid/full', async (req, res) => {
         );
 
 
-        res.json({ customer, contacts, attachments, transactions: transactions || [], history: history || [] });
+        const [deliveryDetails] = await db.promise().query(
+            `SELECT * FROM customer_delivery_details WHERE customer_id = ? ORDER BY is_primary DESC, id DESC`,
+            [id]
+        );
+
+
+        res.json({ customer, contacts, attachments, transactions: transactions || [], history: history || [], deliveryDetails: deliveryDetails || [] });
     } catch (err) {
         console.error('customers/:uniqid/full:', err);
         res.status(500).json(errPayload('Failed to load customer', 'DB_ERROR', err.message));
@@ -688,18 +702,34 @@ router.post('/:id/update-address', async (req, res) => {
 ================================ */
 router.post('/:id/update-delivery-details', async (req, res) => {
     const { id: customerId } = req.params;
-    const { latitude, longitude, delivery_window, available_time } = req.body;
+    const {
+        latitude, longitude, delivery_window, available_time_id,
+        place_name, formatted_address, place_id
+    } = req.body;
 
     try {
-        const [rows] = await db.promise().query(`SELECT id FROM vendor_address WHERE vendor_id = ?`, [customerId]);
-        if (rows.length === 0) {
-            return res.status(404).json(errPayload('Address record not found for customer', 'NOT_FOUND'));
-        }
+        // Check if a primary delivery detail record exists for this customer
+        const [rows] = await db.promise().query(`SELECT id FROM customer_delivery_details WHERE customer_id = ? AND is_primary = 1`, [customerId]);
 
-        await db.promise().query(
-            `UPDATE vendor_address SET ship_latitude = ?, ship_longitude = ?, delivery_window = ?, available_time = ? WHERE vendor_id = ?`,
-            [latitude || null, longitude || null, delivery_window || null, available_time || null, customerId]
-        );
+        const detailsPayload = {
+            customer_id: customerId,
+            latitude: latitude || null,
+            longitude: longitude || null,
+            delivery_window: delivery_window || null,
+            available_time_id: available_time_id || null,
+            place_name: place_name || null,
+            formatted_address: formatted_address || null,
+            place_id: place_id || null,
+            is_primary: 1
+        };
+
+        if (rows.length === 0) {
+            // No record exists, so INSERT a new one
+            await db.promise().query(`INSERT INTO customer_delivery_details SET ?`, detailsPayload);
+        } else {
+            // A record exists, so UPDATE it
+            await db.promise().query(`UPDATE customer_delivery_details SET ? WHERE id = ?`, [detailsPayload, rows[0].id]);
+        }
 
         res.json({ success: true, message: 'Delivery details updated successfully.' });
     } catch (err) {

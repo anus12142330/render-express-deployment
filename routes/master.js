@@ -396,6 +396,15 @@ chart_of_accounts: {
   listOrderBy: 'dtmpl.name'
 },
  'vehicle_type': { table: 'master_vehicle_type', idCol: 'id', nameCol: 'name' },
+    available_time: {
+        table: 'master_available_time',
+        id: 'id',
+        fields: [
+            { name: 'from_time', type: 'string', required: true },
+            { name: 'to_time', type: 'string', required: true }
+        ],
+        listOrderBy: 'from_time'
+    }
 
 };
 
@@ -421,6 +430,11 @@ function coerceField(field, value) {
             const d = new Date(value);
             d.setUTCHours(12);
             return d;
+        case 'time':
+            // Ensure the time is in HH:mm:ss format for the database.
+            // The input from the browser is 'HH:mm'. We append ':00'.
+            if (typeof value === 'string' && /^\d{2}:\d{2}$/.test(value)) return `${value}:00`;
+            return value; // Return as-is if already formatted or invalid
         default: return String(value);
     }
 }
@@ -571,6 +585,26 @@ router.get('/:type', async (req, res, next) => {
                 }
             );
         });
+    } catch (e) { next(e); }
+});
+
+/* ----------------------------- GET ONE ---------------------------- */
+// GET /api/master/:type/:id
+router.get('/:type/:id', async (req, res, next) => {
+    try {
+        const { type, id } = req.params;
+        const cfg = getCfg(type);
+
+        // Use listSelect and listFrom if available for a richer object
+        const selectClause = cfg.listSelect || '*';
+        const fromClause = cfg.listFrom || `\`${cfg.table}\``;
+        const idColumn = cfg.listFrom ? `${cfg.listSearchIn[0].split('.')[0]}.${cfg.id}` : `\`${cfg.id}\``;
+
+        const [rows] = await db.promise().query(`SELECT ${selectClause} FROM ${fromClause} WHERE ${idColumn} = ?`, [id]);
+
+        if (rows.length === 0) return res.status(404).json({ message: 'Record not found' });
+
+        res.json(rows[0]);
     } catch (e) { next(e); }
 });
 
