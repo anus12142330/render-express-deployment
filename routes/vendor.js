@@ -5,6 +5,7 @@ import crypto from 'crypto';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
+import sharp from 'sharp';
 
 const router = express.Router();
 const errPayload = (message, type = 'APP_ERROR', hint) => ({ error: { message, type, hint } });
@@ -62,7 +63,7 @@ router.get('/full', async (req, res) => {
       SELECT v.id, v.display_name AS name, v.uniqid, vo.tax_treatment_id
       FROM vendor v
       LEFT JOIN vendor_other as vo ON vo.vendor_id=v.id
-      WHERE v.company_type_id = ?
+      WHERE v.company_type_id = ? AND v.is_deleted = 0
         AND (v.display_name LIKE ? OR v.company_name LIKE ?)
       ORDER BY v.display_name ASC
       LIMIT 100
@@ -84,6 +85,7 @@ router.get('/', async (req, res) => {
     const limit = parseInt(req.query.limit || 25, 10);
     const offset = parseInt(req.query.offset || 0, 10);
     const search = String(req.query.search || '');
+    const isActive = req.query.is_active;
 
     try {
         const [data] = await db.promise().query(
@@ -105,7 +107,7 @@ router.get('/', async (req, res) => {
         ) AS expired_attachments_count,
          currency.name as currency_name
       FROM vendor v
-      LEFT JOIN vendor_other as vo ON vo.vendor_id=v.id
+      LEFT JOIN vendor_other as vo ON vo.vendor_id=v.id 
       LEFT JOIN currency ON currency.id=vo.currency_id      
       WHERE v.company_type_id = ?
         AND (
@@ -113,14 +115,16 @@ router.get('/', async (req, res) => {
           v.company_name LIKE ? OR
           v.email_address LIKE ? OR
           v.phone_work LIKE ?
-        )
+        ) AND v.is_deleted = 0 
+        ${isActive ? 'AND v.is_active = 1' : ''}
       ORDER BY v.display_name ASC
       LIMIT ? OFFSET ?
       `,
             [
                 COMPANY_TYPE_VENDOR,
                 like(search), like(search), like(search), like(search),
-                limit, offset
+                limit, 
+                offset
             ]
         );
 
@@ -134,9 +138,10 @@ router.get('/', async (req, res) => {
           v.company_name LIKE ? OR
           v.email_address LIKE ? OR
           v.phone_work LIKE ?
-        )
+        ) AND v.is_deleted = 0 
+        ${isActive ? 'AND v.is_active = 1' : ''}
       `,
-            [COMPANY_TYPE_VENDOR, like(search), like(search), like(search), like(search)]
+            [COMPANY_TYPE_VENDOR, like(search), like(search), like(search), like(search) ]
         );
 
         res.json({ data, total: countRows[0]?.total || 0 });
@@ -251,11 +256,20 @@ router.post('/', uploadVendor.array('attachments'), async (req, res) => {
             const f = files[i];
             const expiry = req.body[`attachment_expiry_${i}`] || null; // "YYYY-MM-DD" from UI
             const docTypeId = req.body[`attachment_doctype_${i}`] || null;
+            let thumbnailPath = null;
+
+            // Generate thumbnail if it's an image
+            if (f.mimetype.startsWith('image/')) {
+                const thumbFilename = `thumb-${f.filename}`;
+                const thumbFullPath = path.join(f.destination, thumbFilename);
+                await sharp(f.path).resize(100, 100).toFile(thumbFullPath);
+                thumbnailPath = thumbFullPath.replace(/\\/g, '/');
+            }
 
             await conn.query(
-                `INSERT INTO vendor_attachment (vendor_id, attachment_path, attachment_name, expiry_date, document_type_id)
-         VALUES (?, ?, ?, ?, ?)`,
-                [vendorId, (f.path || '').replace(/\\/g, '/'), f.originalname, expiry, docTypeId]
+                `INSERT INTO vendor_attachment (vendor_id, attachment_path, attachment_name, expiry_date, document_type_id, thumbnail_path, mime_type, size_bytes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                [vendorId, (f.path || '').replace(/\\/g, '/'), f.originalname, expiry, docTypeId, thumbnailPath, f.mimetype, f.size]
             );
         }
 
@@ -331,7 +345,7 @@ router.get('/:uniqid/full', async (req, res) => {
       LEFT JOIN country AS bill_country ON bill_country.id = va.bill_country_id
       LEFT JOIN state AS ship_state ON ship_state.id = va.ship_state_id
       LEFT JOIN country AS ship_country ON ship_country.id = va.ship_country_id
-      WHERE v.uniqid = ? AND v.company_type_id = ?
+      WHERE v.uniqid = ? AND v.company_type_id = ? AND v.is_deleted = 0
       `,
             [uniqid, COMPANY_TYPE_VENDOR]
         );
@@ -345,6 +359,18 @@ router.get('/:uniqid/full', async (req, res) => {
             customer_of: (vendorData.customer_of || '').split(',').map(s => s.trim()).filter(Boolean),
             tags: (() => { try { return JSON.parse(vendorData.tags); } catch { return []; } })()
         };
+
+        // Check if the vendor is in use in purchase orders or bills
+        const [usageResult] = await db.promise().query(
+            `SELECT (
+                (SELECT 1 FROM purchase_orders WHERE vendor_id = ? LIMIT 1) IS NOT NULL OR
+                (SELECT 1 FROM purchase_bills WHERE vendor_id = ? LIMIT 1) IS NOT NULL
+            ) AS in_use`,
+            [vendor.id, vendor.id]
+        );
+        const in_use = !!usageResult[0]?.in_use;
+        vendor.in_use = in_use;
+
 
         const id = vendor.id;
 
@@ -628,10 +654,20 @@ router.put('/:id', uploadVendor.array('attachments'), async (req, res) => {
             const f = files[i];
             const expiry = req.body[`attachment_expiry_${i}`] || null;
             const docTypeId = req.body[`attachment_doctype_${i}`] || null;
+            let thumbnailPath = null;
+
+            // Generate thumbnail if it's an image
+            if (f.mimetype.startsWith('image/')) {
+                const thumbFilename = `thumb-${f.filename}`;
+                const thumbFullPath = path.join(f.destination, thumbFilename);
+                await sharp(f.path).resize(100, 100).toFile(thumbFullPath);
+                thumbnailPath = thumbFullPath.replace(/\\/g, '/');
+            }
+
             await conn.query(
-                `INSERT INTO vendor_attachment (vendor_id, attachment_path, attachment_name, expiry_date, document_type_id)
-         VALUES (?, ?, ?, ?, ?)`,
-                [vendorId, f.path, f.originalname, expiry, docTypeId]
+                `INSERT INTO vendor_attachment (vendor_id, attachment_path, attachment_name, expiry_date, document_type_id, thumbnail_path, mime_type, size_bytes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                [vendorId, f.path, f.originalname, expiry, docTypeId, thumbnailPath, f.mimetype, f.size]
             );
         }
 
@@ -683,10 +719,16 @@ router.post('/attachment/:id/update', uploadVendor.single('file'), async (req, r
     const values = [];
 
     if (file) {
-        updates.push('attachment_name = ?', 'attachment_path = ?');
-        values.push(file.originalname, `uploads/vendor/${file.filename}`);
+        updates.push('attachment_name = ?', 'attachment_path = ?', 'mime_type = ?', 'size_bytes = ?');
+        values.push(file.originalname, `uploads/vendor/${file.filename}`, file.mimetype, file.size);
+        // Note: This specific route does not generate a thumbnail.
+        // The main create/update routes do. If thumbnail is needed here,
+        // sharp.js logic would be added.
     }
-    updates.push('expiry_date = ?');
+    // Only push expiry_date if it's actually provided in the body
+    if (expiry_date !== undefined) {
+        updates.push('expiry_date = ?');
+    }
     updates.push('document_type_id = ?');
     values.push(expiry_date || null);
     values.push(document_type_id || null);
@@ -793,5 +835,99 @@ router.put('/contacts/:id', async (req, res) => {
     }
 });
 
+/* ================================
+   PUT /api/vendors/:id/soft-delete
+   (soft delete)
+================================ */
+router.put('/:id/soft-delete', async (req, res) => {
+    const { id } = req.params;
+    const userId = req.session?.user?.id || null;
+    const conn = await db.promise().getConnection();
+
+    try {
+        await conn.beginTransaction();
+
+        // 1. Check if vendor exists
+        const [[vendor]] = await conn.query('SELECT display_name FROM vendor WHERE id = ? AND is_deleted = 0', [id]);
+        if (!vendor) {
+            await conn.rollback();
+            return res.status(404).json(errPayload('Vendor not found or already deleted.', 'NOT_FOUND'));
+        }
+
+        // 2. Check if the vendor is in use
+        const [usageResult] = await conn.query(
+            `SELECT (
+                (SELECT 1 FROM purchase_orders WHERE vendor_id = ? LIMIT 1) IS NOT NULL OR
+                (SELECT 1 FROM purchase_bills WHERE vendor_id = ? LIMIT 1) IS NOT NULL
+            ) AS in_use`,
+            [id, id]
+        );
+
+        if (usageResult[0]?.in_use) {
+            await conn.rollback();
+            return res.status(400).json(errPayload('This vendor cannot be deleted because they are part of one or more transactions.', 'IN_USE'));
+        }
+
+        // 3. Perform soft delete
+        await conn.query('UPDATE vendor SET is_deleted = 1, updated_user = ? WHERE id = ?', [userId, id]);
+
+        // 4. Log history
+        await conn.query(
+            `INSERT INTO vendor_history (vendor_id, user_id, action, details) VALUES (?, ?, ?, ?)`,
+            [id, userId, 'DELETED', JSON.stringify({ vendor_name: vendor.display_name })]
+        );
+
+        await conn.commit();
+        res.json({ success: true, message: 'Vendor deleted successfully.' });
+    } catch (err) {
+        await conn.rollback();
+        console.error('Soft delete vendor failed:', err);
+        res.status(500).json(errPayload('Soft delete failed', 'DB_ERROR', err.message));
+    } finally {
+        conn.release();
+    }
+});
+
+// DELETE a vendor (soft delete)
+router.delete('/:id', async (req, res, next) => {
+    const { id } = req.params;
+    const userId = req.session?.user?.id || null;
+
+    try {
+        const [[vendor]] = await db.promise().query('SELECT display_name FROM vendor WHERE id = ?', [id]);
+        if (!vendor) {
+            return res.status(404).json({ error: 'Vendor not found' });
+        }
+
+        await db.promise().query('UPDATE vendor SET is_deleted = 1 WHERE id = ?', [id]);
+
+        const historySql = 'INSERT INTO vendor_history (vendor_id, user_id, action, details) VALUES (?, ?, ?, ?, ?)';
+        const details = JSON.stringify({ vendor_name: vendor.display_name });
+        await db.promise().query(historySql, [id, userId, 'DELETED', details]);
+
+        res.json({ success: true, message: 'Vendor deleted successfully.' });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// PATCH to update a vendor's active status
+router.patch('/:id/status', async (req, res, next) => {
+    const { id } = req.params;
+    const { is_active } = req.body;
+
+    if (is_active === undefined) {
+        const err = new Error('is_active field is required.');
+        err.status = 400;
+        return next(err);
+    }
+
+    try {
+        await db.promise().query('UPDATE vendor SET is_active = ? WHERE id = ?', [is_active ? 1 : 0, id]);
+        res.json({ success: true, message: 'Vendor status updated successfully.' });
+    } catch (err) {
+        next(err);
+    }
+});
 
 export default router;

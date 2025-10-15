@@ -181,8 +181,8 @@ router.post('/', uploadCustomer.array('attachments'), async (req, res) => {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
             [
-                company_name, display_name, email_address, phone_work, phone_mobile, safeTags, remarks, uniqid,
-                userId, userId, COMPANY_TYPE_CUSTOMER, customer_type || 'individual', safeCustomerOf,
+                company_name, display_name, email_address, phone_work, phone_mobile, safeTags, remarks, uniqid, userId,
+                userId, COMPANY_TYPE_CUSTOMER, asIntCustomerType(customer_type), safeCustomerOf,
             ]
         );
         const customerId = ins.insertId;
@@ -508,7 +508,7 @@ router.put('/:id', uploadCustomer.array('attachments'), async (req, res) => {
             `UPDATE vendor
        SET company_name = ?, display_name = ?, email_address = ?, phone_work = ?, phone_mobile = ?, tags = ?, remarks = ?, website = ?, updated_user = ?, customer_type = ?, customer_of = ?
        WHERE id = ? AND company_type_id = ?`,
-            [company_name, display_name, email_address, phone_work, phone_mobile, safeTags, remarks, website, userId, customer_type || 'individual', safeCustomerOf, customerId, COMPANY_TYPE_CUSTOMER,]
+            [company_name, display_name, email_address, phone_work, phone_mobile, safeTags, remarks, website, userId, asIntCustomerType(customer_type), safeCustomerOf, customerId, COMPANY_TYPE_CUSTOMER,]
         );
 
         await conn.query(`DELETE FROM vendor_other WHERE vendor_id = ?`, [customerId]);

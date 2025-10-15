@@ -39,9 +39,20 @@ router.post('/upload', attachmentUpload, async (req, res) => {
     }
 
     try {
-        const sql = 'INSERT INTO fleet_documents (fleet_id, document_path, name, expiry_date, mime_type, size_bytes) VALUES (?, ?, ?, ?, ?, ?)';
         const normalizedPath = file.path.replace(/\\/g, '/');
-        const [result] = await db.promise().query(sql, [fleet_id, normalizedPath, attachment_name || file.originalname, expiry_date || null, file.mimetype, file.size]);
+        let thumbnailPath = null;
+
+        // Generate thumbnail if it's an image
+        if (file.mimetype.startsWith('image/')) {
+            const thumbFilename = `thumb-${file.filename}`;
+            const thumbFullPath = path.join(file.destination, thumbFilename);
+            await sharp(file.path).resize(100, 100).toFile(thumbFullPath);
+            thumbnailPath = thumbFullPath.replace(/\\/g, '/');
+        }
+
+        const sql = 'INSERT INTO fleet_documents (fleet_id, document_path, thumbnail_path, name, expiry_date, mime_type, size_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)';
+        
+        const [result] = await db.promise().query(sql, [fleet_id, normalizedPath, thumbnailPath, attachment_name || file.originalname, expiry_date || null, file.mimetype, file.size]);
 
         const historySql = 'INSERT INTO history (module, module_id, user_id, action, details) VALUES (?, ?, ?, ?, ?)';
         const details = JSON.stringify({ file_name: attachment_name || file.originalname, attachment_id: result.insertId });
@@ -68,9 +79,18 @@ router.post('/attachment/:id', attachmentUpload, async (req, res) => {
         const params = [attachment_name, expiry_date || null];
 
         if (file) {
+            let thumbnailPath = null;
             const normalizedPath = file.path.replace(/\\/g, '/');
-            sql += ', document_path = ?, mime_type = ?, size_bytes = ?';
-            params.push(normalizedPath, file.mimetype, file.size);
+
+            // Generate thumbnail if it's an image
+            if (file.mimetype.startsWith('image/')) {
+                const thumbFilename = `thumb-${file.filename}`;
+                const thumbFullPath = path.join(file.destination, thumbFilename);
+                await sharp(file.path).resize(100, 100).toFile(thumbFullPath);
+                thumbnailPath = thumbFullPath.replace(/\\/g, '/');
+            }
+            sql += ', document_path = ?, thumbnail_path = ?, mime_type = ?, size_bytes = ?';
+            params.push(normalizedPath, thumbnailPath, file.mimetype, file.size);
         }
 
         sql += ' WHERE id = ?';
@@ -109,8 +129,8 @@ router.delete('/attachment/:id', async (req, res) => {
 router.get('/', async (req, res) => {
     try {
         const sql = `
-            SELECT 
-                f.*,
+            SELECT
+                f.id, f.vehicle_name, f.plate_number, f.brand, f.model, f.is_active, f.tc_no, f.ownership_type,
                 fi.thumbnail_path AS thumbnail
             FROM fleets f
             LEFT JOIN fleet_images fi ON f.id = fi.fleet_id AND fi.is_primary = 1
@@ -136,7 +156,7 @@ router.get('/:id', async (req, res) => {
         
         // The frontend is expecting the attachments array to be named 'attachments'
         // The table is named 'fleet_documents', so we alias it here.
-        const attachments = await q('SELECT id, fleet_id, document_path as file_path, name as attachment_name, DATE_FORMAT(expiry_date, "%Y-%m-%d") AS expiry_date, mime_type, size_bytes, category FROM fleet_documents WHERE fleet_id = ?', [req.params.id]);
+        const attachments = await q('SELECT id, fleet_id, document_path as file_path, thumbnail_path, name as attachment_name, DATE_FORMAT(expiry_date, "%Y-%m-%d") AS expiry_date, mime_type, size_bytes, category FROM fleet_documents WHERE fleet_id = ?', [req.params.id]);
 
         // Combine and send
         res.json({ ...fleet, images, attachments, history });
@@ -153,7 +173,7 @@ router.post('/', upload, async (req, res) => {
             vehicle_name, vehicle_type_id, brand, model, chassis_number,
             plate_number, registration_date, registration_expiry_date, tc_no,
             insurance_company, insurance_name, insurance_expiry_date, insurance_issue_date,
-            ownership_type, starting_km
+            ownership_type, owner_company_id, owner_company_name, starting_km, vehicle_service_km
         } = req.body;
         let { primary_image } = req.body;
 
@@ -168,18 +188,20 @@ router.post('/', upload, async (req, res) => {
 
         const fleetSql = `
             INSERT INTO fleets (
-                vehicle_name, vehicle_type_id, brand, model, chassis_number, primary_image,
+                vehicle_name, vehicle_type_id, brand, model, chassis_number,
                 plate_number, registration_date, registration_expiry_date, tc_no,
                 insurance_company, insurance_name, insurance_expiry_date, insurance_issue_date,
-                ownership_type, starting_km
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ownership_type, owner_company_id, owner_company_name, starting_km, vehicle_service_km
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `;
         const [result] = await conn.query(fleetSql, [
             vehicle_name, vehicle_type_id, brand, model, chassis_number,
-            null, // primary_image path will be updated later
             plate_number, registration_date || null, registration_expiry_date || null, tc_no,
             insurance_company, insurance_name, insurance_expiry_date || null, insurance_issue_date || null,
-            ownership_type, starting_km
+            ownership_type,
+            ownership_type === 'owned' ? (owner_company_id || null) : null,
+            ownership_type === 'rented' ? (owner_company_name || null) : null,
+            starting_km, vehicle_service_km || null
         ]);
 
         const fleetId = result.insertId;
@@ -221,10 +243,18 @@ router.post('/', upload, async (req, res) => {
             const newDocsMeta = JSON.parse(req.body.new_documents_meta || '[]');
             if (req.files.vehicle_documents.length === newDocsMeta.length) {
                 const docPromises = req.files.vehicle_documents.map((file, index) => {
+                    let thumbnailPath = null;
+                    if (file.mimetype.startsWith('image/')) {
+                        const thumbFilename = `thumb-${file.filename}`;
+                        const thumbFullPath = path.join(file.destination, thumbFilename);
+                        sharp(file.path).resize(100, 100).toFile(thumbFullPath); // Fire and forget for performance
+                        thumbnailPath = thumbFullPath.replace(/\\/g, '/');
+                    }
+
                     const meta = newDocsMeta[index]; // meta.name is the doc.type from frontend (e.g., "Registration Document")
-                    const docSql = 'INSERT INTO fleet_documents (fleet_id, document_path, name, expiry_date, category, mime_type, size_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)';
+                    const docSql = 'INSERT INTO fleet_documents (fleet_id, document_path, thumbnail_path, name, expiry_date, category, mime_type, size_bytes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)';
                     const normalizedPath = file.path.replace(/\\/g, '/');
-                    return conn.query(docSql, [fleetId, normalizedPath, meta.name, meta.expiry_date || null, meta.category, file.mimetype, file.size]);
+                    return conn.query(docSql, [fleetId, normalizedPath, thumbnailPath, meta.name, meta.expiry_date || null, meta.category, file.mimetype, file.size]);
                 });
                 await Promise.all(docPromises);
             }
@@ -257,7 +287,7 @@ router.put('/:id', upload, async (req, res) => {
             vehicle_name, vehicle_type_id, brand, model, chassis_number,
             plate_number, registration_date, registration_expiry_date, tc_no, primary_image,
             insurance_company, insurance_name, insurance_expiry_date, insurance_issue_date, new_documents_meta, updated_documents_meta,
-            ownership_type, starting_km, deleted_images, deleted_documents
+            ownership_type, owner_company_id, owner_company_name, starting_km, vehicle_service_km, deleted_images, deleted_documents
             } = req.body;
 
         // If new images are being added and there's no primary image selected (neither old nor new),
@@ -278,7 +308,7 @@ router.put('/:id', upload, async (req, res) => {
             vehicle_name, vehicle_type_id, brand, model, chassis_number,
             plate_number, registration_date, registration_expiry_date, tc_no,
             insurance_company, insurance_name, insurance_expiry_date, insurance_issue_date,
-            ownership_type, starting_km
+            ownership_type, owner_company_id, owner_company_name, starting_km, vehicle_service_km
         };
 
         // Fetch new vehicle type name if ID changed
@@ -319,17 +349,20 @@ router.put('/:id', upload, async (req, res) => {
 
         const fleetSql = `
             UPDATE fleets SET
-                vehicle_name = ?, vehicle_type_id = ?, brand = ?, model = ?, chassis_number = ?, primary_image = ?,
+                vehicle_name = ?, vehicle_type_id = ?, brand = ?, model = ?, chassis_number = ?,
                 plate_number = ?, registration_date = ?, registration_expiry_date = ?, tc_no = ?,
                 insurance_company = ?, insurance_name = ?, insurance_expiry_date = ?, insurance_issue_date = ?,
-                ownership_type = ?, starting_km = ?
+                ownership_type = ?, owner_company_id = ?, owner_company_name = ?, starting_km = ?, vehicle_service_km = ?
             WHERE id = ?
         `;
         await conn.query(fleetSql, [
-            vehicle_name, vehicle_type_id, brand, model, chassis_number, primary_image,
+            vehicle_name, vehicle_type_id, brand, model, chassis_number,
             plate_number, registration_date || null, registration_expiry_date || null, tc_no,
             insurance_company, insurance_name, insurance_expiry_date || null, insurance_issue_date || null,
-            ownership_type, starting_km, id
+            ownership_type,
+            ownership_type === 'owned' ? (owner_company_id || null) : null,
+            ownership_type === 'rented' ? (owner_company_name || null) : null,
+            starting_km, vehicle_service_km || null, id
         ]);
 
         // 4. Log the changes if any
@@ -388,10 +421,18 @@ router.put('/:id', upload, async (req, res) => {
             const newDocsMeta = JSON.parse(req.body.new_documents_meta || '[]');
             if (req.files.vehicle_documents.length === newDocsMeta.length) {
                 const docPromises = req.files.vehicle_documents.map((file, index) => {
+                    let thumbnailPath = null;
+                    if (file.mimetype.startsWith('image/')) {
+                        const thumbFilename = `thumb-${file.filename}`;
+                        const thumbFullPath = path.join(file.destination, thumbFilename);
+                        sharp(file.path).resize(100, 100).toFile(thumbFullPath); // Fire and forget
+                        thumbnailPath = thumbFullPath.replace(/\\/g, '/');
+                    }
+
                     const meta = newDocsMeta[index]; // meta.name is the doc.type from frontend (e.g., "Registration Document")
-                    const docSql = 'INSERT INTO fleet_documents (fleet_id, document_path, name, expiry_date, category, mime_type, size_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)';
+                    const docSql = 'INSERT INTO fleet_documents (fleet_id, document_path, thumbnail_path, name, expiry_date, category, mime_type, size_bytes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)';
                     const normalizedPath = file.path.replace(/\\/g, '/');
-                    return conn.query(docSql, [id, normalizedPath, meta.name, meta.expiry_date || null, meta.category, file.mimetype, file.size]);
+                    return conn.query(docSql, [id, normalizedPath, thumbnailPath, meta.name, meta.expiry_date || null, meta.category, file.mimetype, file.size]);
                 });
                 await Promise.all(docPromises);
             }
@@ -448,6 +489,23 @@ router.delete('/:id', async (req, res) => {
         res.json({ success: true, message: 'Fleet deleted successfully' });
     } catch (err) {
         res.status(500).json({ error: 'Failed to delete fleet', details: err.message });
+    }
+});
+
+// PATCH to update a fleet's active status
+router.patch('/:id/status', async (req, res) => {
+    const { id } = req.params;
+    const { is_active } = req.body;
+
+    if (is_active === undefined) {
+        return res.status(400).json({ error: 'is_active field is required.' });
+    }
+
+    try {
+        await q('UPDATE fleets SET is_active = ? WHERE id = ?', [is_active ? 1 : 0, id]);
+        res.json({ success: true, message: 'Fleet status updated successfully.' });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to update fleet status', details: err.message });
     }
 });
 
