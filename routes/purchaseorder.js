@@ -247,7 +247,7 @@ router.get("/", async (req, res) => {
             `SELECT
          po.id, po.po_number, po.po_uniqid, po.reference_no, po.vendor_id,
          DATE(po.po_date) AS po_date, DATE(po.delivery_date) AS delivery_date, po.subtotal, po.discount_percent,
-         po.total, po.status_id, s.name AS status_name, po.created_at, po.updated_at,
+         po.total, po.status_id, s.name AS status_name, s.bg_colour, s.colour, po.created_at, po.updated_at,
          v.display_name AS vendor_name,
          c.name AS currency_code
        FROM purchase_orders po
@@ -304,7 +304,7 @@ router.get("/recent", async (req, res) => {
             `SELECT
                 po.id, po.po_number, po.po_uniqid, po.reference_no, po.vendor_id,
                 DATE(po.po_date) AS po_date, DATE(po.delivery_date) AS delivery_date, po.subtotal, po.discount_percent,
-                po.total, po.status_id, s.name AS status_name, po.created_at, po.updated_at,
+                po.total, po.status_id, s.name AS status_name, s.bg_colour, s.colour, po.created_at, po.updated_at,
                 v.display_name AS vendor_name,
                 c.name AS currency_code
             FROM purchase_orders po
@@ -334,7 +334,7 @@ router.get("/by-uniqid/:uniqid", async (req, res) => {
         const [[header]] = await db.promise().query(
             `SELECT
                  po.*, DATE_FORMAT(po.po_date, '%Y-%m-%d')  AS po_date, DATE_FORMAT(po.delivery_date, '%Y-%m-%d') AS delivery_date,
-                 s.name AS status_name,
+                 s.name AS status_name, s.bg_colour, s.colour,
                  v.display_name AS vendor_name,
                  dpl.name as loading_name, dpl.id as port_loading_id,
                  po.company_id,

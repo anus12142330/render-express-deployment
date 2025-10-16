@@ -96,7 +96,11 @@ const MASTER_CONFIG = {
     payment_terms: {
         table: 'payment_terms',
         id: 'id',
-        fields: [{ name: 'terms', type: 'string', required: true }],
+        fields: [
+            { name: 'terms', type: 'string', required: true },
+            { name: 'description', type: 'string' },
+            { name: 'payment_type', type: 'string' } // "Pre Payment" or "Post Payment"
+        ],
         listOrderBy: 'terms'
     },
 

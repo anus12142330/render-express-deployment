@@ -310,6 +310,11 @@ router.get('/:uniqid/full', async (req, res) => {
         cdd.longitude AS ship_longitude,
         cdd.delivery_window,
         cdd.available_time_id,
+        cdd.has_whatsapp,
+        cdd.notification_email,
+        cdd.notification_phone,
+        cdd.whatsapp_number,
+        cdd.notification_contact_id,
         cdd.place_name AS ship_place_name,
         cdd.formatted_address AS ship_formatted_address,
         cdd.place_id AS ship_place_id,
@@ -703,7 +708,7 @@ router.post('/:id/update-address', async (req, res) => {
 router.post('/:id/update-delivery-details', async (req, res) => {
     const { id: customerId } = req.params;
     const {
-        latitude, longitude, delivery_window, available_time_id,
+        latitude, longitude, delivery_window, available_time_id, notification_contact_id, has_whatsapp, whatsapp_number, notification_email, notification_phone,
         place_name, formatted_address, place_id
     } = req.body;
 
@@ -717,6 +722,11 @@ router.post('/:id/update-delivery-details', async (req, res) => {
             longitude: longitude || null,
             delivery_window: delivery_window || null,
             available_time_id: available_time_id || null,
+            has_whatsapp: has_whatsapp,
+            notification_email: notification_email || null,
+            notification_phone: notification_phone || null,
+            whatsapp_number: whatsapp_number || null,
+            notification_contact_id: notification_contact_id || null,
             place_name: place_name || null,
             formatted_address: formatted_address || null,
             place_id: place_id || null,
