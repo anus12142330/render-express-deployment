@@ -71,6 +71,7 @@ router.get('/', async (req, res) => {
     const limit = parseInt(req.query.limit || 25, 10);
     const offset = parseInt(req.query.offset || 0, 10);
     const search = String(req.query.search || '');
+    const userId = req.query.user_id;
 
     try {
         const [data] = await db.promise().query(
@@ -97,14 +98,13 @@ router.get('/', async (req, res) => {
           v.email_address LIKE ? OR
           v.phone_work LIKE ?
         )
+        ${userId ? 'AND v.user_id = ?' : ''}
       ORDER BY v.display_name ASC
       LIMIT ? OFFSET ?
       `,
-            [
-                COMPANY_TYPE_CUSTOMER,
-                like(search), like(search), like(search), like(search),
-                limit, offset
-            ]
+            [COMPANY_TYPE_CUSTOMER, like(search), like(search), like(search), like(search)]
+                .concat(userId ? [userId] : [])
+                .concat([limit, offset])
         );
 
         const [countRows] = await db.promise().query(
@@ -118,8 +118,9 @@ router.get('/', async (req, res) => {
           v.email_address LIKE ? OR
           v.phone_work LIKE ?
         )
+        ${userId ? 'AND v.user_id = ?' : ''}
       `,
-            [COMPANY_TYPE_CUSTOMER, like(search), like(search), like(search), like(search)]
+            [COMPANY_TYPE_CUSTOMER, like(search), like(search), like(search), like(search)].concat(userId ? [userId] : [])
         );
 
         res.json({ data, total: countRows[0]?.total || 0 });

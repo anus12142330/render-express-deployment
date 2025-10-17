@@ -86,6 +86,7 @@ router.get('/', async (req, res) => {
     const offset = parseInt(req.query.offset || 0, 10);
     const search = String(req.query.search || '');
     const isActive = req.query.is_active;
+    const userId = req.query.user_id;
 
     try {
         const [data] = await db.promise().query(
@@ -116,16 +117,12 @@ router.get('/', async (req, res) => {
           v.email_address LIKE ? OR
           v.phone_work LIKE ?
         ) AND v.is_deleted = 0 
+        ${userId ? 'AND v.user_id = ?' : ''}
         ${isActive ? 'AND v.is_active = 1' : ''}
       ORDER BY v.display_name ASC
       LIMIT ? OFFSET ?
       `,
-            [
-                COMPANY_TYPE_VENDOR,
-                like(search), like(search), like(search), like(search),
-                limit, 
-                offset
-            ]
+            [COMPANY_TYPE_VENDOR, like(search), like(search), like(search), like(search)].concat(userId ? [userId] : []).concat([limit, offset])
         );
 
         const [countRows] = await db.promise().query(
@@ -139,9 +136,10 @@ router.get('/', async (req, res) => {
           v.email_address LIKE ? OR
           v.phone_work LIKE ?
         ) AND v.is_deleted = 0 
+        ${userId ? 'AND v.user_id = ?' : ''}
         ${isActive ? 'AND v.is_active = 1' : ''}
       `,
-            [COMPANY_TYPE_VENDOR, like(search), like(search), like(search), like(search) ]
+            [COMPANY_TYPE_VENDOR, like(search), like(search), like(search), like(search)].concat(userId ? [userId] : [])
         );
 
         res.json({ data, total: countRows[0]?.total || 0 });

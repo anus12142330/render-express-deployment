@@ -118,6 +118,11 @@ router.get('/', async (req, res) => {
             params.push(idsToFilter);
         }
 
+        const userId = req.query.user_id;
+        if (userId) {
+            conds.push(`p.created_by = ?`);
+            params.push(userId);
+        }
         // Base condition to exclude deleted products, then add other filters.
         const baseWhere = 'p.is_deleted = 0';
         const whereSql = `WHERE ${baseWhere}${conds.length ? ` AND ${conds.join(' AND ')}` : ''}`;
@@ -204,10 +209,9 @@ router.get('/', async (req, res) => {
         );
 
         const totalRows = (await q(
-            `SELECT COUNT(*) AS c FROM products p 
-             LEFT JOIN categories c ON c.id = p.category_id 
-             ${whereSql}`, // The whereSql already includes the is_deleted check
-            params))[0]?.c || 0;
+            `SELECT COUNT(DISTINCT p.id) AS c FROM products p LEFT JOIN categories c ON c.id = p.category_id ${whereSql}`,
+            params
+        ))[0]?.c || 0;
 
         res.json({
             data: rows.map(r => ({

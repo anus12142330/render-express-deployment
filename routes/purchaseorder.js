@@ -236,12 +236,14 @@ router.get("/", async (req, res) => {
         const sort_field = SORT_WHITELIST.has(req.query.sort_field) ? req.query.sort_field : "po_date";
         const sort_order = (req.query.sort_order || "DESC").toUpperCase() === "ASC" ? "ASC" : "DESC";
 
+        const createdBy = req.query.created_by;
         const params = [];
-        let where = "";
+        let where = "WHERE 1=1";
         if (search) {
-            where = "WHERE (po.po_number LIKE ? OR po.reference_no LIKE ? OR s.name LIKE ? OR v.display_name LIKE ?)";
+            where += " AND (po.po_number LIKE ? OR po.reference_no LIKE ? OR s.name LIKE ? OR v.display_name LIKE ?)";
             const token = `%${search}%`; params.push(token, token, token, token);
         }
+        if (createdBy) { where += " AND po.created_by = ?"; params.push(createdBy); }
 
         const [rows] = await db.promise().query(
             `SELECT
@@ -528,13 +530,14 @@ router.post("/", uploadFields, async (req, res) => {
 
     // --- parse payload ---
     const mode = (req.query.mode || "ISSUE").toUpperCase(); // DRAFT | ISSUE | SAVE
+    const userId = req.session?.user?.id;
     let payload = {}; // DRAFT | SAVE | ISSUE
     try {
         payload = JSON.parse(req.body.payload || "{}");
     } catch {
         return res.status(400).json(errPayload("Invalid JSON payload"));
     }
-
+    
     // files
     const poAttachment = req.files?.poAttachment?.[0] || null;
     const extraFiles = [...(req.files?.files || []), ...(req.files?.paymentDocs || [])];
@@ -686,15 +689,15 @@ router.post("/", uploadFields, async (req, res) => {
         termscondition, notes,
         subtotal, discount_percent, taxable, vat_total, total, 
         vat_id, vat_rate, vat_amount,
-        status_id, created_at, updated_at
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW(),NOW())`,
+        status_id, created_at, updated_at, created_by
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW(),NOW(),?)`,
             [
                 po_uniqid,
                 po_number,
                 cleanStr(payload.reference), // Corrected from `payload.reference` to `cleanStr(payload.reference)`
                  payload.tradeTypeId || null,
                 payload.vendorId || null,
-                payload.companyId || null,
+                payload.companyId || null,              
 
                 payload.currencyId || null,
                 payload.deliverTo === "org" ? 1 : 0,
@@ -744,6 +747,7 @@ router.post("/", uploadFields, async (req, res) => {
                 toPct(payload.vatPct),     // store percent form
                 vat_total,                 // mirror sum of line VAT
                 status_id,
+                userId,
             ]
         );
 
