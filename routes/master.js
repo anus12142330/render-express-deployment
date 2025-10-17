@@ -404,12 +404,23 @@ chart_of_accounts: {
         table: 'master_available_time',
         id: 'id',
         fields: [
-            { name: 'from_time', type: 'string', required: true },
-            { name: 'to_time', type: 'string', required: true }
+            { name: 'name', type: 'string', required: true },
+            { name: 'from_time', type: 'time' },
+            { name: 'to_time', type: 'time' }
         ],
-        listOrderBy: 'from_time'
-    }
+        listOrderBy: 'name'
+    },
 
+    status: {
+        table: 'status',
+        id: 'id',
+        fields: [
+            { name: 'name', type: 'string', required: true },
+            { name: 'bg_colour', type: 'string' },
+            { name: 'colour', type: 'string' }
+        ],
+        listOrderBy: 'name'
+    }
 };
 
 function getCfg(type) {
