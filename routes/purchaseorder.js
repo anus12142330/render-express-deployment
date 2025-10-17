@@ -237,6 +237,7 @@ router.get("/", async (req, res) => {
         const sort_order = (req.query.sort_order || "DESC").toUpperCase() === "ASC" ? "ASC" : "DESC";
 
         const createdBy = req.query.created_by;
+        const statusId = req.query.status_id;
         const params = [];
         let where = "WHERE 1=1";
         if (search) {
@@ -244,18 +245,21 @@ router.get("/", async (req, res) => {
             const token = `%${search}%`; params.push(token, token, token, token);
         }
         if (createdBy) { where += " AND po.created_by = ?"; params.push(createdBy); }
+        if (statusId) { where += " AND po.status_id = ?"; params.push(statusId); }
 
         const [rows] = await db.promise().query(
             `SELECT
          po.id, po.po_number, po.po_uniqid, po.reference_no, po.vendor_id,
          DATE(po.po_date) AS po_date, DATE(po.delivery_date) AS delivery_date, po.subtotal, po.discount_percent,
          po.total, po.status_id, s.name AS status_name, s.bg_colour, s.colour, po.created_at, po.updated_at,
+         u.name as created_by_name,
          v.display_name AS vendor_name,
          c.name AS currency_code
        FROM purchase_orders po
        LEFT JOIN vendor v ON v.id = po.vendor_id
        LEFT JOIN status s ON s.id = po.status_id
        LEFT JOIN currency c ON c.id = po.currency_id
+       LEFT JOIN user u ON po.created_by = u.id
        ${where}
        ORDER BY ${sort_field} ${sort_order}
        LIMIT ? OFFSET ?`,
@@ -267,6 +271,7 @@ router.get("/", async (req, res) => {
        FROM purchase_orders po
        LEFT JOIN vendor v ON v.id = po.vendor_id
        LEFT JOIN status s ON s.id = po.status_id
+       LEFT JOIN user u ON po.created_by = u.id
        ${where}`,
             params
         );
@@ -1319,7 +1324,61 @@ router.put("/:uniqid", uploadFields, async (req, res) => {
     }
 });
 
+/* ---------------------------------- approve --------------------------------- */
+router.post('/:id/approve', async (req, res) => { // Corrected from previous diff, path is correct
+    const { id } = req.params;
+    const { comment } = req.body;
+    const userId = req.session?.user?.id;
+    const userName = req.session?.user?.name;
 
+    if (!userId) {
+        return res.status(401).json(errPayload('Authentication required.'));
+    }
+
+    const conn = await db.promise().getConnection();
+    try {
+        await conn.beginTransaction();
+
+        const [updateResult] = await conn.query(
+            `UPDATE purchase_orders SET
+                status_id = ?,
+                approval_comment = ?,
+                approved_by_id = ?,
+                approved_at = NOW()
+             WHERE id = ? AND status_id = ?`, // Only approve if status is 'Issued'
+            [1, comment || null, userId, id, 5] // 1: Approved, 5: Issued
+        );
+
+        const updatedCount = updateResult.affectedRows;
+
+        if (updatedCount === 0) {
+            throw new Error('Purchase order not found or has already been processed.');
+        }
+
+        const historyDetails = {
+            comment: comment || 'No comment provided.',
+            approvedBy: userName,
+        };
+
+        await addHistory(conn, {
+            module: 'purchase_order',
+            moduleId: id, // Use the numeric id for the history table
+            userId: userId,
+            action: 'APPROVED',
+            details: historyDetails
+        });
+
+        await conn.commit();
+
+        res.status(200).json({ message: 'Purchase Order approved successfully.' });
+    } catch (error) {
+        await conn.rollback();
+        console.error('Failed to approve PO:', error);
+        res.status(500).json(errPayload(error.message || 'An error occurred during approval.'));
+    } finally {
+        conn.release();
+    }
+});
 /* ------------------------------- status update ---------------------------- */
 router.put("/:uniqid/status", async (req, res) => {
     const uniqid = req.params.uniqid;
