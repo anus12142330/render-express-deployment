@@ -130,7 +130,7 @@ router.get('/', async (req, res) => {
     try {
         const sql = `
             SELECT
-                f.id, f.vehicle_name, f.plate_number, f.brand, f.model, f.is_active, f.tc_no, f.ownership_type,
+                f.id, f.vehicle_name, f.plate_number, f.brand, f.model, f.is_active, f.tc_no, f.ownership_type, f.owner_company_name, f.vehicle_type_id,
                 fi.thumbnail_path AS thumbnail
             FROM fleets f
             LEFT JOIN fleet_images fi ON f.id = fi.fleet_id AND fi.is_primary = 1
