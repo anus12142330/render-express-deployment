@@ -238,12 +238,14 @@ router.get("/", async (req, res) => {
 
         const createdBy = req.query.created_by;
         const statusId = req.query.status_id;
+        const editRequestStatus = req.query.edit_request_status;
         const params = [];
         let where = "WHERE 1=1";
         if (search) {
             where += " AND (po.po_number LIKE ? OR po.reference_no LIKE ? OR s.name LIKE ? OR v.display_name LIKE ?)";
             const token = `%${search}%`; params.push(token, token, token, token);
         }
+        if (editRequestStatus) { where += " AND po.edit_request_status = ?"; params.push(editRequestStatus); }
         if (createdBy) { where += " AND po.created_by = ?"; params.push(createdBy); }
         if (statusId) { where += " AND po.status_id = ?"; params.push(statusId); }
 
@@ -252,7 +254,8 @@ router.get("/", async (req, res) => {
          po.id, po.po_number, po.po_uniqid, po.reference_no, po.vendor_id,
          DATE(po.po_date) AS po_date, DATE(po.delivery_date) AS delivery_date, po.subtotal, po.discount_percent,
          po.total, po.status_id, s.name AS status_name, s.bg_colour, s.colour, po.created_at, po.updated_at,
-         u_creator.name as created_by_name, u_approver.name as approved_by_name, po.approval_comment,
+         u_creator.name as created_by_name, u_approver.name as approved_by_name, po.approval_comment, po.edit_request_reason,
+         edit_req_user.name as edit_requested_by_name, po.edit_requested_at,
          v.display_name AS vendor_name,
          c.name AS currency_code
        FROM purchase_orders po
@@ -261,6 +264,7 @@ router.get("/", async (req, res) => {
        LEFT JOIN currency c ON c.id = po.currency_id
        LEFT JOIN user u_creator ON po.created_by = u_creator.id
        LEFT JOIN user u_approver ON po.approved_by_id = u_approver.id
+       LEFT JOIN user edit_req_user ON po.edit_requested_by = edit_req_user.id
        ${where}
        ORDER BY ${sort_field} ${sort_order}
        LIMIT ? OFFSET ?`,
@@ -273,6 +277,7 @@ router.get("/", async (req, res) => {
        LEFT JOIN vendor v ON v.id = po.vendor_id
        LEFT JOIN status s ON s.id = po.status_id
        LEFT JOIN user u_creator ON po.created_by = u_creator.id
+       LEFT JOIN user edit_req_user ON po.edit_requested_by = edit_req_user.id
        LEFT JOIN user u_approver ON po.approved_by_id = u_approver.id
        ${where}`,
             params
@@ -359,6 +364,10 @@ router.get("/by-uniqid/:uniqid", async (req, res) => {
                  cr.subunit_label,
                  ms.name as mode_shipment_name,
                    ct.label as container_type_label,
+                   -- Edit Request Fields
+                   po.edit_request_status,
+                   edit_req_user.name as edit_requested_by_name,
+                   po.edit_requested_at,
                    cl.label as container_load_label,
                  COALESCE(po.documents_payment_text, po.documents_payment) AS documents_payment_display,
                  pt.terms as payment_terms_name
@@ -376,6 +385,7 @@ router.get("/by-uniqid/:uniqid", async (req, res) => {
                 LEFT JOIN container_type as ct ON ct.id=po.container_type_id
                 LEFT JOIN container_load cl ON cl.id=po.container_load_id
                 LEFT JOIN payment_terms pt ON pt.id = po.payment_terms_id
+                LEFT JOIN user edit_req_user ON edit_req_user.id = po.edit_requested_by
              WHERE po.po_uniqid = ?
                  LIMIT 1`,
             [uniqid]
@@ -1346,9 +1356,9 @@ router.post('/:id/approve', async (req, res) => { // Corrected from previous dif
                 status_id = ?,
                 approval_comment = ?,
                 approved_by_id = ?,
-                approved_at = NOW()
-             WHERE id = ? AND status_id = ?`, // Only approve if status is 'Issued'
-            [1, comment || null, userId, id, 5] // 1: Approved, 5: Issued
+                approved_at = NOW()             
+             WHERE id = ? AND status_id = ?`, // Only approve if status is 'Submitted for Approval'
+            [1, comment || null, userId, id, 8] // 1: Approved, 8: Submitted for Approval
         );
 
         const updatedCount = updateResult.affectedRows;
@@ -1386,6 +1396,53 @@ router.post('/:id/approve', async (req, res) => { // Corrected from previous dif
         await conn.rollback();
         console.error('Failed to approve PO:', error);
         res.status(500).json(errPayload(error.message || 'An error occurred during approval.'));
+    } finally {
+        conn.release();
+    }
+});
+
+/* ---------------------------------- reject ---------------------------------- */
+router.post('/:id/reject', async (req, res) => {
+    const { id } = req.params;
+    const { comment } = req.body;
+    const userId = req.session?.user?.id;
+
+    if (!userId) {
+        return res.status(401).json(errPayload('Authentication required.'));
+    }
+    if (!comment) {
+        return res.status(400).json(errPayload('A comment is required to reject a purchase order.'));
+    }
+
+    const conn = await db.promise().getConnection();
+    try {
+        await conn.beginTransaction();
+
+        const [updateResult] = await conn.query(
+            `UPDATE purchase_orders SET
+                status_id = 9, -- 9 = Rejected
+                rejection_reason = ?
+             WHERE id = ? AND status_id = 8`, // Only reject if status is 'Submitted for Approval'
+            [comment, id, 8]
+        );
+
+        if (updateResult.affectedRows === 0) {
+            throw new Error('Purchase order not found or has already been processed.');
+        }
+
+        await addHistory(conn, {
+            module: 'purchase_order',
+            moduleId: id,
+            userId: userId,
+            action: 'REJECTED',
+            details: { reason: comment }
+        });
+
+        await conn.commit();
+        res.status(200).json({ message: 'Purchase Order rejected successfully.' });
+    } catch (error) {
+        await conn.rollback();
+        res.status(500).json(errPayload(error.message || 'An error occurred during rejection.'));
     } finally {
         conn.release();
     }
@@ -1440,11 +1497,140 @@ router.put("/:uniqid/status", async (req, res) => {
     } finally { conn.release(); }
 });
 
+/* ------------------------- request po edit ------------------------ */
+router.post("/:uniqid/request-edit", async (req, res) => {
+    const { uniqid } = req.params;
+    const { reason } = req.body;
+    const userId = req.session?.user?.id;
+
+    if (!userId) return res.status(401).json(errPayload("Authentication required."));
+    if (!reason) return res.status(400).json(errPayload("A reason for the edit request is required."));
+
+    const conn = await db.promise().getConnection();
+    try {
+        await conn.beginTransaction();
+        const [[po]] = await conn.query("SELECT id, status_id, edit_request_status FROM purchase_orders WHERE po_uniqid = ? LIMIT 1", [uniqid]);
+        if (!po) throw new Error("Purchase Order not found.");
+
+        // Prevent new requests if one is already pending
+        if (po.edit_request_status === 'pending') {
+            throw new Error("An edit request is already pending for this purchase order.");
+        }
+
+        await conn.query(
+            `UPDATE purchase_orders SET 
+                edit_request_status = 'pending',
+                edit_requested_by = ?,
+                edit_requested_at = NOW(),
+                edit_request_reason = ?,
+                edit_approved_by = NULL,
+                edit_approved_at = NULL,
+                edit_rejection_reason = NULL
+             WHERE id = ?`,
+            [userId, reason, po.id]
+        );
+
+        await addHistory(conn, { module: 'purchase_order', moduleId: po.id, userId, action: 'EDIT_REQUESTED', details: { reason } });
+        await conn.commit();
+        res.status(200).json({ message: "Edit request submitted successfully." });
+    } catch (error) {
+        await conn.rollback();
+        res.status(500).json(errPayload(error.message || "An error occurred while submitting the request."));
+    } finally { conn.release(); }
+});
+
+/* ----------------------- approve/reject po edit ----------------------- */
+router.post("/:uniqid/decide-edit-request", async (req, res) => {
+    const { uniqid } = req.params;
+    const { decision, reason } = req.body; // decision: 'approve' or 'reject'
+    const managerId = req.session?.user?.id;
+
+    if (!managerId) return res.status(401).json(errPayload("Authentication required."));
+    if (!['approve', 'reject', 'confirm'].includes(decision)) return res.status(400).json(errPayload("Invalid decision."));
+    if (decision === 'reject' && !reason) return res.status(400).json(errPayload("A reason is required for rejection."));
+
+    const conn = await db.promise().getConnection();
+    try {
+        await conn.beginTransaction();
+        const [[po]] = await conn.query("SELECT id, status_id FROM purchase_orders WHERE po_uniqid = ? AND edit_request_status = 'pending' LIMIT 1", [uniqid]);
+        if (!po) throw new Error("No pending edit request found for this purchase order.");
+
+        if (decision === 'approve' || decision === 'confirm') {
+            // Revert status to 'Issued' (5) to allow editing and set edit status to 'approved'
+            await conn.query(
+                `UPDATE purchase_orders SET 
+                    status_id = 5, 
+                    edit_request_status = 'approved',
+                    edit_approved_by = ?,
+                    edit_approved_at = NOW()
+                 WHERE id = ?`,
+                [managerId, po.id]
+            );
+            await addHistory(conn, { module: 'purchase_order', moduleId: po.id, userId: managerId, action: 'EDIT_REQUEST_APPROVED', details: {} });
+        } else { // Reject
+            await conn.query(
+                `UPDATE purchase_orders SET 
+                    edit_request_status = 'rejected',
+                    edit_rejection_reason = ?
+                 WHERE id = ?`,
+                [reason, po.id]
+            );
+            await addHistory(conn, { module: 'purchase_order', moduleId: po.id, userId: managerId, action: 'EDIT_REQUEST_REJECTED', details: { reason } });
+        }
+
+        await conn.commit();
+        res.status(200).json({ message: `Edit request has been ${decision}d.` });
+    } catch (error) {
+        await conn.rollback();
+        res.status(500).json(errPayload(error.message || "An error occurred."));
+    } finally { conn.release(); }
+});
+
+/* ------------------------- submit for approval ------------------------ */
+router.post("/:uniqid/submit-for-approval", async (req, res) => {
+    const { uniqid } = req.params;
+    const userId = req.session?.user?.id;
+
+    if (!userId) {
+        return res.status(401).json(errPayload("Authentication required."));
+    }
+
+    const conn = await db.promise().getConnection();
+    try {
+        await conn.beginTransaction();
+
+        // Find the PO and ensure its status is 'Issued' (ID 5)
+        const [[po]] = await conn.query(
+            "SELECT id, status_id FROM purchase_orders WHERE po_uniqid = ? LIMIT 1",
+            [uniqid]
+        );
+
+        if (!po) {
+            throw new Error("Purchase Order not found.");
+        }
+        if (po.status_id !== 5) {
+            throw new Error("This action is only available for 'Issued' purchase orders.");
+        }
+
+        // Update status to 'Submitted for Approval' (ID 8)
+        await conn.query("UPDATE purchase_orders SET status_id = 8 WHERE id = ?", [po.id]);
+
+        // Add history record
+        await addHistory(conn, { module: 'purchase_order', moduleId: po.id, userId, action: 'STATUS_CHANGED', details: { to_status: 'Submitted for Approval' } });
+
+        await conn.commit();
+        res.status(200).json({ message: "Purchase Order submitted for approval." });
+    } catch (error) {
+        await conn.rollback();
+        res.status(500).json(errPayload(error.message || "An error occurred during submission."));
+    } finally { conn.release(); }
+});
 /* ---------------------- create shipment from po --------------------- */
-router.post("/create-from-po/:uniqid", async (req, res) => {
+router.post("/create-from-po/:uniqid", upload.single('confirmation_attachment'), async (req, res) => {
     const { uniqid } = req.params;
     const { confirmation_type, customer_id } = req.body;
     const userId = req.session?.user?.id;
+    const attachmentFile = req.file;
 
     if (!uniqid) {
         return res.status(400).json(errPayload("Missing Purchase Order ID."));
@@ -1474,6 +1660,22 @@ router.post("/create-from-po/:uniqid", async (req, res) => {
              WHERE id = ?`,
             [confirmation_type, customer_id || null, po.id]
         );
+
+        // 5. If there's an attachment, save it
+        if (attachmentFile) {
+            await conn.query(
+                `INSERT INTO purchase_order_attachments
+                   (purchase_order_id, file_name, file_path, mime_type, size_bytes, created_at, category)
+                 VALUES (?, ?, ?, ?, ?, NOW(), ?)`,
+                [
+                    po.id,
+                    attachmentFile.originalname,
+                    relPath(attachmentFile),
+                    attachmentFile.mimetype,
+                    attachmentFile.size,
+                    'CONFIRMATION' // A new category to identify this type of attachment
+                ]);
+        }
 
         // 3. Create the new entry in the 'shipment' table
         const shipUniqid = `ship_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
