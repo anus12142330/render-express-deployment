@@ -61,15 +61,19 @@ router.get("/board", async (_req, res) => {
         s.vessel_name,
         po.po_number,
         po.vendor_id,
+        po.confirmation_type,
         v.display_name as vendor_name,
+        c.display_name as customer_name,
         po.shipment_stage_id AS stage_id,
         po.po_uniqid   AS po_uniqid,
         dpl.name as loading_name,dpd.name as discharge_name
       FROM shipment s
       JOIN purchase_orders po ON po.id = s.po_id
       LEFT JOIN vendor v ON v.id = s.vendor_id
+      LEFT JOIN vendor c ON c.id = po.confirmation_customer_id
       LEFT JOIN delivery_place dpl ON dpl.id=po.port_loading
       LEFT JOIn delivery_place dpd ON dpd.id=po.port_discharge
+      
       WHERE po.shipment_stage_id > 0
       ORDER BY po.shipment_stage_id, s.id DESC
       `
@@ -407,75 +411,6 @@ router.put("/:shipUniqid/move", async (req, res) => {
         res.json({ ok: true, updated: { from_stage_id: current } });
     } catch (e) {
         res.status(500).json({ error: { message: "Failed to move stage", type: "DB_ERROR", hint: e.message } });
-    }
-});
-
-/* ---------------- create shipment from PO ---------------- */
-
-router.post("/create-from-po/:poUniqid", async (req, res) => {
-    try {
-        const userId = req.session?.user?.id ?? null;
-        if (!userId) {
-            return res.status(401).json({ error: { message: "Unauthorized", type: "AUTH" } });
-        }
-
-        const poUniqid = req.params.poUniqid;
-        const newShipUniq = () =>
-            "SHP-" + crypto.randomBytes(6).toString("hex").toUpperCase();
-
-        // 1) find PO
-        const [[po]] = await db.promise().query(
-            `SELECT id, vendor_id, po_number, po_uniqid
-         FROM purchase_orders
-        WHERE po_uniqid = ?
-        LIMIT 1`,
-            [poUniqid]
-        );
-        if (!po) return res.status(404).json(errPayload("Purchase order not found"));
-
-        // 2) create shipment
-        const ship_uniqid = newShipUniq();
-        const {
-            vessel_name = null,
-            etd_date = null,
-            eta_date = null,
-            sailed_date = null,
-            is_transhipment = 0,
-        } = req.body || {};
-
-        const [ins] = await db.promise().query(
-            `INSERT INTO shipment
-         (ship_uniqid, po_id, vendor_id, vessel_name, etd_date, eta_date, sailing_date, confirm_sailing_date, is_transhipment, created_by, created_date)
-       VALUES (?,?,?,?,?,?,?,NULL,?, ?, NOW())`,
-            [ship_uniqid, po.id, po.vendor_id, vessel_name, etd_date, eta_date, sailed_date, Number(is_transhipment) ? 1 : 0, userId,]
-        );
-        const shipmentId = ins.insertId;
-
-        // 3) transshipment ports (optional)
-        const ports = Array.isArray(req.body.ports) ? req.body.ports : [];
-        for (const p of ports) {
-            const portId = Number(p.port_id || 0) || null;
-            const orderNo = Number(p.order_no || 0) || null;
-            if (portId && orderNo) {
-                await db.promise().query(
-                    `INSERT INTO shipment_transhipment (shipment_id, transhipment_port_id, order_no) VALUES (?,?,?)`,
-                    [shipmentId, portId, orderNo]
-                );
-            }
-        }
-
-        // 4) mark PO stage = 1 and write history
-        await db.promise().query(`UPDATE purchase_orders SET shipment_stage_id = 1 WHERE id = ?`, [po.id]);
-        await db.promise().query(
-            `INSERT INTO shipment_stage_history
-         (shipment_id, from_stage_id, to_stage_id, changed_at, changed_by, payload_json)
-       VALUES (?, 0, 1, NOW(),?, JSON_OBJECT('po_id', ?, 'po_number', ?))`,
-            [shipmentId, userId, po.id, po.po_number]
-        );
-
-        res.json({ id: shipmentId, ship_uniqid });
-    } catch (e) {
-        res.status(500).json(errPayload("Failed to create shipment", "DB_ERROR", e.message));
     }
 });
 

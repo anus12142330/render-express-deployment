@@ -266,6 +266,64 @@ router.post('/', uploadCustomer.array('attachments'), async (req, res) => {
 });
 
 /* ================================
+   POST /api/customers/quick-add
+================================ */
+router.post('/quick-add', async (req, res) => {
+    const {
+        name, // from the form, maps to company_name
+        display_name,
+        tax_treatment_id,
+        tax_registration_number,
+        bill_country_id,
+    } = req.body;
+
+    const userId = req.session?.user?.id || null;
+
+    // --- Validation ---
+    if (!display_name?.trim()) return res.status(400).json(errPayload('Display Name is required.'));
+    if (!tax_treatment_id) return res.status(400).json(errPayload('Tax Treatment is required.'));
+    // You can add more validation here if needed
+
+    const conn = await db.promise().getConnection();
+    try {
+        await conn.beginTransaction();
+
+        const uniqid = `cus_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+
+        // Insert into the main 'vendor' table, which is used for customers
+        const [ins] = await conn.query(
+            `INSERT INTO vendor (uniqid, company_name, display_name, user_id, company_type_id, customer_type) VALUES (?, ?, ?, ?, ?, ?)`,
+            [uniqid, name || display_name, display_name, userId, COMPANY_TYPE_CUSTOMER, 'business']
+        );
+        const customerId = ins.insertId;
+
+        // Insert into the 'vendor_other' table for tax details
+        await conn.query(
+            `INSERT INTO vendor_other (vendor_id, tax_treatment_id, tax_registration_number) VALUES (?, ?, ?)`,
+            [customerId, tax_treatment_id, tax_registration_number || null]
+        );
+
+        // Insert into the 'vendor_address' table for billing country
+        await conn.query(
+            `INSERT INTO vendor_address (vendor_id, bill_country_id) VALUES (?, ?)`,
+            [customerId, bill_country_id || null]
+        );
+
+        await conn.commit();
+
+        // Return the new customer object so the frontend can use it immediately
+        res.status(201).json({ id: customerId, uniqid, name: display_name, display_name });
+
+    } catch (err) {
+        await conn.rollback();
+        console.error('Quick create customer failed:', err);
+        res.status(500).json(errPayload('Quick create failed', 'DB_ERROR', err.message));
+    } finally {
+        conn.release();
+    }
+});
+
+/* ================================
    GET /api/customers/:uniqid/full
 ================================ */
 router.get('/:uniqid/full', async (req, res) => {

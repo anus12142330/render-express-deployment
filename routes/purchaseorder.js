@@ -44,30 +44,30 @@ const addHistory = async (conn, { module, moduleId, userId, action, details }) =
 };
 
 function getPOChangedFields(oldValues, newValues) {
-    const changes = [];
-    // Add currency_id to the list of fields to compare
+    const changes = [];    
     const fieldsToCompare = {
         po_number: 'PO Number',
         po_date: 'PO Date',
         currency_id: 'Currency',
         total: 'Total',
         notes: 'Notes',
-    };
+    };    
 
     for (const key in fieldsToCompare) {
-        let oldStr;
-        if (key === 'po_date' && oldValues[key] instanceof Date) {
-            // Use dayjs to format the database date to YYYY-MM-DD, ignoring time/timezone
-            oldStr = dayjs(oldValues[key]).format('YYYY-MM-DD');
-        } else if (key === 'total') {
-            // Compare numbers by parsing them to floats with a fixed precision
-            oldStr = parseFloat(oldValues[key] || 0).toFixed(2);
-        } else {
-            oldStr = String(oldValues[key] || '');
-        }
-        const newStr = String(newValues[key] || '');
+        let oldVal, newVal;
 
-        if (oldStr !== newStr) {
+        if (key === 'po_date' && oldValues[key] instanceof Date) {
+            oldVal = dayjs(oldValues[key]).format('YYYY-MM-DD');
+            newVal = String(newValues[key] || '');
+        } else if (key === 'total') {            
+            oldVal = parseFloat(oldValues[key] || 0).toFixed(2);
+            newVal = parseFloat(newValues[key] || 0).toFixed(2);
+        } else {
+            oldVal = String(oldValues[key] || '');
+            newVal = String(newValues[key] || '');
+        }
+
+        if (oldVal !== newVal) {
             changes.push({ field: fieldsToCompare[key], from: oldValues[key] || 'empty', to: newValues[key] || 'empty' });
         }
     }
@@ -252,14 +252,15 @@ router.get("/", async (req, res) => {
          po.id, po.po_number, po.po_uniqid, po.reference_no, po.vendor_id,
          DATE(po.po_date) AS po_date, DATE(po.delivery_date) AS delivery_date, po.subtotal, po.discount_percent,
          po.total, po.status_id, s.name AS status_name, s.bg_colour, s.colour, po.created_at, po.updated_at,
-         u.name as created_by_name,
+         u_creator.name as created_by_name, u_approver.name as approved_by_name, po.approval_comment,
          v.display_name AS vendor_name,
          c.name AS currency_code
        FROM purchase_orders po
        LEFT JOIN vendor v ON v.id = po.vendor_id
        LEFT JOIN status s ON s.id = po.status_id
        LEFT JOIN currency c ON c.id = po.currency_id
-       LEFT JOIN user u ON po.created_by = u.id
+       LEFT JOIN user u_creator ON po.created_by = u_creator.id
+       LEFT JOIN user u_approver ON po.approved_by_id = u_approver.id
        ${where}
        ORDER BY ${sort_field} ${sort_order}
        LIMIT ? OFFSET ?`,
@@ -271,7 +272,8 @@ router.get("/", async (req, res) => {
        FROM purchase_orders po
        LEFT JOIN vendor v ON v.id = po.vendor_id
        LEFT JOIN status s ON s.id = po.status_id
-       LEFT JOIN user u ON po.created_by = u.id
+       LEFT JOIN user u_creator ON po.created_by = u_creator.id
+       LEFT JOIN user u_approver ON po.approved_by_id = u_approver.id
        ${where}`,
             params
         );
@@ -1355,9 +1357,18 @@ router.post('/:id/approve', async (req, res) => { // Corrected from previous dif
             throw new Error('Purchase order not found or has already been processed.');
         }
 
+        // Add a history record for the status change itself
+        await addHistory(conn, {
+            module: 'purchase_order',
+            moduleId: id,
+            userId: userId,
+            action: 'STATUS_CHANGED',
+            details: { to_status: 'Approved' }
+        });
+
         const historyDetails = {
             comment: comment || 'No comment provided.',
-            approvedBy: userName,
+            userName: userName, // Use userName to be consistent with other history logs
         };
 
         await addHistory(conn, {
@@ -1382,26 +1393,109 @@ router.post('/:id/approve', async (req, res) => { // Corrected from previous dif
 /* ------------------------------- status update ---------------------------- */
 router.put("/:uniqid/status", async (req, res) => {
     const uniqid = req.params.uniqid;
-    const { status_id } = req.body; // Only use status_id from the request
+    const { status_id, confirmation_type, customer_id } = req.body;
+    const userId = req.session?.user?.id;
 
     const conn = await db.promise().getConnection();
     try {
         await conn.beginTransaction();
         const [[po]] = await conn.query("SELECT id FROM purchase_orders WHERE po_uniqid = ? LIMIT 1", [uniqid]);
-        if (!po) return res.status(404).json({ error: { message: "Not found" } });
+        if (!po) return res.status(404).json(errPayload("Not found"));
 
         const sid = parseInt(status_id, 10);
-        if (!Number.isFinite(sid)) return res.status(400).json({ error: { message: "Invalid status_id provided. It must be a number." } });
+        if (!Number.isFinite(sid)) return res.status(400).json(errPayload("Invalid status_id provided. It must be a number."));
 
-        await conn.query("UPDATE purchase_orders SET status_id = ?, updated_at = NOW() WHERE id = ?", [sid, po.id]);
+        // Build the update query dynamically to include confirmation details if provided
+        let updateQuery = "UPDATE purchase_orders SET status_id = ?, updated_at = NOW()";
+        const params = [sid];
+
+        // If the status is 'Confirmed' (7), save the confirmation details.
+        if (sid === 7 && confirmation_type) {
+            updateQuery += ", confirmation_type = ?, confirmation_customer_id = ?";
+            params.push(confirmation_type, customer_id || null);
+        }
+
+        updateQuery += " WHERE id = ?";
+        params.push(po.id);
+
+        await conn.query(updateQuery, params);
         const [[srow]] = await conn.query("SELECT name FROM status WHERE id=? LIMIT 1", [sid]);
+
+        // Add to history
+        await addHistory(conn, {
+            module: 'purchase_order',
+            moduleId: po.id,
+            userId: userId,
+            action: 'STATUS_CHANGED',
+            details: { to_status: srow?.name || sid }
+        });
 
         await conn.commit();
 
         res.json({ ok: true, status_id: sid, status_name: srow?.name || null });
     } catch (err) {
-        res.status(500).json({ error: { message: "Failed to update status" } });
+        await conn.rollback();
+        console.error("Failed to update PO status:", err);
+        res.status(500).json(errPayload("Failed to update status", "DB_ERROR", err.message));
     } finally { conn.release(); }
+});
+
+/* ---------------------- create shipment from po --------------------- */
+router.post("/create-from-po/:uniqid", async (req, res) => {
+    const { uniqid } = req.params;
+    const { confirmation_type, customer_id } = req.body;
+    const userId = req.session?.user?.id;
+
+    if (!uniqid) {
+        return res.status(400).json(errPayload("Missing Purchase Order ID."));
+    }
+
+    const conn = await db.promise().getConnection();
+    try {
+        await conn.beginTransaction();
+
+        // 1. Find the Purchase Order
+        const [[po]] = await conn.query(
+            "SELECT id, vendor_id, po_number FROM purchase_orders WHERE po_uniqid = ? LIMIT 1",
+            [uniqid]
+        );
+        if (!po) {
+            throw new Error("Purchase Order not found.");
+        }
+
+        // 2. Update the Purchase Order with confirmation details and set status to 'Confirmed' (7)
+        await conn.query(
+            `UPDATE purchase_orders SET 
+                status_id = 7,
+                shipment_stage_id = 1, -- Set shipment stage to 'To Do'
+                confirmation_type = ?, 
+                confirmation_customer_id = ?,
+                updated_at = NOW()
+             WHERE id = ?`,
+            [confirmation_type, customer_id || null, po.id]
+        );
+
+        // 3. Create the new entry in the 'shipment' table
+        const shipUniqid = `ship_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
+        await conn.query(
+            `INSERT INTO shipment (ship_uniqid, po_id, vendor_id, created_by, created_date)
+             VALUES (?, ?, ?, ?, NOW())`,
+            [shipUniqid, po.id, po.vendor_id, userId]
+        );
+
+        // 4. Log history for status change
+        await addHistory(conn, { module: 'purchase_order', moduleId: po.id, userId, action: 'STATUS_CHANGED', details: { to_status: 'Confirmed' } });
+
+        await conn.commit();
+        res.status(201).json({ message: "Shipment created and PO confirmed successfully." });
+
+    } catch (error) {
+        await conn.rollback();
+        console.error("Failed to create shipment from PO:", error);
+        res.status(500).json(errPayload(error.message || "An error occurred."));
+    } finally {
+        conn.release();
+    }
 });
 
 /* --------------------------- delete single attachment --------------------- */
