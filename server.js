@@ -56,11 +56,18 @@ app.use(express.urlencoded({ extended: true }));
 //app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
+// If deploying behind a proxy (like Nginx, or using Vite's proxy),
+// this tells Express to trust the X-Forwarded-* headers.
+app.set('trust proxy', 1);
+
 //session
 app.use(session({
   secret: 'your-secret-key',
   resave: false,
   saveUninitialized: false,
+  cookie: {
+    sameSite: 'lax' // Recommended for security and works with proxies
+  }
 }));
 
 const vendorStorage = multer.diskStorage({
@@ -96,22 +103,23 @@ const companyStorage = multer.diskStorage({
     cb(null, name + ext); // Save as uniqueName.jpg
   }
 });
-
-const storage = multer.diskStorage({
+const userStorage = multer.diskStorage({
     destination: (req, file, cb) => {
-        cb(null, "uploads/signatures");
+        cb(null, "uploads/users");
     },
     filename: (req, file, cb) => {
-        cb(null, Date.now() + path.extname(file.originalname));
+        const ext = path.extname(file.originalname);
+        const name = crypto.randomBytes(16).toString('hex');
+        cb(null, name + ext);
     },
 });
-const uploadSignature = multer({ storage });
 
 
 
 const upload = multer({ storage: productStorage });
 const uploadv = multer({ storage: vendorStorage });
 const uploadc = multer({ storage: companyStorage });
+const uploadUserPhoto = multer({ storage: userStorage });
 
 const uploadCompany = uploadc.fields([
     { name: 'logo', maxCount: 1 },
@@ -183,16 +191,30 @@ app.get('/api/me', requireAuth, async (req, res) => {
   const sessionUser = req.session?.user || null;
   if (!sessionUser) return res.status(401).json({ user: null });
 
-  // Enrich user with roles to make client-side `isAdmin` checks work
-  const roleRows = await q(`
-    SELECT r.name FROM role r JOIN user_role ur ON ur.role_id = r.id WHERE ur.user_id = ?
+  // Enrich user with full details and roles
+  const userRows = await q(`
+    SELECT
+        u.id,
+        u.name AS user_name,
+        u.designation,
+        u.email,
+        u.photo_path,
+        d.name AS department_name,
+        GROUP_CONCAT(r.name) as roles
+    FROM \`user\` u
+    LEFT JOIN department d ON d.id = u.department_id
+    LEFT JOIN user_role ur ON ur.user_id = u.id
+    LEFT JOIN role r ON r.id = ur.role_id
+    WHERE u.id = ?
+    GROUP BY u.id
   `, [sessionUser.id]);
 
-  const userWithRoles = {
-    ...sessionUser,
-    roles: roleRows.map(r => r.name) // e.g., ['Admin', 'Manager']
-  };
-  res.json({ user: userWithRoles });
+  const userWithDetails = userRows[0] || null;
+  if (userWithDetails && userWithDetails.roles) {
+      userWithDetails.roles = userWithDetails.roles.split(',');
+  }
+
+  res.json({ user: userWithDetails });
 });
 
 
@@ -233,7 +255,7 @@ app.get('/api/users', (req, res) => {
             u.password,
             u.department_id,
             d.name AS department_name,
-            MAX(u.signature_path) AS signature_path,
+            u.photo_path,
             GROUP_CONCAT(DISTINCT ur.role_id) as role_ids,
             GROUP_CONCAT(DISTINCT r.name SEPARATOR ", ") as role_name
         FROM \`user\` u
@@ -242,7 +264,7 @@ app.get('/api/users', (req, res) => {
                  LEFT JOIN role r ON r.id = ur.role_id
         WHERE u.is_inactive = 0
         GROUP BY
-            u.id, u.name, u.designation, u.email, u.password, u.department_id, d.name
+            u.id, u.name, u.designation, u.email, u.password, u.department_id, d.name, u.photo_path
     `;
     db.query(query, (err, results) => {
         if (err) {
@@ -279,27 +301,60 @@ app.get('/api/login-debug', (req, res) => {
   );
 });
 
-app.post('/api/login', (req, res) => {
+app.post('/api/login', async (req, res) => {
  
   const email = String(req.body?.email ?? '').trim();
   const password = String(req.body?.password ?? '').trim();
   console.log('[LOGIN]', { email, passwordLen: password.length });
-  db.query(
-    'SELECT * FROM user WHERE email = ? AND password = ? AND is_inactive = 0',
-    [email, password],
-    (err, results) => {
-      if (err) {
-        console.error('❌ Login error:', err);
-        return res.status(500).json({ success: false, error: 'Database error' });
-      }
-      if (results.length === 0) {
-        return res.json({ success: false, message: 'Invalid credentials' });
-      }
-      //res.json({ success: true, user: results[0] });
-      req.session.user = { id: results[0].id, email: results[0].email };
-      res.json({ success: true, user: req.session.user });
+
+  try {
+    const [loginRows] = await db.promise().query(
+      'SELECT id, email FROM user WHERE email = ? AND password = ? AND is_inactive = 0',
+      [email, password]
+    );
+
+    if (loginRows.length === 0) {
+      return res.json({ success: false, message: 'Invalid credentials' });
     }
-  );
+
+    const loggedInUser = loginRows[0];
+    req.session.user = { id: loggedInUser.id, email: loggedInUser.email };
+
+    // Now, enrich the user with full details to return to the client
+    const [detailsRows] = await db.promise().query(`
+      SELECT
+          u.id, u.name AS user_name, u.designation, u.email, u.photo_path,
+          d.name AS department_name, GROUP_CONCAT(r.name) as roles
+      FROM \`user\` u
+      LEFT JOIN department d ON d.id = u.department_id
+      LEFT JOIN user_role ur ON ur.user_id = u.id
+      LEFT JOIN role r ON r.id = ur.role_id
+      WHERE u.id = ?
+      GROUP BY u.id
+    `, [loggedInUser.id]);
+
+    const userWithDetails = detailsRows[0] || null;
+    if (userWithDetails && userWithDetails.roles) {
+      userWithDetails.roles = userWithDetails.roles.split(',');
+    }
+
+    res.json({ success: true, user: userWithDetails });
+  } catch (err) {
+    console.error('❌ Login error:', err);
+    res.status(500).json({ success: false, error: 'Database error' });
+  }
+});
+
+// ✅ LOGOUT
+app.post('/api/logout', (req, res) => {
+  req.session.destroy(err => {
+    if (err) {
+      return res.status(500).json({ success: false, message: 'Could not log out, please try again.' });
+    }
+    // It's good practice to clear the cookie on the client-side as well
+    res.clearCookie('connect.sid'); // Use the name of your session cookie if different
+    res.json({ success: true, message: 'Logged out successfully' });
+  });
 });
 
 // ✅ CHANGE PASSWORD
@@ -326,11 +381,11 @@ app.post('/api/user/change-password', (req, res) => {
 });
 
 // ✅ CREATE USER
-app.post("/api/user", uploadSignature.single("signature"), (req, res) => {
+app.post("/api/user", uploadUserPhoto.single("photo"), (req, res) => {
     const { name, designation, department_id, role_ids, email, password } =
         req.body;
-    const signaturePath = req.file
-        ? `/uploads/signatures/${req.file.filename}`
+    const photoPath = req.file
+        ? `uploads/users/${req.file.filename}`
         : null;
 
     db.getConnection(async (err, conn) => {
@@ -339,10 +394,10 @@ app.post("/api/user", uploadSignature.single("signature"), (req, res) => {
             await conn.promise().beginTransaction();
 
             const userSql = `
-              INSERT INTO \`user\` (name, designation, department_id, email, password, signature_path)
+              INSERT INTO \`user\` (name, designation, department_id, email, password, photo_path)
               VALUES (?, ?, ?, ?, ?, ?)
             `;
-            const [userResult] = await conn.promise().query(userSql, [name, designation, department_id, email, password, signaturePath]);
+            const [userResult] = await conn.promise().query(userSql, [name, designation, department_id, email, password, photoPath]);
             const userId = userResult.insertId;
 
             if (role_ids && role_ids.length > 0) {
@@ -365,7 +420,7 @@ app.post("/api/user", uploadSignature.single("signature"), (req, res) => {
 });
 
 // === UPDATE USER ===
-app.put("/api/user/:id", uploadSignature.single("signature"), async (req, res) => {
+app.put("/api/user/:id", uploadUserPhoto.single("photo"), async (req, res) => {
     const { id } = req.params;
     const { name, designation, department_id, role_ids, email, password } =
         req.body;
@@ -376,25 +431,25 @@ app.put("/api/user/:id", uploadSignature.single("signature"), async (req, res) =
         await conn.beginTransaction();
 
         // Fetch current user data to get existing password and signature
-        const [rows] = await conn.execute("SELECT password, signature_path FROM `user` WHERE id = ?", [id]);
+        const [rows] = await conn.execute("SELECT password, photo_path FROM `user` WHERE id = ?", [id]);
         if (!rows || rows.length === 0) {
             await conn.rollback();
             return res.status(404).json({ success: false, error: "User not found" });
         }
 
-        const { password: currentPassword, signature_path: currentSignature } = rows[0];
+        const { password: currentPassword, photo_path: currentPhoto } = rows[0];
 
         const nextPassword = password && password.trim() !== "" ? password : currentPassword;
 
         // Signature logic
-        let nextSignaturePath = currentSignature;
+        let nextPhotoPath = currentPhoto;
         if (req.file) {
-            nextSignaturePath = `/uploads/signatures/${req.file.filename}`;
+            nextPhotoPath = `uploads/users/${req.file.filename}`;
         }
 
         // Update user table
-        const userUpdateSql = `UPDATE \`user\` SET name = ?, designation = ?, department_id = ?, email = ?, password = ?, signature_path = ? WHERE id = ?`;
-        await conn.execute(userUpdateSql, [name, designation, department_id, email, nextPassword, nextSignaturePath, id]);
+        const userUpdateSql = `UPDATE \`user\` SET name = ?, designation = ?, department_id = ?, email = ?, password = ?, photo_path = ? WHERE id = ?`;
+        await conn.execute(userUpdateSql, [name, designation, department_id, email, nextPassword, nextPhotoPath, id]);
 
         // Update user_role table
         await conn.execute('DELETE FROM user_role WHERE user_id = ?', [id]);
@@ -1247,6 +1302,22 @@ app.put("/api/vendor-contacts/:id", (req, res) => {
             res.json({ message: "Contact updated" });
         }
     );
+});
+
+// ✅ GET Business Types
+app.get('/api/business-types', async (req, res) => {
+    try {
+        const [rows] = await db.promise().query('SELECT id, name FROM business_types WHERE is_active = 1 ORDER BY sort_order, name');
+        res.json(rows);
+    } catch (err) { res.status(500).json({ error: 'Failed to load business types' }); }
+});
+
+// ✅ GET Product Interests
+app.get('/api/product-interests', async (req, res) => {
+    try {
+        const [rows] = await db.promise().query('SELECT id, name FROM product_interests WHERE is_active = 1 ORDER BY sort_order, name');
+        res.json(rows);
+    } catch (err) { res.status(500).json({ error: 'Failed to load product interests' }); }
 });
 
 // ✅ START SERVER

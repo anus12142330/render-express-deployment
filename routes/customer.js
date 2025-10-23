@@ -8,6 +8,37 @@ import fs from 'fs';
 const router = express.Router();
 const errPayload = (message, type = 'APP_ERROR', hint) => ({ error: { message, type, hint } });
 
+// ---- harden inserts + logging
+const toNull = v => (v === '' || v === undefined ? null : v);
+const mustArray = v => {
+  try { return Array.isArray(v) ? v : JSON.parse(v || '[]'); }
+  catch { return []; }
+};
+
+// Accepts many shapes and outputs the canonical DB shape
+const normalizeShipAddr = (raw = {}) => {
+  // Accept both “ship_*” and generic keys from the modal/list
+  const get = (...keys) => {
+    for (const k of keys) {
+      if (raw[k] !== undefined && raw[k] !== null) return raw[k];
+    }
+    return undefined;
+  };
+
+  return {
+    ship_attention:     get('ship_attention', 'attention'),
+    ship_address_1:     get('ship_address_1', 'address', 'address_1'),
+    ship_address_2:     get('ship_address_2', 'street2', 'address_2'),
+    ship_city:          get('ship_city', 'city'),
+    ship_state_id:      toNull(get('ship_state_id', 'state', 'state_id')),
+    ship_zip_code:      get('ship_zip_code', 'zip', 'zipcode'),
+    ship_country_id:    toNull(get('ship_country_id', 'country', 'country_id')),
+    ship_phone:         get('ship_phone', 'phone'),
+    ship_fax:           get('ship_fax', 'fax'),
+    is_primary:         get('is_primary') ? 1 : 0,
+  };
+};
+
 // ---------- FS helpers ----------
 const ensureDir = (dir) => { try { fs.mkdirSync(dir, { recursive: true }); } catch {} };
 ensureDir('uploads/customer');
@@ -136,12 +167,9 @@ router.get('/', async (req, res) => {
 router.post('/', uploadCustomer.array('attachments'), async (req, res) => {
     const {
         company_name, display_name, email_address, phone_work, phone_mobile, remarks,
-        tax_treatment_id, tax_registration_number, source_supply_id,
-        currency_id, payment_terms_id,
-        bill_attention, bill_country_id, bill_address_1, bill_address_2,
-        bill_city, bill_state_id, bill_zip_code, bill_phone, bill_fax,
-        ship_attention, ship_country_id, ship_address_1, ship_address_2,
-        ship_city, ship_state_id, ship_zip_code, ship_phone, ship_fax, customer_of,
+        tax_treatment_id, tax_registration_number, source_supply_id, currency_id, payment_terms_id,
+        business_type_other, outlets_count, avg_weekly_purchase, has_cold_storage,
+        bill_attention, bill_country_id, bill_address_1, bill_address_2, bill_city, bill_state_id, bill_zip_code, bill_phone, bill_fax, customer_of,
         customer_type // 'individual' | 'business'
     } = req.body;
 
@@ -149,6 +177,7 @@ router.post('/', uploadCustomer.array('attachments'), async (req, res) => {
     const userId = req.session?.user?.id || null;
     const files = req.files || [];
     const tagsRaw = req.body.tags;
+
 
     let contactPersons = [];
     try {
@@ -159,6 +188,13 @@ router.post('/', uploadCustomer.array('attachments'), async (req, res) => {
 
     const conn = await db.promise().getConnection();
     try {
+        // 1) Log raw body once
+        console.log('[CREATE] body keys:', Object.keys(req.body));
+
+        // Safely parse arrays of IDs from the form
+        const business_types_ids = mustArray(req.body.business_types);
+        const product_interests_ids = mustArray(req.body.product_interests);
+        const notification_prefs = mustArray(req.body.notification_prefs)[0] || {}; // Assuming it's not an array
         let safeCustomerOf = (Array.isArray(customer_of) ? customer_of.join(',') : String(customer_of || ''))
             .split(',').map(s => s.trim()).filter(Boolean).join(',');
 
@@ -190,26 +226,74 @@ router.post('/', uploadCustomer.array('attachments'), async (req, res) => {
 
         await conn.query(
             `INSERT INTO vendor_other
-         (vendor_id, tax_treatment_id, tax_registration_number, source_supply_id, currency_id, payment_terms_id)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-            [customerId, tax_treatment_id, tax_registration_number, source_supply_id, currency_id, payment_terms_id]
+         (vendor_id, tax_treatment_id, tax_registration_number, source_supply_id, currency_id, payment_terms_id,
+          business_type_other, outlets_count, avg_weekly_purchase, has_cold_storage)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [customerId, tax_treatment_id, tax_registration_number, source_supply_id, currency_id, payment_terms_id,
+             business_type_other, outlets_count, avg_weekly_purchase, has_cold_storage
+            ]
         );
 
         await conn.query(
             `INSERT INTO vendor_address (
          vendor_id, bill_attention, bill_country_id, bill_address_1, bill_address_2,
-         bill_city, bill_state_id, bill_zip_code, bill_phone, bill_fax,
-         ship_attention, ship_country_id, ship_address_1, ship_address_2,
-         ship_city, ship_state_id, ship_zip_code, ship_phone, ship_fax
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         bill_city, bill_state_id, bill_zip_code, bill_phone, bill_fax
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
-                customerId,
-                bill_attention, bill_country_id, bill_address_1, bill_address_2,
-                bill_city, bill_state_id, bill_zip_code, bill_phone, bill_fax,
-                ship_attention, ship_country_id, ship_address_1, ship_address_2,
-                ship_city, ship_state_id, ship_zip_code, ship_phone, ship_fax
+                customerId, bill_attention, bill_country_id, bill_address_1, bill_address_2, bill_city, bill_state_id, bill_zip_code, bill_phone, bill_fax
             ]
         );
+
+        // INSERT shipping addresses
+        const rawShippingAddresses = mustArray(req.body.shipping_addresses || '[]');
+        for (const rawAddr of rawShippingAddresses) {
+            const addr = normalizeShipAddr(rawAddr);
+            await conn.query(
+                `INSERT INTO vendor_shipping_addresses
+                 (vendor_id, ship_attention, ship_address_1, ship_address_2, ship_city,
+                  ship_state_id, ship_zip_code, ship_country_id, ship_phone, ship_fax, is_primary)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+                [
+                    customerId, // This is the insertId from the 'vendor' table
+                    addr.ship_attention || null,
+                    addr.ship_address_1 || null,
+                    addr.ship_address_2 || null,
+                    addr.ship_city || null,
+                    addr.ship_state_id,
+                    addr.ship_zip_code || null,
+                    addr.ship_country_id,
+                    addr.ship_phone || null,
+                    addr.ship_fax || null,
+                    addr.is_primary,
+                ]
+            );
+        }
+
+        // Insert into new linking tables
+        if (Array.isArray(business_types_ids) && business_types_ids.length > 0) {
+            const businessTypeValues = business_types_ids.map(id => [customerId, id]);
+            await conn.query('INSERT INTO customer_business_types (customer_id, business_type_id) VALUES ?', [businessTypeValues]);
+        }
+
+        if (Array.isArray(product_interests_ids) && product_interests_ids.length > 0) {
+            const productInterestValues = product_interests_ids.map(id => [customerId, id]);
+            await conn.query('INSERT INTO customer_product_interests (customer_id, product_interest_id) VALUES ?', [productInterestValues]);
+        }
+
+        // Insert notification preferences
+        const notificationValues = [];
+        for (const type in notification_prefs) {
+            for (const channel in notification_prefs[type]) {
+                const value = notification_prefs[type][channel];
+                if (value) { // Only insert if there's a value
+                    notificationValues.push([customerId, type, channel, value]);
+                }
+            }
+        }
+        if (notificationValues.length > 0) {
+            await conn.query('INSERT INTO customer_notification_settings (customer_id, notification_type, channel, value) VALUES ?', [notificationValues]);
+        }
+
 
         const fullAddress = [bill_address_1, bill_address_2, bill_city, bill_zip_code].filter(Boolean).join(', ');
 
@@ -250,16 +334,11 @@ router.post('/', uploadCustomer.array('attachments'), async (req, res) => {
         );
 
         await conn.commit();
-        res.json({
-            success: true,
-            message: 'Customer created successfully',
-            id: customerId, // Send back numeric ID
-            uniqid
-        });
+        return res.json({ ok: true, customerId, uniqid, shipping_inserted: rawShippingAddresses.length });
     } catch (err) {
         await conn.rollback();
-        console.error('Create customer failed:', err);
-        res.status(500).json(errPayload('Customer create failed', 'DB_ERROR', err.message));
+        console.error('[CREATE][ERROR]', err);
+        return res.status(400).json({ ok: false, error: String(err) });
     } finally {
         conn.release();
     }
@@ -338,11 +417,6 @@ router.get('/:uniqid/full', async (req, res) => {
         pt.terms AS payment_terms,
         tax_treatment.name AS tax_name,
         CONCAT_WS(', ', va.bill_address_1, va.bill_address_2, va.bill_city, va.bill_zip_code) AS billing_address,
-        CONCAT_WS(', ', va.ship_address_1, va.ship_address_2, va.ship_city, va.ship_zip_code) AS shipping_address,
-        bill_state.name AS bill_state_name,
-        bill_country.name AS bill_country_name,
-        ship_state.name AS ship_state_name,
-        ship_country.name AS ship_country_name,
         vo.tax_treatment_id,
         vo.tax_registration_number,
         vo.source_supply_id,
@@ -357,14 +431,6 @@ router.get('/:uniqid/full', async (req, res) => {
         va.bill_zip_code,
         va.bill_phone,
         va.bill_fax,
-        va.ship_attention,
-        va.ship_country_id,
-        va.ship_address_1,
-        va.ship_address_2,
-        va.ship_city,
-        va.ship_state_id,
-        va.ship_zip_code,
-        va.ship_phone,
         cdd.latitude AS ship_latitude,
         cdd.longitude AS ship_longitude,
         cdd.delivery_window,
@@ -377,12 +443,33 @@ router.get('/:uniqid/full', async (req, res) => {
         cdd.place_name AS ship_place_name,
         cdd.formatted_address AS ship_formatted_address,
         cdd.place_id AS ship_place_id,
-        va.ship_fax,
+        vo.business_type_other,
+        vo.outlets_count,
+        vo.avg_weekly_purchase,
+        vo.has_cold_storage,
+        (SELECT GROUP_CONCAT(business_type_id) FROM customer_business_types WHERE customer_id = v.id) as business_types,
+        (SELECT GROUP_CONCAT(product_interest_id) FROM customer_product_interests WHERE customer_id = v.id) as product_interests,
+        bill_state.name AS bill_state_name,
+        bill_country.name AS bill_country_name,
+        -- Removed single shipping address fields, they will be fetched separately
         (
           SELECT COUNT(*)
           FROM vendor_attachment
           WHERE vendor_id = v.id AND expiry_date < CURDATE()
-        ) AS expired_attachments_count
+        ) AS expired_attachments_count,
+        (
+          SELECT JSON_OBJECT(
+            'id', r.id, 
+            'credit_limit', r.credit_limit, 
+            'credit_terms', r.credit_terms, 
+            'status_id', r.status_id,
+            'requested_at', r.requested_at
+          ) 
+          FROM customer_credit_limit_requests r 
+          WHERE r.customer_id = v.id AND r.status_id IN (1, 2, 3, 8) -- 1:Approved, 2:Rejected, 3:Draft, 8:Pending
+          ORDER BY r.id DESC 
+          LIMIT 1
+        ) as pending_credit_request
       FROM vendor v
       LEFT JOIN vendor_other vo ON v.id = vo.vendor_id
       LEFT JOIN vendor_address va ON v.id = va.vendor_id
@@ -392,8 +479,6 @@ router.get('/:uniqid/full', async (req, res) => {
       LEFT JOIN tax_treatment ON tax_treatment.id = vo.tax_treatment_id
       LEFT JOIN state AS bill_state ON bill_state.id = va.bill_state_id
       LEFT JOIN country AS bill_country ON bill_country.id = va.bill_country_id
-      LEFT JOIN state AS ship_state ON ship_state.id = va.ship_state_id
-      LEFT JOIN country AS ship_country ON ship_country.id = va.ship_country_id
       WHERE v.uniqid = ? AND v.company_type_id = ?
       `,
             [uniqid, COMPANY_TYPE_CUSTOMER]
@@ -402,13 +487,46 @@ router.get('/:uniqid/full', async (req, res) => {
         if (!rows.length) return res.status(404).json(errPayload('Customer not found', 'NOT_FOUND'));
 
         const customerData = rows[0];
+        const id = customerData.id;
+
+        // Fetch notification settings separately
+        const [notificationRows] = await db.promise().query('SELECT notification_type, channel, value FROM customer_notification_settings WHERE customer_id = ?', [id]);
+        const notification_prefs = {};
+        notificationRows.forEach(row => {
+            if (!notification_prefs[row.notification_type]) {
+                notification_prefs[row.notification_type] = {};
+            }
+            notification_prefs[row.notification_type][row.channel] = row.value;
+        });
+
         // Convert the comma-separated string from DB back to an array for the frontend
         const customer = {
             ...customerData,
-            customer_of: (customerData.customer_of || '').split(',').map(s => s.trim()).filter(Boolean)
+            customer_of: (customerData.customer_of || '').split(',').map(s => s.trim()).filter(Boolean),
+            // Safely parse comma-separated strings from GROUP_CONCAT
+            business_types: (customerData.business_types || '').split(',').filter(id => id).map(Number),
+            product_interests: (customerData.product_interests || '').split(',').filter(id => id).map(Number),
+            has_cold_storage: String(customerData.has_cold_storage ?? '0'),
+            outlets_count: customerData.outlets_count ?? '',
+            avg_weekly_purchase: customerData.avg_weekly_purchase ?? '',
+            notification_prefs: notification_prefs,
+            pending_credit_request: customerData.pending_credit_request ? JSON.parse(customerData.pending_credit_request) : null,
         };
 
-        const id = customer.id;
+        const [shipping_addresses] = await db.promise().query(
+            `SELECT 
+                csa.*,
+                s.name as ship_state_name,
+                c.name as ship_country_name
+             FROM vendor_shipping_addresses csa
+             LEFT JOIN state s ON s.id = csa.ship_state_id 
+             LEFT JOIN country c ON c.id = csa.ship_country_id 
+             WHERE csa.vendor_id = ? 
+             ORDER BY csa.is_primary DESC, csa.id ASC`,
+            [id]
+        );
+
+        customer.shipping_addresses = shipping_addresses || [];
 
         const [contacts] = await db.promise().query(
             `
@@ -421,7 +539,7 @@ router.get('/:uniqid/full', async (req, res) => {
             [id]
         );
         const [attachments] = await db.promise().query(
-            `SELECT * FROM vendor_attachment WHERE vendor_id = ?`,
+            `SELECT va.*, dt.name as document_type_name FROM vendor_attachment va LEFT JOIN kyc_documents dt ON va.document_type_id = dt.id WHERE va.vendor_id = ? ORDER BY va.id DESC`,
             [id]
         );
         const [transactions] = await db.promise().query(
@@ -497,12 +615,9 @@ router.put('/:id', uploadCustomer.array('attachments'), async (req, res) => {
 
     const {
         company_name, display_name, email_address, phone_work, phone_mobile, remarks, website,
-        tax_treatment_id, tax_registration_number, source_supply_id,
-        currency_id, payment_terms_id,
-        bill_attention, bill_country_id, bill_address_1, bill_address_2,
-        bill_city, bill_state_id, bill_zip_code, bill_phone, bill_fax,
-        ship_attention, ship_country_id, ship_address_1, ship_address_2,
-        ship_city, ship_state_id, ship_zip_code, ship_phone, ship_fax, customer_of,
+        tax_treatment_id, tax_registration_number, source_supply_id, currency_id, payment_terms_id,
+        business_type_other, outlets_count, avg_weekly_purchase, has_cold_storage,
+        bill_attention, bill_country_id, bill_address_1, bill_address_2, bill_city, bill_state_id, bill_zip_code, bill_phone, bill_fax, customer_of,
         customer_type // may be updated
     } = req.body;
 
@@ -510,6 +625,17 @@ router.put('/:id', uploadCustomer.array('attachments'), async (req, res) => {
     const conn = await db.promise().getConnection();
 
     try {
+        console.log('[UPDATE] PUT /api/customers/:id initiated for customerId:', customerId);
+        await conn.beginTransaction();
+
+        console.log('[UPDATE] body keys:', Object.keys(req.body));
+        console.log('[UPDATE] shipping_addresses raw:', req.body.shipping_addresses);
+        
+        // Safely parse arrays of IDs from the form
+        const business_types_ids = mustArray(req.body.business_types);
+        const product_interests_ids = mustArray(req.body.product_interests);
+        const notification_prefs = mustArray(req.body.notification_prefs)[0] || {};
+
         let safeCustomerOf = (Array.isArray(req.body.customer_of) ? req.body.customer_of.join(',') : String(req.body.customer_of || ''))
             .split(',').map(s => s.trim()).filter(Boolean).join(',');
 
@@ -523,9 +649,6 @@ router.put('/:id', uploadCustomer.array('attachments'), async (req, res) => {
 
         const tagsRaw = req.body.tags;
         const safeTags = typeof tagsRaw === 'string' ? tagsRaw : JSON.stringify(tagsRaw || []);
-
-
-        await conn.beginTransaction();
 
         // --- History Logging: Fetch old state before update ---
         const [oldVendorRows] = await conn.query(`
@@ -589,30 +712,98 @@ router.put('/:id', uploadCustomer.array('attachments'), async (req, res) => {
             [company_name, display_name, email_address, phone_work, phone_mobile, safeTags, remarks, website, userId, asIntCustomerType(customer_type), safeCustomerOf, customerId, COMPANY_TYPE_CUSTOMER,]
         );
 
-        await conn.query(`DELETE FROM vendor_other WHERE vendor_id = ?`, [customerId]);
         await conn.query(
-            `INSERT INTO vendor_other
-         (vendor_id, tax_treatment_id, tax_registration_number, source_supply_id, currency_id, payment_terms_id)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-            [customerId, tax_treatment_id, tax_registration_number, source_supply_id, currency_id, payment_terms_id]
+            `INSERT INTO vendor_other (vendor_id, tax_treatment_id, tax_registration_number, source_supply_id, currency_id, payment_terms_id, business_type_other, outlets_count, avg_weekly_purchase, has_cold_storage)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE
+                tax_treatment_id = VALUES(tax_treatment_id),
+                tax_registration_number = VALUES(tax_registration_number),
+                source_supply_id = VALUES(source_supply_id),
+                currency_id = VALUES(currency_id),
+                payment_terms_id = VALUES(payment_terms_id),
+                business_type_other = VALUES(business_type_other),
+                outlets_count = VALUES(outlets_count),
+                avg_weekly_purchase = VALUES(avg_weekly_purchase),
+                has_cold_storage = VALUES(has_cold_storage)`,
+            [customerId, tax_treatment_id, tax_registration_number, source_supply_id, currency_id, payment_terms_id, business_type_other, outlets_count, avg_weekly_purchase, has_cold_storage]
         );
 
-        await conn.query(`DELETE FROM vendor_address WHERE vendor_id = ?`, [customerId]);
+        // Use UPDATE instead of DELETE/INSERT to avoid accidentally deleting other address types.
         await conn.query(
-            `INSERT INTO vendor_address (
-        vendor_id, bill_attention, bill_country_id, bill_address_1, bill_address_2,
-        bill_city, bill_state_id, bill_zip_code, bill_phone, bill_fax,
-        ship_attention, ship_country_id, ship_address_1, ship_address_2,
-        ship_city, ship_state_id, ship_zip_code, ship_phone, ship_fax
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            `UPDATE vendor_address SET
+                bill_attention = ?, bill_country_id = ?, bill_address_1 = ?, bill_address_2 = ?,
+                bill_city = ?, bill_state_id = ?, bill_zip_code = ?, bill_phone = ?, bill_fax = ?
+             WHERE vendor_id = ?`,
             [
-                customerId,
                 bill_attention, bill_country_id, bill_address_1, bill_address_2,
-                bill_city, bill_state_id, bill_zip_code, bill_phone, bill_fax,
-                ship_attention, ship_country_id, ship_address_1, ship_address_2,
-                ship_city, ship_state_id, ship_zip_code, ship_phone, ship_fax
+                bill_city, bill_state_id, bill_zip_code, bill_phone, bill_fax, customerId
             ]
         );
+
+        // Atomically update shipping addresses: delete all for the customer, then insert the new set.
+        // The `mustArray` helper correctly parses the JSON string from the form data.
+        const rawShippingAddresses = mustArray(req.body.shipping_addresses);
+
+        console.log('[UPDATE] rawShippingAddresses (from mustArray):', rawShippingAddresses.length, rawShippingAddresses);
+        console.log('[UPDATE] Number of shipping addresses to process:', rawShippingAddresses.length);
+
+        await conn.query(`DELETE FROM vendor_shipping_addresses WHERE vendor_id=?`, [customerId]);
+        console.log(`[UPDATE] Deleted existing shipping addresses for customerId: ${customerId}`);
+
+        if (rawShippingAddresses.length > 0) {
+            for (const rawAddr of rawShippingAddresses) {
+                const addr = normalizeShipAddr(rawAddr);
+                await conn.query(
+                    `INSERT INTO vendor_shipping_addresses
+                     (vendor_id, ship_attention, ship_address_1, ship_address_2, ship_city,
+                      ship_state_id, ship_zip_code, ship_country_id, ship_phone, ship_fax, is_primary)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+                    [
+                        customerId,
+                        addr.ship_attention || null,
+                        addr.ship_address_1 || null,
+                        addr.ship_address_2 || null,
+                        addr.ship_city || null,
+                        addr.ship_state_id,
+                        addr.ship_zip_code || null,
+                        addr.ship_country_id,
+                        addr.ship_phone || null,
+                        addr.ship_fax || null,
+                        addr.is_primary,
+                    ]
+                );
+                console.log(`[UPDATE] Inserted shipping address for customerId ${customerId}: ${addr.ship_attention || 'N/A'}`);
+            }
+        }
+
+
+        // Update linking tables: delete old and insert new
+        await conn.query('DELETE FROM customer_business_types WHERE customer_id = ?', [customerId]);
+        if (Array.isArray(business_types_ids) && business_types_ids.length > 0) {
+            const businessTypeValues = business_types_ids.map(id => [customerId, id]);
+            await conn.query('INSERT INTO customer_business_types (customer_id, business_type_id) VALUES ?', [businessTypeValues]);
+        }
+
+        await conn.query('DELETE FROM customer_product_interests WHERE customer_id = ?', [customerId]);
+        if (Array.isArray(product_interests_ids) && product_interests_ids.length > 0) {
+            const productInterestValues = product_interests_ids.map(id => [customerId, id]);
+            await conn.query('INSERT INTO customer_product_interests (customer_id, product_interest_id) VALUES ?', [productInterestValues]);
+        }
+
+        // Update notification preferences: delete old and insert new
+        await conn.query('DELETE FROM customer_notification_settings WHERE customer_id = ?', [customerId]);
+        const notificationValues = [];
+        for (const type in notification_prefs) {
+            for (const channel in notification_prefs[type]) {
+                const value = notification_prefs[type][channel];
+                if (value) { // Only insert if there's a value
+                    notificationValues.push([customerId, type, channel, value]);
+                }
+            }
+        }
+        if (notificationValues.length > 0) {
+            await conn.query('INSERT INTO customer_notification_settings (customer_id, notification_type, channel, value) VALUES ?', [notificationValues]);
+        }
 
         const fullAddress = [bill_address_1, bill_address_2, bill_city, bill_zip_code].filter(Boolean).join(', ');
 
@@ -661,11 +852,11 @@ router.put('/:id', uploadCustomer.array('attachments'), async (req, res) => {
         }
 
         await conn.commit();
-        res.json({ success: true, message: 'Customer updated successfully' });
+        return res.json({ ok: true, customerId, shipping_inserted: rawShippingAddresses.length });
     } catch (err) {
         await conn.rollback();
-        console.error('Update customer failed:', err);
-        res.status(500).json(errPayload('Update failed', 'DB_ERROR', err.message));
+        console.error('[UPDATE][ERROR]', err);
+        return res.status(400).json({ ok: false, error: String(err) });
     } finally {
         conn.release();
     }
@@ -719,45 +910,78 @@ router.post('/attachment/:id/update', uploadCustomer.single('file'), async (req,
    POST /api/customers/:id/update-address
 ================================ */
 router.post('/:id/update-address', async (req, res) => {
-    const { id: customerId } = req.params;
-    const { billing, shipping } = req.body;
+    const customerId = req.params.id;
+    const payload = req.body;
+    const conn = await db.promise().getConnection();
 
     try {
-        const [rows] = await db.promise().query(`SELECT id FROM vendor_address WHERE vendor_id = ?`, [customerId]);
-        if (rows.length === 0) return res.status(404).json(errPayload('Address not found for customer', 'NOT_FOUND'));
+        await conn.beginTransaction();
 
-        const addressId = rows[0].id;
-
-        if (billing) {
+        if (payload.billing) { // Check if the 'billing' object exists in the payload
+            const billingData = payload.billing;
             await db.promise().query(
                 `UPDATE vendor_address SET
            bill_attention = ?, bill_country_id = ?, bill_address_1 = ?, bill_address_2 = ?, bill_city = ?, bill_state_id = ?, bill_zip_code = ?, bill_phone = ?, bill_fax = ?
-         WHERE id = ?`,
+         WHERE vendor_id = ?`,
                 [
-                    billing.attention, billing.country, billing.address, billing.street2,
-                    billing.city, billing.state, billing.zip, billing.phone, billing.fax,
-                    addressId
+                    billingData.attention, billingData.country, billingData.address, billingData.street2,
+                    billingData.city, billingData.state, billingData.zip, billingData.phone, billingData.fax,
+                    customerId
                 ]
             );
-        }
+        } else if (payload.shipping) { // Check if the 'shipping' object exists
+            const shippingData = payload.shipping;
+            const addr = normalizeShipAddr(shippingData); // Normalize the nested object
 
-        if (shipping) {
-            await db.promise().query(
-                `UPDATE vendor_address SET
-           ship_attention = ?, ship_country_id = ?, ship_address_1 = ?, ship_address_2 = ?, ship_city = ?, ship_state_id = ?, ship_zip_code = ?, ship_phone = ?, ship_fax = ?
-         WHERE id = ?`,
-                [
-                    shipping.attention, shipping.country, shipping.address, shipping.street2,
-                    shipping.city, shipping.state, shipping.zip, shipping.phone, shipping.fax,
-                    addressId
-                ]
-            );
+            if (shippingData.id) { // Check for ID on the nested object
+                await conn.query(
+                    `UPDATE vendor_shipping_addresses 
+                     SET ship_attention=?, ship_address_1=?, ship_address_2=?, ship_city=?, 
+                         ship_state_id=?, ship_zip_code=?, ship_country_id=?, ship_phone=?, ship_fax=? 
+                     WHERE id=? AND vendor_id=?`,
+                    [
+                        addr.ship_attention || null,
+                        addr.ship_address_1 || null,
+                        addr.ship_address_2 || null,
+                        addr.ship_city || null,
+                        addr.ship_state_id,
+                        addr.ship_zip_code || null,
+                        addr.ship_country_id,
+                        addr.ship_phone || null,
+                        addr.ship_fax || null,
+                        shippingData.id, // Use the ID from the shipping payload
+                        customerId,
+                    ]
+                );
+            } else {
+                await conn.query(
+                    `INSERT INTO vendor_shipping_addresses 
+                     (vendor_id, ship_attention, ship_address_1, ship_address_2, ship_city, 
+                      ship_state_id, ship_zip_code, ship_country_id, ship_phone, ship_fax, is_primary)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    [
+                        customerId, // This is the vendor ID from the URL parameter
+                        addr.ship_attention || null,
+                        addr.ship_address_1 || null,
+                        addr.ship_address_2 || null,
+                        addr.ship_city || null,
+                        addr.ship_state_id,
+                        addr.ship_zip_code || null,
+                        addr.ship_country_id,
+                        addr.ship_phone || null,
+                        addr.ship_fax || null,
+                        addr.is_primary,
+                    ]
+                );
+            }
         }
-
+        await conn.commit();
         res.json({ success: true });
     } catch (err) {
         console.error('update-address:', err);
         res.status(500).json(errPayload('Failed to update address', 'DB_ERROR', err.message));
+    } finally {
+        if (conn) conn.release();
     }
 });
 
@@ -853,7 +1077,402 @@ router.put('/contacts/:id', async (req, res) => {
     }
 });
 
+/* ================================
+   GET /api/customers/:id/credit-application
+================================ */
+router.get('/:id/credit-application', async (req, res) => {
+    const { id: customerId } = req.params;
+    try {
+        const [rows] = await db.promise().query(
+            'SELECT * FROM customer_credit_applications WHERE customer_id = ?',
+            [customerId]
+        );
+        if (rows.length === 0) {
+            return res.status(404).json(errPayload('Credit application not found for this customer.', 'NOT_FOUND'));
+        }
+        res.json(rows[0]);
+    } catch (err) {
+        console.error('get credit-application:', err);
+        res.status(500).json(errPayload('Failed to load credit application', 'DB_ERROR', err.message));
+    }
+});
+
+/* ================================
+   POST /api/customers/:id/credit-application
+================================ */
+router.post('/:id/credit-application', async (req, res) => {
+    const { id: customerId } = req.params;
+    const {
+        business_name, legal_entity_type, license_issuing_authority, trade_license_no,
+        license_expiry_date, vat_registration_no, business_address, city, emirates,
+        phone_no, fax_no, email, website
+    } = req.body;
+
+    // If legal_entity_type is an array from checkboxes, join it into a string.
+    const legalEntityTypeDb = Array.isArray(legal_entity_type) ? legal_entity_type.join(',') : legal_entity_type;
+
+    try {
+        const fields = {
+            customer_id: customerId,
+            business_name,
+            legal_entity_type: legalEntityTypeDb,
+            license_issuing_authority,
+            trade_license_no,
+            license_expiry_date: license_expiry_date || null,
+            vat_registration_no,
+            business_address,
+            city,
+            emirates,
+            phone_no,
+            fax_no,
+            email,
+            website
+        };
+
+        await db.promise().query(
+            'INSERT INTO customer_credit_applications SET ? ON DUPLICATE KEY UPDATE ?',
+            [fields, fields]
+        );
+
+        res.json({ success: true, message: 'Credit application saved successfully.' });
+    } catch (err) {
+        console.error('save credit-application:', err);
+        res.status(500).json(errPayload('Failed to save credit application', 'DB_ERROR', err.message));
+    }
+});
+
+/* ================================
+   POST /api/customers/:id/credit-limit/draft
+   (Save a draft without submitting for approval)
+================================ */
+router.post('/:id/credit-limit/draft', uploadCustomer.array('attachments'), async (req, res) => {
+    const { id: customerId } = req.params;
+    const userId = req.session?.user?.id;
+    const { credit_limit, credit_terms, remarks, reason } = req.body;
+    const files = req.files || [];
+    const deletedAttachmentIds = mustArray(req.body.deletedAttachmentIds);
+
+    const conn = await db.promise().getConnection();
+    try {
+        await conn.beginTransaction();
+
+        // Check for an existing draft
+        const [[existingDraft]] = await conn.query(
+            `SELECT id FROM customer_credit_limit_requests WHERE customer_id = ? ORDER BY id DESC LIMIT 1`, 
+            [customerId]
+        );
+
+        let requestId;
+        if (existingDraft) {
+            requestId = existingDraft.id;
+            await conn.query(
+                `UPDATE customer_credit_limit_requests SET status_id = 3, credit_limit = ?, credit_terms = ?, remarks = ?, reason = ?, requested_by = ?, requested_at = NOW() WHERE id = ?`,
+                [credit_limit, credit_terms, remarks, reason, userId, requestId]
+            );
+        } else {
+            // Insert new draft
+            const [ins] = await conn.query(
+                `INSERT INTO customer_credit_limit_requests (customer_id, requested_by, credit_limit, credit_terms, remarks, reason, status_id, requested_at) VALUES (?, ?, ?, ?, ?, ?, 3, NOW())`,
+                [customerId, userId, credit_limit, credit_terms, remarks, reason]
+            );
+            requestId = ins.insertId;
+        }
+
+        // Delete marked attachments
+        if (deletedAttachmentIds.length > 0) {
+            await conn.query(`DELETE FROM vendor_attachment WHERE id IN (?) AND credit_request_id = ?`, [deletedAttachmentIds, requestId]);
+        }
+
+        // Insert attachments for the draft
+        if (files.length > 0) {
+            const attachmentValues = files.map(f => [
+                customerId, // vendor_id
+                (f.path || '').replace(/\\/g, '/'),
+                f.originalname,
+                'CREDIT_LIMIT', // category
+                requestId // credit_request_id
+            ]);
+            await conn.query(
+                'INSERT INTO vendor_attachment (vendor_id, attachment_path, attachment_name, category, credit_request_id) VALUES ?',
+                [attachmentValues]
+            );
+        }
+
+        await conn.commit();
+        res.json({ success: true, message: 'Draft saved successfully.' });
+    } catch (err) {
+        await conn.rollback();
+        console.error('save credit-limit draft:', err);
+        res.status(500).json(errPayload('Failed to save draft', 'DB_ERROR', err.message));
+    } finally {
+        conn.release();
+    }
+});
+
+/* ================================
+   GET /api/customers/credit-limit-requests/:requestId/attachments
+================================ */
+router.get('/credit-limit-requests/:requestId/attachments', async (req, res) => {
+    const { requestId } = req.params;
+    try {
+        const [attachments] = await db.promise().query(
+            `SELECT id, attachment_name, attachment_path FROM vendor_attachment WHERE category = 'CREDIT_LIMIT' AND credit_request_id = ?`,
+            [requestId]
+        );
+        res.json(attachments || []);
+    } catch (err) {
+        console.error('get credit-limit attachments:', err);
+        res.status(500).json(errPayload('Failed to load attachments', 'DB_ERROR', err.message));
+    }
+});
+
+/* ================================
+   DELETE /api/customers/credit-limit-requests/:requestId
+================================ */
+router.delete('/credit-limit-requests/:requestId', async (req, res) => {
+    const { requestId } = req.params;
+    const userId = req.session?.user?.id;
+
+    const conn = await db.promise().getConnection();
+    try {
+        await conn.beginTransaction();
+
+        const [[request]] = await conn.query(`SELECT * FROM customer_credit_limit_requests WHERE id = ? AND status_id = 3`, [requestId]); // Only drafts can be deleted
+        if (!request) {
+            await conn.rollback();
+            return res.status(404).json(errPayload('Draft request not found or cannot be deleted.', 'NOT_FOUND'));
+        }
+
+        // Delete the request itself
+        await conn.query(`DELETE FROM customer_credit_limit_requests WHERE id = ?`, [requestId]);
+
+        // Log history
+        await conn.query(`INSERT INTO vendor_history (vendor_id, user_id, action, details) VALUES (?, ?, 'CREDIT_LIMIT_DRAFT_DELETED', ?)`, [request.customer_id, userId, JSON.stringify({ requestId })]);
+
+        await conn.commit();
+        res.json({ success: true, message: 'Credit limit draft has been deleted.' });
+    } catch (err) {
+        await conn.rollback();
+        console.error('delete credit-limit request:', err);
+        res.status(500).json(errPayload('Failed to delete draft', 'DB_ERROR', err.message));
+    } finally {
+        conn.release();
+    }
+});
+
+/* ================================
+   POST /api/customers/:id/credit-limit
+================================ */
+router.post('/:id/credit-limit', uploadCustomer.array('attachments'), async (req, res) => {
+    const { id: customerId } = req.params;
+    const userId = req.session?.user?.id;
+    const { credit_limit, credit_terms, remarks, reason } = req.body;
+    const files = req.files || [];
+    const deletedAttachmentIds = mustArray(req.body.deletedAttachmentIds);
+
+    if (!credit_limit || !credit_terms) {
+        return res.status(400).json(errPayload('Credit Limit and Credit Terms are required.', 'VALIDATION_ERROR'));
+    }
+
+    const conn = await db.promise().getConnection();
+    try {
+        await conn.beginTransaction();
+        
+        // Check for an existing draft to submit
+        const [[existingDraft]] = await conn.query(
+            `SELECT id FROM customer_credit_limit_requests WHERE customer_id = ? ORDER BY id DESC LIMIT 1`, 
+            [customerId]
+        );
+
+        let requestId;
+        if (existingDraft) {
+            // Update the draft to pending
+            requestId = existingDraft.id;
+            await conn.query(
+                `UPDATE customer_credit_limit_requests SET status_id = 8, credit_limit = ?, credit_terms = ?, remarks = ?, reason = ?, requested_by = ?, requested_at = NOW() WHERE id = ?`, 
+                [credit_limit, credit_terms, remarks, reason, userId, requestId] // This line is correct, no change needed here.
+            );
+        } else {
+            // Insert a new pending request directly
+            const [ins] = await conn.query(
+                `INSERT INTO customer_credit_limit_requests (customer_id, requested_by, credit_limit, credit_terms, remarks, reason, status_id, requested_at) VALUES (?, ?, ?, ?, ?, ?, 8, NOW())`,
+                [customerId, userId, credit_limit, credit_terms, remarks, reason]
+            );
+            requestId = ins.insertId;
+        }
+
+        // Delete marked attachments
+        if (deletedAttachmentIds.length > 0) {
+            await conn.query(`DELETE FROM vendor_attachment WHERE id IN (?) AND credit_request_id = ?`, [deletedAttachmentIds, requestId]);
+        }
+
+        // Insert attachments
+        if (files.length > 0) {
+            const attachmentValues = files.map(f => [
+                customerId, // vendor_id
+                (f.path || '').replace(/\\/g, '/'),
+                f.originalname,
+                'CREDIT_LIMIT', // category
+                requestId // credit_request_id
+            ]);
+            await conn.query(
+                'INSERT INTO vendor_attachment (vendor_id, attachment_path, attachment_name, category, credit_request_id) VALUES ?',
+                [attachmentValues]
+            );
+        }
+
+        // Log history on the customer
+        await conn.query(
+            `INSERT INTO vendor_history (vendor_id, user_id, action, details) VALUES (?, ?, ?, ?)`,
+            [customerId, userId, 'CREDIT_LIMIT_REQUESTED', JSON.stringify({ limit: credit_limit, terms: credit_terms })]
+        );
+
+        await conn.commit();
+        res.json({ success: true, message: 'Credit limit request submitted for approval.' });
+
+    } catch (err) {
+        await conn.rollback();
+        console.error('save credit-limit request:', err);
+        // Clean up uploaded files on error
+        for (const f of files) {
+            try {
+                if (f.path) fs.unlinkSync(f.path);
+            } catch (e) {
+                console.error('Failed to clean up file:', f.path, e);
+            }
+        }
+        res.status(500).json(errPayload('Failed to save credit limit request', 'DB_ERROR', err.message));
+    } finally {
+        conn.release();
+    }
+});
+
+/* =================================================================
+   APPROVALS - These routes could be moved to a separate approvals.js file
+================================================================= */
+
+/* ================================
+   GET /api/customers/credit-limit-requests
+   (Fetches all pending requests for the approval list page)
+   Updated to support pagination, search, and status filtering.
+================================ */
+router.get('/credit-limit-requests', async (req, res) => {
+    const page = parseInt(req.query.page || 1, 10);
+    const perPage = parseInt(req.query.per_page || 10, 10);
+    const offset = (page - 1) * perPage;
+    const search = req.query.search || '';
+    const statusId = req.query.status_id || '8'; // Default to 'Pending'
+
+    const whereClauses = [`r.status_id = ?`];
+    const params = [statusId];
+
+    if (search) {
+        whereClauses.push(`(v.display_name LIKE ? OR r.credit_terms LIKE ?)`);
+        params.push(like(search), like(search));
+    }
+
+    const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+
+    try {
+        const countQuery = `SELECT COUNT(*) as totalRows FROM customer_credit_limit_requests r JOIN vendor v ON r.customer_id = v.id ${whereSql}`;
+        const [countResult] = await db.promise().query(countQuery, params);
+        const totalRows = countResult[0].totalRows;
+
+        const dataQuery = `
+            SELECT
+                r.id, r.customer_id, v.display_name AS customer_name, v.uniqid as customer_uniqid,
+                r.credit_limit, r.credit_terms, r.remarks, r.reason, r.requested_at,
+                u.name AS requested_by_name,
+                s.name as status_name, s.bg_colour, s.colour,
+                (SELECT CONCAT('[', GROUP_CONCAT(JSON_OBJECT('id', va.id, 'file_name', va.attachment_name, 'file_path', va.attachment_path)), ']')
+                 FROM vendor_attachment va WHERE va.credit_request_id = r.id AND va.category = 'CREDIT_LIMIT') AS attachments
+            FROM customer_credit_limit_requests r
+            JOIN vendor v ON r.customer_id = v.id
+            LEFT JOIN user u ON r.requested_by = u.id
+            LEFT JOIN status s ON r.status_id = s.id
+            ${whereSql}
+            ORDER BY r.requested_at DESC
+            LIMIT ? OFFSET ?
+        `;
+
+        const [requests] = await db.promise().query(dataQuery, [...params, perPage, offset]);
+
+        res.json({
+            data: requests || [],
+            totalRows: totalRows
+        });
+    } catch (err) {
+        console.error('get pending credit-limit-requests:', err);
+        res.status(500).json(errPayload('Failed to load pending requests', 'DB_ERROR', err.message));
+    }
+});
+
+/* ================================
+   POST /api/customers/credit-limit-requests/:requestId/decide
+   (Approve or Reject a request)
+================================ */
+router.post('/credit-limit-requests/:requestId/decide', async (req, res) => {
+    const { requestId } = req.params;
+    const { decision, comment } = req.body; // decision: 'approve' or 'reject'
+    const approverId = req.session?.user?.id;
+
+    if (!approverId) return res.status(401).json(errPayload('Authentication required.', 'AUTH_ERROR'));
+    if (!['approve', 'reject'].includes(decision)) return res.status(400).json(errPayload('Invalid decision.', 'VALIDATION_ERROR'));
+    if (decision === 'reject' && !comment) return res.status(400).json(errPayload('A comment is required for rejection.', 'VALIDATION_ERROR'));
+
+    const conn = await db.promise().getConnection();
+    try {
+        await conn.beginTransaction();
+
+        const [[request]] = await conn.query(`SELECT * FROM customer_credit_limit_requests WHERE id = ? AND status_id = 8`, [requestId]); 
+        if (!request) {
+            await conn.rollback();
+            return res.status(404).json(errPayload('Request not found or already processed.', 'NOT_FOUND'));
+        }
+
+        const [[customer]] = await conn.query(`SELECT credit_limit, credit_terms FROM vendor WHERE id = ?`, [request.customer_id]);
+
+        if (decision === 'approve') {
+            // 1. Update the request status
+            await conn.query(`UPDATE customer_credit_limit_requests SET status_id = 1, approved_by = ?, approved_at = NOW() WHERE id = ?`, [approverId, requestId]); // This line is correct, no change needed here.
+
+            // 2. Update the customer's main record
+            await conn.query(`UPDATE vendor SET credit_limit = ?, credit_terms = ? WHERE id = ?`, [request.credit_limit, request.credit_terms, request.customer_id]);
+
+            // 3. Log the approval and the change in history
+            const historyDetails = { from: { limit: customer.credit_limit, terms: customer.credit_terms }, to: { limit: request.credit_limit, terms: request.credit_terms }, comment: comment || 'Approved' };
+            await conn.query(`INSERT INTO vendor_history (vendor_id, user_id, action, details) VALUES (?, ?, 'CREDIT_LIMIT_APPROVED', ?)`, [request.customer_id, approverId, JSON.stringify(historyDetails)]);
+        } else { // 'reject'
+            await conn.query(`UPDATE customer_credit_limit_requests SET status_id = 2, approved_by = ?, approved_at = NOW(), rejection_reason = ? WHERE id = ?`, [approverId, comment, requestId]); // This line is correct, no change needed here.
+            await conn.query(`INSERT INTO vendor_history (vendor_id, user_id, action, details) VALUES (?, ?, 'CREDIT_LIMIT_REJECTED', ?)`, [request.customer_id, approverId, JSON.stringify({ reason: comment })]);
+        }
+
+        await conn.commit();
+        res.json({ success: true, message: `Request has been ${decision}d.` });
+    } catch (err) {
+        await conn.rollback();
+        console.error('decide credit-limit-request:', err);
+        res.status(500).json(errPayload('Failed to process request', 'DB_ERROR', err.message));
+    } finally {
+        conn.release();
+    }
+});
 
 
+/* ================================
+   GET /api/customers/:id/latest-credit-request
+================================ */
+router.get('/:id/latest-credit-request', async (req, res) => {
+    const { id: customerId } = req.params;
+    try {
+        const [[request]] = await db.promise().query(
+            `SELECT * FROM customer_credit_limit_requests WHERE customer_id = ? ORDER BY id DESC LIMIT 1`,
+            [customerId]
+        );
+        res.json(request || null);
+    } catch (err) {
+        res.status(500).json(errPayload('Failed to load latest credit request', 'DB_ERROR', err.message));
+    }
+});
 
 export default router;

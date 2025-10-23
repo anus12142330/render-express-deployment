@@ -214,20 +214,16 @@ router.post('/', uploadVendor.array('attachments'), async (req, res) => {
             [vendorId, tax_treatment_id, tax_registration_number, source_supply_id, currency_id, payment_terms_id]
         );
 
+        // Insert billing address into vendor_address
         await conn.query(
-            `INSERT INTO vendor_address (
-         vendor_id, bill_attention, bill_country_id, bill_address_1, bill_address_2,
-         bill_city, bill_state_id, bill_zip_code, bill_phone, bill_fax,
-         ship_attention, ship_country_id, ship_address_1, ship_address_2,
-         ship_city, ship_state_id, ship_zip_code, ship_phone, ship_fax
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [
-                vendorId,
-                bill_attention, bill_country_id, bill_address_1, bill_address_2,
-                bill_city, bill_state_id, bill_zip_code, bill_phone, bill_fax,
-                ship_attention, ship_country_id, ship_address_1, ship_address_2,
-                ship_city, ship_state_id, ship_zip_code, ship_phone, ship_fax
-            ]
+            `INSERT INTO vendor_address (vendor_id, bill_attention, bill_country_id, bill_address_1, bill_address_2, bill_city, bill_state_id, bill_zip_code, bill_phone, bill_fax) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [vendorId, bill_attention, bill_country_id, bill_address_1, bill_address_2, bill_city, bill_state_id, bill_zip_code, bill_phone, bill_fax]
+        );
+
+        // Insert shipping address into vendor_shipping_addresses
+        await conn.query(
+            `INSERT INTO vendor_shipping_addresses (vendor_id, ship_attention, ship_country_id, ship_address_1, ship_address_2, ship_city, ship_state_id, ship_zip_code, ship_phone, ship_fax, is_primary) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+            [vendorId, ship_attention, ship_country_id, ship_address_1, ship_address_2, ship_city, ship_state_id, ship_zip_code, ship_phone, ship_fax]
         );
 
         const fullAddress = [bill_address_1, bill_address_2, bill_city, bill_zip_code].filter(Boolean).join(', ');
@@ -300,12 +296,10 @@ router.get('/:uniqid/full', async (req, res) => {
         v.*,
         currency.name AS currency_name,
         tax_treatment.name AS tax_name,
-        CONCAT_WS(', ', va.bill_address_1, va.bill_address_2, va.bill_city, va.bill_zip_code) AS billing_address,
-        CONCAT_WS(', ', va.ship_address_1, va.ship_address_2, va.ship_city, va.ship_zip_code) AS shipping_address,
-        bill_state.name AS bill_state_name,
+        CONCAT_WS(', ', va.bill_address_1, va.bill_address_2, va.bill_city, va.bill_zip_code) AS billing_address,        
+        b_state.name AS bill_state_name,
         bill_country.name AS bill_country_name,
-        ship_state.name AS ship_state_name,
-        ship_country.name AS ship_country_name,
+        -- Shipping address fields will be fetched in a separate query
         vo.tax_treatment_id,
         vo.tax_registration_number,
         vo.source_supply_id,
@@ -320,15 +314,6 @@ router.get('/:uniqid/full', async (req, res) => {
         va.bill_zip_code,
         va.bill_phone,
         va.bill_fax,
-        va.ship_attention,
-        va.ship_country_id,
-        va.ship_address_1,
-        va.ship_address_2,
-        va.ship_city,
-        va.ship_state_id,
-        va.ship_zip_code,
-        va.ship_phone,
-        va.ship_fax,
         (
           SELECT COUNT(*)
           FROM vendor_attachment
@@ -339,10 +324,8 @@ router.get('/:uniqid/full', async (req, res) => {
       LEFT JOIN vendor_address va ON v.id = va.vendor_id
       LEFT JOIN currency ON currency.id = vo.currency_id
       LEFT JOIN tax_treatment ON tax_treatment.id = vo.tax_treatment_id
-      LEFT JOIN state AS bill_state ON bill_state.id = va.bill_state_id
+      LEFT JOIN state AS b_state ON b_state.id = va.bill_state_id
       LEFT JOIN country AS bill_country ON bill_country.id = va.bill_country_id
-      LEFT JOIN state AS ship_state ON ship_state.id = va.ship_state_id
-      LEFT JOIN country AS ship_country ON ship_country.id = va.ship_country_id
       WHERE v.uniqid = ? AND v.company_type_id = ? AND v.is_deleted = 0
       `,
             [uniqid, COMPANY_TYPE_VENDOR]
@@ -350,10 +333,27 @@ router.get('/:uniqid/full', async (req, res) => {
 
         if (!rows.length) return res.status(404).json(errPayload('Vendor not found', 'NOT_FOUND'));
 
-        const vendorData = rows[0];
+        let vendorData = rows[0];
+        const vendorId = vendorData.id;
+
+        // Fetch shipping addresses from the new table
+        const [shipping_addresses] = await db.promise().query(
+            `SELECT 
+                vsa.*,
+                s.name as ship_state_name,
+                c.name as ship_country_name
+             FROM vendor_shipping_addresses vsa
+             LEFT JOIN state s ON s.id = vsa.ship_state_id 
+             LEFT JOIN country c ON c.id = vsa.ship_country_id 
+             WHERE vsa.vendor_id = ? 
+             ORDER BY vsa.is_primary DESC, vsa.id ASC`,
+            [vendorId]
+        );
+
         // Convert the comma-separated string from DB back to an array for the frontend
         const vendor = {
             ...vendorData,
+            shipping_addresses: shipping_addresses || [],
             customer_of: (vendorData.customer_of || '').split(',').map(s => s.trim()).filter(Boolean),
             tags: (() => { try { return JSON.parse(vendorData.tags); } catch { return []; } })()
         };
@@ -370,7 +370,7 @@ router.get('/:uniqid/full', async (req, res) => {
         vendor.in_use = in_use;
 
 
-        const id = vendor.id;
+        const id = vendorId;
 
         const [contacts] = await db.promise().query(
             `
@@ -557,7 +557,7 @@ router.put('/:id', uploadVendor.array('attachments'), async (req, res) => {
                         from = oldObj[nameKey] || oldValueId;
                         // For the 'to' value, we need to fetch it based on the new ID
                         const lookupTable = { tax_treatment_id: 'tax_treatment', source_supply_id: 'source_supply', currency_id: 'currency', payment_terms_id: 'payment_terms' }[key];
-                        const lookupField = { tax_treatment_id: 'name', source_supply_id: 'source', currency_id: 'name', payment_terms_id: 'name' }[key];
+                        const lookupField = { tax_treatment_id: 'name', source_supply_id: 'source', currency_id: 'name', payment_terms_id: 'terms' }[key];
                         if (lookupTable && newValueId) {
                             const [toRows] = await conn.query(`SELECT ${lookupField} as name FROM ${lookupTable} WHERE id = ?`, [newValueId]);
                             to = toRows[0]?.name || newValueId;
@@ -606,22 +606,57 @@ router.put('/:id', uploadVendor.array('attachments'), async (req, res) => {
             [vendorId, tax_treatment_id, tax_registration_number, source_supply_id, currency_id, payment_terms_id]
         );
 
-        await conn.query(`DELETE FROM vendor_address WHERE vendor_id = ?`, [vendorId]);
-        await conn.query(
-            `INSERT INTO vendor_address (
-        vendor_id, bill_attention, bill_country_id, bill_address_1, bill_address_2,
-        bill_city, bill_state_id, bill_zip_code, bill_phone, bill_fax,
-        ship_attention, ship_country_id, ship_address_1, ship_address_2,
-        ship_city, ship_state_id, ship_zip_code, ship_phone, ship_fax
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [
-                vendorId,
-                bill_attention, bill_country_id, bill_address_1, bill_address_2,
-                bill_city, bill_state_id, bill_zip_code, bill_phone, bill_fax,
-                ship_attention, ship_country_id, ship_address_1, ship_address_2,
-                ship_city, ship_state_id, ship_zip_code, ship_phone, ship_fax
-            ]
+        // Explicitly check for and update/insert the billing address
+        const [[existingBillAddr]] = await conn.query(
+            `SELECT id FROM vendor_address WHERE vendor_id = ? LIMIT 1`,
+            [vendorId]
         );
+
+        const billAddrPayload = [
+            bill_attention, bill_country_id, bill_address_1, bill_address_2,
+            bill_city, bill_state_id, bill_zip_code, bill_phone, bill_fax,
+            vendorId
+        ];
+
+        if (existingBillAddr) {
+            // UPDATE the existing billing address
+            await conn.query(
+                `UPDATE vendor_address SET bill_attention=?, bill_country_id=?, bill_address_1=?, bill_address_2=?, bill_city=?, bill_state_id=?, bill_zip_code=?, bill_phone=?, bill_fax=? WHERE vendor_id=?`,
+                billAddrPayload
+            );
+        } else {
+            // INSERT a new billing address
+            await conn.query(
+                `INSERT INTO vendor_address (bill_attention, bill_country_id, bill_address_1, bill_address_2, bill_city, bill_state_id, bill_zip_code, bill_phone, bill_fax, vendor_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                billAddrPayload
+            );
+        }
+
+        // Explicitly check for and update/insert the primary shipping address
+        const [[existingShipAddr]] = await conn.query(
+            `SELECT id FROM vendor_shipping_addresses WHERE vendor_id = ? AND is_primary = 1 LIMIT 1`,
+            [vendorId]
+        );
+
+        const shipAddrPayload = [
+            ship_attention, ship_country_id, ship_address_1, ship_address_2,
+            ship_city, ship_state_id, ship_zip_code, ship_phone, ship_fax,
+            vendorId
+        ];
+
+        if (existingShipAddr) {
+            // UPDATE the existing primary shipping address
+            await conn.query(
+                `UPDATE vendor_shipping_addresses SET ship_attention=?, ship_country_id=?, ship_address_1=?, ship_address_2=?, ship_city=?, ship_state_id=?, ship_zip_code=?, ship_phone=?, ship_fax=? WHERE vendor_id=? AND is_primary = 1`,
+                shipAddrPayload
+            );
+        } else {
+            // INSERT a new primary shipping address
+            await conn.query(
+                `INSERT INTO vendor_shipping_addresses (ship_attention, ship_country_id, ship_address_1, ship_address_2, ship_city, ship_state_id, ship_zip_code, ship_phone, ship_fax, vendor_id, is_primary) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+                shipAddrPayload
+            );
+        }
 
         const fullAddress = [bill_address_1, bill_address_2, bill_city, bill_zip_code].filter(Boolean).join(', ');
 
@@ -745,45 +780,67 @@ router.post('/attachment/:id/update', uploadVendor.single('file'), async (req, r
    POST /api/vendors/:id/update-address
 ================================ */
 router.post('/:id/update-address', async (req, res) => {
-    const { id: vendorId } = req.params;
+    const { id: uniqid } = req.params; // Changed to use uniqid for consistency
     const { billing, shipping } = req.body;
+    const conn = await db.promise().getConnection();
 
     try {
-        const [rows] = await db.promise().query(`SELECT id FROM vendor_address WHERE vendor_id = ?`, [vendorId]);
-        if (rows.length === 0) return res.status(404).json(errPayload('Address not found for vendor', 'NOT_FOUND'));
+        await conn.beginTransaction();
 
-        const addressId = rows[0].id;
+        const [[vendor]] = await conn.query(`SELECT id FROM vendor WHERE uniqid = ?`, [uniqid]);
+        if (!vendor) {
+            await conn.rollback();
+            return res.status(404).json(errPayload('Vendor not found', 'NOT_FOUND'));
+        }
+        const vendorId = vendor.id;
 
         if (billing) {
-            await db.promise().query(
-                `UPDATE vendor_address SET
-           bill_attention = ?, bill_country_id = ?, bill_address_1 = ?, bill_address_2 = ?, bill_city = ?, bill_state_id = ?, bill_zip_code = ?, bill_phone = ?, bill_fax = ?
-         WHERE id = ?`,
-                [
-                    billing.attention, billing.country, billing.address, billing.street2,
-                    billing.city, billing.state, billing.zip, billing.phone, billing.fax,
-                    addressId
-                ]
-            );
+            const [[addr]] = await conn.query(`SELECT id FROM vendor_address WHERE vendor_id = ?`, [vendorId]);
+            const payload = [
+                billing.attention, billing.country, billing.address, billing.street2,
+                billing.city, billing.state, billing.zip, billing.phone, billing.fax,
+                vendorId
+            ];
+            if (addr) {
+                await conn.query(
+                    `UPDATE vendor_address SET bill_attention=?, bill_country_id=?, bill_address_1=?, bill_address_2=?, bill_city=?, bill_state_id=?, bill_zip_code=?, bill_phone=?, bill_fax=? WHERE vendor_id=?`,
+                    payload
+                );
+            } else {
+                await conn.query(
+                    `INSERT INTO vendor_address (bill_attention, bill_country_id, bill_address_1, bill_address_2, bill_city, bill_state_id, bill_zip_code, bill_phone, bill_fax, vendor_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    payload
+                );
+            }
         }
 
         if (shipping) {
-            await db.promise().query(
-                `UPDATE vendor_address SET
-           ship_attention = ?, ship_country_id = ?, ship_address_1 = ?, ship_address_2 = ?, ship_city = ?, ship_state_id = ?, ship_zip_code = ?, ship_phone = ?, ship_fax = ?
-         WHERE id = ?`,
-                [
-                    shipping.attention, shipping.country, shipping.address, shipping.street2,
-                    shipping.city, shipping.state, shipping.zip, shipping.phone, shipping.fax,
-                    addressId
-                ]
-            );
+            const payload = [
+                shipping.attention, shipping.country, shipping.address, shipping.street2,
+                shipping.city, shipping.state, shipping.zip, shipping.phone, shipping.fax,
+            ];
+
+            if (shipping.id) { // Existing shipping address
+                await conn.query(
+                    `UPDATE vendor_shipping_addresses SET ship_attention=?, ship_country_id=?, ship_address_1=?, ship_address_2=?, ship_city=?, ship_state_id=?, ship_zip_code=?, ship_phone=?, ship_fax=? WHERE id=? AND vendor_id=?`,
+                    [...payload, shipping.id, vendorId]
+                );
+            } else { // New shipping address
+                await conn.query(
+                    `INSERT INTO vendor_shipping_addresses (ship_attention, ship_country_id, ship_address_1, ship_address_2, ship_city, ship_state_id, ship_zip_code, ship_phone, ship_fax, vendor_id, is_primary) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+                    [...payload, vendorId]
+                );
+            }
         }
 
-        res.json({ success: true });
+        await conn.commit();
+        res.json({ success: true, message: 'Address updated successfully' });
     } catch (err) {
+        await conn.rollback();
         console.error('update-address:', err);
         res.status(500).json(errPayload('Failed to update address', 'DB_ERROR', err.message));
+    } finally {
+        conn.release();
     }
 });
 
