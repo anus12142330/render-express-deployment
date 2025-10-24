@@ -26,7 +26,7 @@ const normalizeShipAddr = (raw = {}) => {
   };
 
   return {
-    ship_attention:     get('ship_attention', 'attention'),
+    ship_attention:     get('ship_attention', 'attention', 'address_label'),
     ship_address_1:     get('ship_address_1', 'address', 'address_1'),
     ship_address_2:     get('ship_address_2', 'street2', 'address_2'),
     ship_city:          get('ship_city', 'city'),
@@ -36,6 +36,14 @@ const normalizeShipAddr = (raw = {}) => {
     ship_phone:         get('ship_phone', 'phone'),
     ship_fax:           get('ship_fax', 'fax'),
     is_primary:         get('is_primary') ? 1 : 0,
+    // New delivery fields
+    latitude:           get('latitude'),
+    longitude:          get('longitude'),
+    place_name:         get('place_name'),
+    formatted_address:  get('formatted_address'),
+    place_id:           get('place_id'),
+    available_time_ids: Array.isArray(get('available_time_ids')) ? get('available_time_ids').join(',') : get('available_time_ids'),
+    delivery_window:    get('delivery_window'),
   };
 };
 
@@ -250,9 +258,9 @@ router.post('/', uploadCustomer.array('attachments'), async (req, res) => {
             const addr = normalizeShipAddr(rawAddr);
             await conn.query(
                 `INSERT INTO vendor_shipping_addresses
-                 (vendor_id, ship_attention, ship_address_1, ship_address_2, ship_city,
-                  ship_state_id, ship_zip_code, ship_country_id, ship_phone, ship_fax, is_primary)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+                 (vendor_id, ship_attention, ship_address_1, ship_address_2, ship_city, ship_state_id, ship_zip_code, ship_country_id, ship_phone, ship_fax, is_primary,
+                  latitude, longitude, place_name, formatted_address, place_id, available_time_ids, delivery_window)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?)`,
                 [
                     customerId, // This is the insertId from the 'vendor' table
                     addr.ship_attention || null,
@@ -265,6 +273,13 @@ router.post('/', uploadCustomer.array('attachments'), async (req, res) => {
                     addr.ship_phone || null,
                     addr.ship_fax || null,
                     addr.is_primary,
+                    addr.latitude || null,
+                    addr.longitude || null,
+                    addr.place_name || null,
+                    addr.formatted_address || null,
+                    addr.place_id || null,
+                    addr.available_time_ids || null,
+                    addr.delivery_window || null,
                 ]
             );
         }
@@ -431,18 +446,6 @@ router.get('/:uniqid/full', async (req, res) => {
         va.bill_zip_code,
         va.bill_phone,
         va.bill_fax,
-        cdd.latitude AS ship_latitude,
-        cdd.longitude AS ship_longitude,
-        cdd.delivery_window,
-        cdd.available_time_ids,
-        cdd.has_whatsapp,
-        cdd.notification_email,
-        cdd.notification_phone,
-        cdd.whatsapp_number,
-        cdd.notification_contact_id,
-        cdd.place_name AS ship_place_name,
-        cdd.formatted_address AS ship_formatted_address,
-        cdd.place_id AS ship_place_id,
         vo.business_type_other,
         vo.outlets_count,
         vo.avg_weekly_purchase,
@@ -473,7 +476,6 @@ router.get('/:uniqid/full', async (req, res) => {
       FROM vendor v
       LEFT JOIN vendor_other vo ON v.id = vo.vendor_id
       LEFT JOIN vendor_address va ON v.id = va.vendor_id
-      LEFT JOIN customer_delivery_details cdd ON v.id = cdd.customer_id AND cdd.is_primary = 1
       LEFT JOIN currency ON currency.id = vo.currency_id
       LEFT JOIN payment_terms pt ON pt.id = vo.payment_terms_id
       LEFT JOIN tax_treatment ON tax_treatment.id = vo.tax_treatment_id
@@ -561,15 +563,8 @@ router.get('/:uniqid/full', async (req, res) => {
             WHERE vh.vendor_id = ? ORDER BY vh.created_at DESC`,
             [id]
         );
-
-
-        const [deliveryDetails] = await db.promise().query(
-            `SELECT * FROM customer_delivery_details WHERE customer_id = ? ORDER BY is_primary DESC, id DESC`,
-            [id]
-        );
-
-
-        res.json({ customer, contacts, attachments, transactions: transactions || [], history: history || [], deliveryDetails: deliveryDetails || [] });
+        
+        res.json({ customer, contacts, attachments, transactions: transactions || [], history: history || [] });
     } catch (err) {
         console.error('customers/:uniqid/full:', err);
         res.status(500).json(errPayload('Failed to load customer', 'DB_ERROR', err.message));
@@ -740,39 +735,67 @@ router.put('/:id', uploadCustomer.array('attachments'), async (req, res) => {
             ]
         );
 
-        // Atomically update shipping addresses: delete all for the customer, then insert the new set.
-        // The `mustArray` helper correctly parses the JSON string from the form data.
+        // --- Smartly update shipping addresses ---
         const rawShippingAddresses = mustArray(req.body.shipping_addresses);
+        const incomingIds = rawShippingAddresses.map(addr => addr.id).filter(Boolean);
 
-        console.log('[UPDATE] rawShippingAddresses (from mustArray):', rawShippingAddresses.length, rawShippingAddresses);
-        console.log('[UPDATE] Number of shipping addresses to process:', rawShippingAddresses.length);
+        // 1. Get existing address IDs from the database for this customer
+        const [existingAddrs] = await conn.query(
+            `SELECT id FROM vendor_shipping_addresses WHERE vendor_id = ?`,
+            [customerId]
+        );
+        const existingIds = existingAddrs.map(a => a.id);
 
-        await conn.query(`DELETE FROM vendor_shipping_addresses WHERE vendor_id=?`, [customerId]);
-        console.log(`[UPDATE] Deleted existing shipping addresses for customerId: ${customerId}`);
+        // 2. Determine which addresses to delete (present in DB but not in incoming payload)
+        const idsToDelete = existingIds.filter(id => !incomingIds.includes(id));
+        if (idsToDelete.length > 0) {
+            await conn.query(
+                `DELETE FROM vendor_shipping_addresses WHERE id IN (?) AND vendor_id = ?`,
+                [idsToDelete, customerId]
+            );
+            console.log(`[UPDATE] Deleted shipping addresses with IDs: ${idsToDelete.join(', ')} for customerId: ${customerId}`);
+        }
 
-        if (rawShippingAddresses.length > 0) {
-            for (const rawAddr of rawShippingAddresses) {
-                const addr = normalizeShipAddr(rawAddr);
+        // 3. Insert or Update addresses
+        for (const rawAddr of rawShippingAddresses) {
+            const addr = normalizeShipAddr(rawAddr);
+            if (rawAddr.id && existingIds.includes(rawAddr.id)) { // This is an existing address, so UPDATE it
+                // --- PRESERVE DELIVERY DETAILS ---
+                // Fetch the existing address to preserve fields not sent by the standard edit form.
+                const [[existing]] = await conn.query(`SELECT * FROM vendor_shipping_addresses WHERE id = ?`, [rawAddr.id]);
+
+                // Merge new data over existing data.
+                const finalAddr = {
+                    ...normalizeShipAddr(existing), // Start with existing, normalized data
+                    ...addr,                        // Overwrite with incoming changes
+                };
+
                 await conn.query(
-                    `INSERT INTO vendor_shipping_addresses
-                     (vendor_id, ship_attention, ship_address_1, ship_address_2, ship_city,
-                      ship_state_id, ship_zip_code, ship_country_id, ship_phone, ship_fax, is_primary)
-                     VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+                    `UPDATE vendor_shipping_addresses SET 
+                        ship_attention=?, ship_address_1=?, ship_address_2=?, ship_city=?, ship_state_id=?, ship_zip_code=?, ship_country_id=?, ship_phone=?, ship_fax=?, is_primary=?,
+                        latitude=?, longitude=?, place_name=?, formatted_address=?, place_id=?, available_time_ids=?, delivery_window=?
+                     WHERE id=? AND vendor_id=?`,
                     [
-                        customerId,
-                        addr.ship_attention || null,
-                        addr.ship_address_1 || null,
-                        addr.ship_address_2 || null,
-                        addr.ship_city || null,
-                        addr.ship_state_id,
-                        addr.ship_zip_code || null,
-                        addr.ship_country_id,
-                        addr.ship_phone || null,
-                        addr.ship_fax || null,
-                        addr.is_primary,
+                        finalAddr.ship_attention, finalAddr.ship_address_1, finalAddr.ship_address_2, finalAddr.ship_city, finalAddr.ship_state_id, finalAddr.ship_zip_code, finalAddr.ship_country_id, finalAddr.ship_phone, finalAddr.ship_fax, finalAddr.is_primary,
+                        finalAddr.latitude, finalAddr.longitude, finalAddr.place_name, finalAddr.formatted_address, finalAddr.place_id, finalAddr.available_time_ids, finalAddr.delivery_window,
+                        rawAddr.id, customerId
                     ]
                 );
-                console.log(`[UPDATE] Inserted shipping address for customerId ${customerId}: ${addr.ship_attention || 'N/A'}`);
+                console.log(`[UPDATE] Updated shipping address ID ${rawAddr.id} for customerId ${customerId}`);
+            } else { // This is a new address, so INSERT it
+                await conn.query(
+                    `INSERT INTO vendor_shipping_addresses
+                     (vendor_id, ship_attention, ship_address_1, ship_address_2, ship_city, ship_state_id, ship_zip_code, ship_country_id, ship_phone, ship_fax, is_primary,
+                      latitude, longitude, place_name, formatted_address, place_id, available_time_ids, delivery_window)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?)`,
+                    [
+                        customerId,
+                        addr.ship_attention, addr.ship_address_1, addr.ship_address_2, addr.ship_city, addr.ship_state_id, addr.ship_zip_code, addr.ship_country_id, addr.ship_phone, addr.ship_fax, addr.is_primary,
+                        addr.latitude, addr.longitude, addr.place_name, addr.formatted_address, addr.place_id, addr.available_time_ids,
+                        addr.delivery_window || null,
+                    ]
+                );
+                console.log(`[UPDATE] Inserted new shipping address for customerId ${customerId}: ${addr.ship_attention || 'N/A'}`);
             }
         }
 
@@ -935,9 +958,9 @@ router.post('/:id/update-address', async (req, res) => {
 
             if (shippingData.id) { // Check for ID on the nested object
                 await conn.query(
-                    `UPDATE vendor_shipping_addresses 
-                     SET ship_attention=?, ship_address_1=?, ship_address_2=?, ship_city=?, 
-                         ship_state_id=?, ship_zip_code=?, ship_country_id=?, ship_phone=?, ship_fax=? 
+                    `UPDATE vendor_shipping_addresses SET 
+                        ship_attention=?, ship_address_1=?, ship_address_2=?, ship_city=?, ship_state_id=?, ship_zip_code=?, ship_country_id=?, ship_phone=?, ship_fax=?,
+                        latitude=?, longitude=?, place_name=?, formatted_address=?, place_id=?, available_time_ids=?, delivery_window=?
                      WHERE id=? AND vendor_id=?`,
                     [
                         addr.ship_attention || null,
@@ -949,16 +972,23 @@ router.post('/:id/update-address', async (req, res) => {
                         addr.ship_country_id,
                         addr.ship_phone || null,
                         addr.ship_fax || null,
+                        addr.latitude || null,
+                        addr.longitude || null,
+                        addr.place_name || null,
+                        addr.formatted_address || null,
+                        addr.place_id || null,
+                        addr.available_time_ids || null,
+                        addr.delivery_window || null,
                         shippingData.id, // Use the ID from the shipping payload
                         customerId,
                     ]
                 );
             } else {
                 await conn.query(
-                    `INSERT INTO vendor_shipping_addresses 
-                     (vendor_id, ship_attention, ship_address_1, ship_address_2, ship_city, 
-                      ship_state_id, ship_zip_code, ship_country_id, ship_phone, ship_fax, is_primary)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    `INSERT INTO vendor_shipping_addresses
+                     (vendor_id, ship_attention, ship_address_1, ship_address_2, ship_city, ship_state_id, ship_zip_code, ship_country_id, ship_phone, ship_fax, is_primary,
+                      latitude, longitude, place_name, formatted_address, place_id, available_time_ids, delivery_window)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?)`,
                     [
                         customerId, // This is the vendor ID from the URL parameter
                         addr.ship_attention || null,
@@ -971,6 +1001,13 @@ router.post('/:id/update-address', async (req, res) => {
                         addr.ship_phone || null,
                         addr.ship_fax || null,
                         addr.is_primary,
+                        addr.latitude || null,
+                        addr.longitude || null,
+                        addr.place_name || null,
+                        addr.formatted_address || null,
+                        addr.place_id || null,
+                        addr.available_time_ids || null,
+                        addr.delivery_window || null,
                     ]
                 );
             }
@@ -982,52 +1019,6 @@ router.post('/:id/update-address', async (req, res) => {
         res.status(500).json(errPayload('Failed to update address', 'DB_ERROR', err.message));
     } finally {
         if (conn) conn.release();
-    }
-});
-
-/* ================================
-   POST /api/customers/:id/update-delivery-details
-================================ */
-router.post('/:id/update-delivery-details', async (req, res) => {
-    const { id: customerId } = req.params;
-    const {
-        latitude, longitude, delivery_window, available_time_ids, notification_contact_id, has_whatsapp, whatsapp_number, notification_email, notification_phone,
-        place_name, formatted_address, place_id
-    } = req.body;
-
-    try {
-        // Check if a primary delivery detail record exists for this customer
-        const [rows] = await db.promise().query(`SELECT id FROM customer_delivery_details WHERE customer_id = ? AND is_primary = 1`, [customerId]);
-
-        const detailsPayload = {
-            customer_id: customerId,
-            latitude: latitude || null,
-            longitude: longitude || null,
-            delivery_window: delivery_window || null,
-            available_time_ids: Array.isArray(available_time_ids) ? available_time_ids.join(',') : null,
-            has_whatsapp: has_whatsapp,
-            notification_email: notification_email || null,
-            notification_phone: notification_phone || null,
-            whatsapp_number: whatsapp_number || null,
-            notification_contact_id: notification_contact_id || null,
-            place_name: place_name || null,
-            formatted_address: formatted_address || null,
-            place_id: place_id || null,
-            is_primary: 1
-        };
-
-        if (rows.length === 0) {
-            // No record exists, so INSERT a new one
-            await db.promise().query(`INSERT INTO customer_delivery_details SET ?`, detailsPayload);
-        } else {
-            // A record exists, so UPDATE it
-            await db.promise().query(`UPDATE customer_delivery_details SET ? WHERE id = ?`, [detailsPayload, rows[0].id]);
-        }
-
-        res.json({ success: true, message: 'Delivery details updated successfully.' });
-    } catch (err) {
-        console.error('update-delivery-details:', err);
-        res.status(500).json(errPayload('Failed to update delivery details', 'DB_ERROR', err.message));
     }
 });
 
