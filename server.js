@@ -35,6 +35,7 @@ import brandRoutes from './routes/brand.js';
 import manufactureRoutes from './routes/manufacture.js';
 import './cronJobs/expireCheck.js';
 import masterRoutes from "./routes/master.js";
+import salesOrderRoutes from "./routes/salesOrder.js"; // Import the new sales order router
 import harvestCalendarRoutes from "./routes/harvestCalendar.js"; // Import the new router
 import warehousesRoutes from "./routes/warehouses.js";
 import router from "./routes/customer.js"; // ✅ ES module import
@@ -179,6 +180,7 @@ app.use("/api/fleet", fleetRoutes);
 app.use("/api/driver", driverRoutes);
 app.use("/api/brand", brandRoutes);
 app.use("/api/manufacture", manufactureRoutes);
+app.use("/api/sales-orders", salesOrderRoutes); // Mount the new sales order router
 app.use("/api/master", masterRoutes);
 app.use("/api/harvest-calendar", harvestCalendarRoutes); // Mount the new router
 app.use("/api/warehouses", warehousesRoutes);

@@ -126,7 +126,20 @@ router.delete('/attachment/:id', async (req, res) => {
 });
 
 // GET all fleets
-router.get('/', async (req, res) => {
+router.get('/', async (req, res, next) => {
+
+    // Handle request for a simplified list for dropdowns
+    if (req.query.select === '1') {
+        try {
+            const data = await q(`
+                SELECT id, vehicle_name as name 
+                FROM fleets 
+                WHERE  is_active=1 AND is_deleted = 0 
+                ORDER BY vehicle_name ASC`
+            );
+            return res.json(data);
+        } catch (error) { return next(error); }
+    }
     try {
         const sql = `
             SELECT

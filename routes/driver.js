@@ -45,9 +45,25 @@ const safePath = (p) => (p ? String(p).replace(/\\/g, '/') : null);
 
 
 // GET all drivers/helpers
-router.get('/', async (req, res) => {
+router.get('/', async (req, res, next) => {
+    // Handle request for a simplified list for dropdowns
+    if (req.query.select === '1') {
+        try {
+            const { type } = req.query; // 'driver' or 'helper'
+            const whereClauses = ["is_deleted = 0"];
+            const params = [];
+
+            if (type) {
+                whereClauses.push("type = ?");
+                params.push(type);
+            }
+
+            const data = await q(`SELECT id, name FROM drivers WHERE ${whereClauses.join(' AND ')} ORDER BY name ASC`, params);
+            return res.json(data);
+        } catch (error) { return next(error); }
+    }
     try {
-        const drivers = await q('SELECT * FROM drivers WHERE is_deleted = 0');
+        const drivers = await q('SELECT * FROM driver WHERE is_deleted = 0');
         res.json(drivers);
     } catch (err) {
         res.status(500).json({ error: 'Failed to fetch drivers', details: err.message });
