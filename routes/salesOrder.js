@@ -17,20 +17,21 @@ router.get('/plannable', async (req, res, next) => {
         const orders = await q(`
             SELECT 
                 so.id,
-                so.so_number,
+                so.order_number as so_number,
                 c.id as customer_id,
                 c.display_name as customer_name,
                 csa.id as address_id,
                 csa.ship_attention as address_label,
                 csa.latitude,
                 csa.longitude,
-                csa.formatted_address
+                csa.formatted_address,
+                csa.delivery_window
             FROM sales_orders so
             JOIN vendor c ON so.customer_id = c.id
-            JOIN vendor_shipping_addresses csa ON c.id = csa.customer_id AND csa.is_primary = 1
+            JOIN vendor_shipping_addresses csa ON c.id = csa.vendor_id AND csa.is_primary = 1
             LEFT JOIN route_planner_orders rpo ON so.id = rpo.order_id
             WHERE 
-                so.status = 'confirmed' 
+                so.status_id = 7 -- '7' is the ID for 'Confirmed' status
                 AND csa.latitude IS NOT NULL 
                 AND csa.longitude IS NOT NULL
                 AND rpo.order_id IS NULL
