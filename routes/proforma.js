@@ -25,7 +25,7 @@ const storage = multer.diskStorage({
 const upload = multer({
     storage,
     limits: { fileSize: 10 * 1024 * 1024, files: 20 },
-    fileFilter: (_req, file, cb) => (/^image\/(png|jpe?g|webp)$/i.test(file.mimetype) ? cb(null, true) : cb(new Error("Only images allowed"))),
+    // fileFilter: (_req, file, cb) => (/^image\/(png|jpe?g|webp)$/i.test(file.mimetype) ? cb(null, true) : cb(new Error("Only images allowed"))),
 });
 
 /* ---------- helpers ---------- */
@@ -118,90 +118,178 @@ router.get("/next-number", async (_req, res) => {
 });
 
 /* ============================================================================
+   GET /api/proforma (list with search/pagination)
+============================================================================ */
+router.get("/", async (req, res) => {
+    const {
+        page = 1,
+        per_page = 10,
+        search = "",
+        sort_field = "pi.date_issue",
+        sort_order = "DESC",
+    } = req.query;
+
+    const p = Number(page);
+    const pp = Number(per_page);
+    const offset = (p - 1) * pp;
+
+    const whereClauses = [];
+    const params = [];
+
+    if (search) {
+        const s = `%${search}%`;
+        whereClauses.push(`(
+            pi.proforma_invoice_no LIKE ? OR
+            pi.buyer_address LIKE ? OR
+            pi.contract_reference LIKE ? OR
+            c.display_name LIKE ?
+        )`);
+        params.push(s, s, s, s);
+    }
+
+    const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
+
+    try {
+        // Query for total count
+        const countSql = `
+            SELECT COUNT(pi.id) as total
+            FROM proforma_invoice pi
+            LEFT JOIN customers c ON c.id = pi.buyer_id
+            ${whereSql}
+        `;
+        const [[{ total }]] = await db.query(countSql, params);
+
+        // Query for data
+        const dataSql = `
+            SELECT
+                pi.id,
+                pi.date_issue,
+                pi.proforma_invoice_no,
+                pi.contract_reference,
+                c.display_name as customer_name,
+                pi.status,
+                pi.grand_total as total_amount
+            FROM proforma_invoice pi
+            LEFT JOIN customers c ON c.id = pi.buyer_id
+            ${whereSql}
+            ORDER BY ${sort_field} ${sort_order}
+            LIMIT ? OFFSET ?
+        `;
+        const [rows] = await db.query(dataSql, [...params, pp, offset]);
+
+        res.json({ data: rows, totalRows: total });
+    } catch (e) {
+        res.status(500).json({ error: "Failed to fetch proforma invoices", detail: e.message });
+    }
+});
+
+/* ============================================================================
    POST /api/proforma-invoices  (JSON or multipart with images[])
 ============================================================================ */
-router.post("/proforma-invoices", upload.array("images", 20), async (req, res) => {
+router.post("/", upload.array("attachments", 20), async (req, res) => {
     try {
         const payload = req.is("multipart/form-data")
-            ? JSON.parse(req.body?.payload || "{}")
-            : req.body || {};
+            ? JSON.parse(req.body?.payload || "{}") // If multipart, payload is a stringified JSON
+            : req.body || {}; // If not multipart, payload is direct JSON body
 
         const {
-            // header
-            expo_id, exporter, e_phone, e_fax,
-            buyer_id, buyer, buyerAddress, b_phone, b_fax,
-            consignee, c_phone, c_fax,
-            port_loading, port_discharge, port_entry, country_destination,
-            piNo, dateIssue, dateExpiry,
-            contractRef, contractDate,
-            currencyId, approval = 0, user_id,
+            header = {}, // Destructure header object
             // items
+            // Note: items should be an array, ensure it's parsed correctly from payload
+            // if payload is coming from form-data and items is nested.
             items = [],
+            // texts
+            texts = {},
+            // payment
+            payment = {},
+            // bank
+            bank = {},
         } = payload;
 
-        if (!piNo) return res.status(400).json({ error: "proforma_invoice_no (piNo) is required" });
+        const {
+            expo_id, exporter, e_phone, e_fax,
+            buyer_id = null, buyer, buyer_address, b_phone, b_fax,
+            consignee_address, c_phone, c_fax,
+            port_loading, port_discharge, port_entry, country_destination,
+            proforma_invoice_no, date_issue, date_expiry, // These are required, no defaults
+            buyer_reference, contract_reference, contract_date,
+            currency_sale, approval = 0, user_id = null, // Add defaults
+            mode_of_transport, incoterms, partial_shipment, transhipment,
+        } = header; // Extract header fields from the header object
+
+        if (!proforma_invoice_no) return res.status(400).json({ error: "proforma_invoice_no is required" });
         if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: "At least one item is required" });
 
         const result = await tx(async (conn) => {
-            // header insert
-            const [hdr] = await conn.execute(
+            // Ensure the PI number is unique before inserting
+            const finalPiNo = await ensureUniqueProformaNumber(conn, proforma_invoice_no);
+
+            // Prepare header data for insertion
+            const headerData = [
                 `INSERT INTO proforma_invoice
           (expo_id, exporter, e_phone, e_fax,
-           buyer_id, buyer_address, b_phone, b_fax,
-           consignee, c_phone, c_fax,
-           port_loading, port_discharge, port_entry, country_destination,
+           buyer_id, buyer_address, b_phone, b_fax,           
+           consignee_name, consignee_address, c_phone, c_fax,
+           port_loading, port_discharge, port_entry, country_destination, mode_of_transport, incoterms, partial_shipment, transhipment,
            proforma_invoice_no, date_issue, date_expiry,
            contract_reference, contract_date,
-           currency_sale, approval, user_id)
-         VALUES (?,?,?,?, ?,?,?,?, ?,?,?, ?,?,?,?, ?,?,?, ?,?, ?,?, ?)`,
-                [
-                    v(expo_id), v(exporter), v(e_phone), v(e_fax),
-                    // prefer explicit buyer_id; fall back to buyer?.id
-                    v(buyer_id ?? buyer?.id ?? buyer?.uniqid),
-                    v(buyerAddress, ""),
-                    v(b_phone ?? buyer?.bill_phone ?? buyer?.ship_phone ?? ""),
-                    v(b_fax ?? buyer?.bill_fax ?? buyer?.ship_fax ?? ""),
-                    v(consignee ?? ""),
-                    v(c_phone ?? ""),
-                    v(c_fax ?? ""),
-                    v(port_loading), v(port_discharge), v(port_entry), v(country_destination),
-                    v(piNo),
-                    d(dateIssue),
-                    d(dateExpiry),
-                    v(contractRef),
-                    d(contractDate),
-                    v(currencyId),
-                    n(approval, 0),
-                    v(user_id),
-                ]
-            );
+           currency_sale, approval, user_id,
+           payment_terms_id, tenor, payment_description,
+           bank_id,
+           documents_provided, terms_conditions, other_terms,
+           buyer_reference)
+         VALUES (?,?,?,?, ?,?,?,?, ?,?,?, ?,?,?,?,?,?,?, ?,?,?, ?,?, ?,?,?, ?,?,?, ?,?,?, ?,?)`,
+                v(expo_id), v(exporter), v(e_phone), v(e_fax),
+                v(buyer_id ?? buyer?.id ?? buyer?.uniqid),
+                v(buyer_address, ""),
+                v(b_phone ?? buyer?.bill_phone ?? buyer?.ship_phone ?? ""),
+                v(b_fax ?? buyer?.bill_fax ?? buyer?.ship_fax ?? ""),
+                v(payload.header?.consignee_name), // Use consignee_name from payload.header
+                v(consignee_address ?? ""), // Added consignee_address from payload
+                v(c_phone ?? ""),
+                v(c_fax ?? ""),
+                v(port_loading), v(port_discharge), v(port_entry), v(country_destination), v(mode_of_transport), v(incoterms), v(partial_shipment), v(transhipment),
+                v(finalPiNo),
+                d(date_issue),
+                d(date_expiry),
+                v(contract_reference),
+                d(contract_date),
+                v(currency_sale),
+                n(approval, 0),
+                v(user_id),
+                v(payment?.payment_terms_id), v(payment?.tenor), v(payment?.description),
+                v(bank?.bank_id),
+                v(texts?.documents_provided), v(texts?.terms_conditions), v(texts?.other_terms),
+                v(buyer_reference)
+            ];
+            const [hdr] = await conn.execute(headerData[0], headerData.slice(1));
             const proformaId = hdr.insertId;
 
             // items insert (bulk)
-            const itemRows = items.map((it) => {
-                const qty = n(it.quantity, 0);
-                const price = n(it.unitPrice, 0);
-                const total = qty * price;
-                return [
-                    proformaId,
-                    v(it.productId),
-                    v(it.productName, ""),
-                    v(it.packing, ""),                 // description
-                    v(it.hsn ?? it.hscode, ""),        // hscode
-                    qty,
-                    v(it.uom ?? it.uom_id, ""),        // uom_id
-                    price,
-                    n(it.discount_percent ?? it.discountPercent, 0),
-                    total,
-                ];
-            });
+            if (items.length > 0) {
+                const itemRows = items.map((it) => [
+                        proformaId,
+                        v(it.product_id),
+                        v(it.product_id ?? it.productId),
+                        v(it.product_name, ""),
+                        v(it.description, ""),
+                        v(it.hscode, ""),
+                        n(it.quantity, 0),
+                        v(it.uom_id, ""),
+                        n(it.unit_price, 0),
+                        n(it.vat_id),
+                        n(it.vat_rate, 0),
+                        v(it.origin, ""),
+                        v(it.packing_id)
+                    ]);
 
-            await conn.query(
-                `INSERT INTO proforma_invoice_items
-           (proforma_invoice_id, product_id, product_name, description, hscode, quantity, uom_id, unit_price, discount_percent, total_price)
-         VALUES ?`,
-                [itemRows]
-            );
+                await conn.query(
+                    `INSERT INTO proforma_invoice_items
+               (proforma_invoice_id, product_id, product_name, description, hscode, quantity, uom_id, unit_price, vat_id, vat_rate, origin, packing_id)
+             VALUES ?`,
+                    [itemRows]
+                );
+            }
 
             // attachments (if any)
             if (req.files?.length) {
@@ -209,7 +297,7 @@ router.post("/proforma-invoices", upload.array("images", 20), async (req, res) =
                     proformaId,
                     f.originalname,
                     path.join("uploads", "proforma", path.basename(f.path)).replace(/\\/g, "/"),
-                    "image",
+                    f.mimetype.startsWith('image/') ? 'image' : 'document',
                     f.mimetype,
                     f.size,
                     new Date(),
@@ -225,7 +313,7 @@ router.post("/proforma-invoices", upload.array("images", 20), async (req, res) =
             return proformaId;
         });
 
-        res.json({ success: true, proforma_invoice_id: result, message: "Proforma created" });
+        res.status(201).json({ success: true, proforma_invoice_id: result, message: "Proforma created" });
     } catch (e) {
         console.error(e);
         res.status(500).json({ error: "Failed to create proforma", detail: e.message });
@@ -235,73 +323,98 @@ router.post("/proforma-invoices", upload.array("images", 20), async (req, res) =
 /* ============================================================================
    PUT /api/proforma-invoices/:id  (replace items; add attachments)
 ============================================================================ */
-router.put("/proforma-invoices/:id", upload.array("images", 20), async (req, res) => {
+router.put("/:id", upload.array("attachments", 20), async (req, res) => {
     const { id } = req.params;
     try {
         const payload = req.is("multipart/form-data")
             ? JSON.parse(req.body?.payload || "{}")
             : req.body || {};
 
+        // Standardize payload structure to match POST route
         const {
-            expo_id, exporter, e_phone, e_fax,
-            buyer_id, buyer, buyerAddress, b_phone, b_fax,
-            consignee, c_phone, c_fax,
-            port_loading, port_discharge, port_entry, country_destination,
-            piNo, dateIssue, dateExpiry,
-            contractRef, contractDate,
-            currencyId, approval, user_id,
+            header = {},
             items = [],
+            texts = {},
+            payment = {},
+            bank = {},
         } = payload;
 
+        const {
+            expo_id, exporter, e_phone, e_fax,
+            buyer_id, buyer, buyer_address, b_phone, b_fax,
+            consignee_address, c_phone, c_fax,
+            port_loading, port_discharge, port_entry, country_destination,
+            proforma_invoice_no, date_issue, date_expiry, // These are required, no defaults
+            buyer_reference, contract_reference, contract_date,
+            currency_sale, approval = 0, user_id = null, // Add defaults
+            mode_of_transport, incoterms, partial_shipment, transhipment,
+        } = header;
+
         await tx(async (conn) => {
-            await conn.execute(
+            // On update, we still want to ensure the provided number doesn't clash with another existing record.
+            const [[dupe]] = await conn.query(
+                "SELECT id FROM proforma_invoice WHERE proforma_invoice_no=? AND id != ? LIMIT 1",
+                [proforma_invoice_no, id]
+            );
+            if (dupe) throw new Error(`Proforma Invoice number ${proforma_invoice_no} is already in use by another document.`);
+
+            // Prepare header update data
+            const headerUpdateData = [
                 `UPDATE proforma_invoice SET
            expo_id=?, exporter=?, e_phone=?, e_fax=?,
            buyer_id=?, buyer_address=?, b_phone=?, b_fax=?,
-           consignee=?, c_phone=?, c_fax=?,
-           port_loading=?, port_discharge=?, port_entry=?, country_destination=?,
+           consignee_name=?, consignee_address=?, c_phone=?, c_fax=?,
+           port_loading=?, port_discharge=?, port_entry=?, country_destination=?, mode_of_transport=?, incoterms=?, partial_shipment=?, transhipment=?,
            proforma_invoice_no=?, date_issue=?, date_expiry=?,
            contract_reference=?, contract_date=?,
-           currency_sale=?, approval=?, user_id=?
+           currency_sale=?, approval=?, user_id=?,
+           payment_terms_id=?, tenor=?, payment_description=?,
+           bank_id=?,
+           documents_provided=?, terms_conditions=?, other_terms=?,
+           buyer_reference=?
          WHERE id=?`,
-                [
-                    v(expo_id), v(exporter), v(e_phone), v(e_fax),
-                    v(buyer_id ?? buyer?.id ?? buyer?.uniqid),
-                    v(buyerAddress, ""),
-                    v(b_phone ?? buyer?.bill_phone ?? buyer?.ship_phone ?? ""),
-                    v(b_fax ?? buyer?.bill_fax ?? buyer?.ship_fax ?? ""),
-                    v(consignee ?? ""), v(c_phone ?? ""), v(c_fax ?? ""),
-                    v(port_loading), v(port_discharge), v(port_entry), v(country_destination),
-                    v(piNo), d(dateIssue), d(dateExpiry),
-                    v(contractRef), d(contractDate),
-                    v(currencyId), n(approval, 0), v(user_id),
-                    id,
-                ]
-            );
+                v(expo_id), v(exporter), v(e_phone), v(e_fax),
+                v(buyer_id ?? buyer?.id ?? buyer?.uniqid),
+                v(buyer_address, ""),
+                v(b_phone ?? buyer?.bill_phone ?? buyer?.ship_phone ?? ""),
+                v(b_fax ?? buyer?.bill_fax ?? buyer?.ship_fax ?? ""),
+                v(payload.header?.consignee_name), // Correctly access consignee_name from payload.header
+                v(consignee_address ?? ""),
+                v(c_phone ?? ""), v(c_fax ?? ""),
+                v(port_loading), v(port_discharge), v(port_entry), v(country_destination), v(mode_of_transport), v(incoterms), v(partial_shipment), v(transhipment),
+                v(proforma_invoice_no), d(date_issue), d(date_expiry),
+                v(contract_reference), d(contract_date),
+                v(currency_sale), n(approval, 0), v(user_id),
+                v(payment?.payment_terms_id), v(payment?.tenor), v(payment?.description),
+                v(bank?.bank_id),
+                v(texts?.documents_provided), v(texts?.terms_conditions), v(texts?.other_terms),
+                v(buyer_reference),
+                id,
+            ];
+            await conn.execute(headerUpdateData[0], headerUpdateData.slice(1));
 
             // replace items
             await conn.execute("DELETE FROM proforma_invoice_items WHERE proforma_invoice_id=?", [id]);
 
             if (items.length) {
-                const itemRows = items.map((it) => {
-                    const qty = n(it.quantity, 0);
-                    const price = n(it.unitPrice, 0);
-                    return [
-                        id,
-                        v(it.productId),
-                        v(it.productName, ""),
-                        v(it.packing, ""),
-                        v(it.hsn ?? it.hscode, ""),
-                        qty,
-                        v(it.uom ?? it.uom_id, ""),
-                        price,
-                        n(it.discount_percent ?? it.discountPercent, 0),
-                        qty * price,
-                    ];
-                });
+                const itemRows = items.map((it) => [
+                    id,
+                    v(it.product_id),
+                    v(it.product_id ?? it.productId),
+                    v(it.product_name, ""),
+                    v(it.description, ""),
+                    v(it.hscode, ""),
+                    n(it.quantity, 0),
+                    v(it.uom_id, ""),
+                    n(it.unit_price, 0),
+                    n(it.vat_id),
+                    n(it.vat_rate, 0),
+                    v(it.origin, ""),
+                    v(it.packing_id)
+                ]);
                 await conn.query(
                     `INSERT INTO proforma_invoice_items
-             (proforma_invoice_id, product_id, product_name, description, hscode, quantity, uom_id, unit_price, discount_percent, total_price)
+             (proforma_invoice_id, product_id, product_name, description, hscode, quantity, uom_id, unit_price, vat_id, vat_rate, origin, packing_id)
            VALUES ?`,
                     [itemRows]
                 );
@@ -313,7 +426,7 @@ router.put("/proforma-invoices/:id", upload.array("images", 20), async (req, res
                     id,
                     f.originalname,
                     path.join("uploads", "proforma", path.basename(f.path)).replace(/\\/g, "/"),
-                    "image",
+                    f.mimetype.startsWith('image/') ? 'image' : 'document',
                     f.mimetype,
                     f.size,
                     new Date(),
@@ -337,10 +450,26 @@ router.put("/proforma-invoices/:id", upload.array("images", 20), async (req, res
 /* ============================================================================
    GET /api/proforma-invoices/:id
 ============================================================================ */
-router.get("/proforma-invoices/:id", async (req, res) => {
+router.get("/:id", async (req, res) => {
     const { id } = req.params;
     try {
-        const [[header]] = await db.query("SELECT * FROM proforma_invoice WHERE id=?", [id]);
+        const [[header]] = await db.query(`
+            SELECT 
+                pi.*,
+                p_load.name as port_loading_name,
+                p_discharge.name as port_discharge_name,
+                p_entry.name as port_entry_name,
+                c_dest.name as country_destination_name,
+                pt.terms as payment_terms_name
+            FROM proforma_invoice pi
+            LEFT JOIN ports p_load ON p_load.id = pi.port_loading
+            LEFT JOIN ports p_discharge ON p_discharge.id = pi.port_discharge
+            LEFT JOIN ports p_entry ON p_entry.id = pi.port_entry
+            LEFT JOIN country c_dest ON c_dest.id = pi.country_destination
+            LEFT JOIN payment_terms pt ON pt.id = pi.payment_terms_id
+            WHERE pi.id=?
+        `, [id]);
+
         if (!header) return res.status(404).json({ error: "Not found" });
 
         const [items] = await db.query(

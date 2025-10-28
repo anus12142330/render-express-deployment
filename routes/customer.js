@@ -420,10 +420,15 @@ router.post('/quick-add', async (req, res) => {
 /* ================================
    GET /api/customers/:uniqid/full
 ================================ */
-router.get('/:uniqid/full', async (req, res) => {
-    const uniqid = req.params.uniqid;
+router.get('/:identifier/full', async (req, res) => {
+    const { identifier } = req.params;
 
     try {
+        // Determine if the identifier is a numeric ID or a string uniqid
+        const isNumericId = /^\d+$/.test(identifier);
+        const column = isNumericId ? 'v.id' : 'v.uniqid';
+        const params = [identifier, COMPANY_TYPE_CUSTOMER];
+
         const [rows] = await db.promise().query(
             `
       SELECT 
@@ -431,7 +436,6 @@ router.get('/:uniqid/full', async (req, res) => {
         currency.name AS currency_name,
         pt.terms AS payment_terms,
         tax_treatment.name AS tax_name,
-        CONCAT_WS(', ', va.bill_address_1, va.bill_address_2, va.bill_city, va.bill_zip_code) AS billing_address,
         vo.tax_treatment_id,
         vo.tax_registration_number,
         vo.source_supply_id,
@@ -450,6 +454,7 @@ router.get('/:uniqid/full', async (req, res) => {
         vo.outlets_count,
         vo.avg_weekly_purchase,
         vo.has_cold_storage,
+        CONCAT_WS(', ', va.bill_address_1, va.bill_address_2, va.bill_city, va.bill_zip_code) AS billing_address,
         (SELECT GROUP_CONCAT(business_type_id) FROM customer_business_types WHERE customer_id = v.id) as business_types,
         (SELECT GROUP_CONCAT(product_interest_id) FROM customer_product_interests WHERE customer_id = v.id) as product_interests,
         bill_state.name AS bill_state_name,
@@ -481,9 +486,9 @@ router.get('/:uniqid/full', async (req, res) => {
       LEFT JOIN tax_treatment ON tax_treatment.id = vo.tax_treatment_id
       LEFT JOIN state AS bill_state ON bill_state.id = va.bill_state_id
       LEFT JOIN country AS bill_country ON bill_country.id = va.bill_country_id
-      WHERE v.uniqid = ? AND v.company_type_id = ?
+      WHERE ${column} = ? AND v.company_type_id = ?
       `,
-            [uniqid, COMPANY_TYPE_CUSTOMER]
+            params
         );
 
         if (!rows.length) return res.status(404).json(errPayload('Customer not found', 'NOT_FOUND'));
@@ -566,7 +571,7 @@ router.get('/:uniqid/full', async (req, res) => {
         
         res.json({ customer, contacts, attachments, transactions: transactions || [], history: history || [] });
     } catch (err) {
-        console.error('customers/:uniqid/full:', err);
+        console.error(`customers/:${req.params.identifier}/full:`, err);
         res.status(500).json(errPayload('Failed to load customer', 'DB_ERROR', err.message));
     }
 });

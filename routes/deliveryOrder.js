@@ -26,7 +26,7 @@ router.get('/plannable', async (req, res, next) => {
                 csa.longitude,
                 csa.formatted_address,
                 csa.delivery_window
-            FROM sales_orders so
+            FROM delivery_orders so
             JOIN vendor c ON so.customer_id = c.id
             JOIN vendor_shipping_addresses csa ON c.id = csa.vendor_id AND csa.is_primary = 1
             LEFT JOIN route_planner_orders rpo ON so.id = rpo.order_id

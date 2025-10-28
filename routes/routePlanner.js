@@ -98,7 +98,7 @@ router.get('/:uniqid', async (req, res, next) => {
                 csa.longitude,
                 csa.delivery_window
             FROM route_planner_orders rpo
-            JOIN sales_orders so ON rpo.order_id = so.id
+            JOIN delivery_orders so ON rpo.order_id = so.id
             JOIN vendor c ON so.customer_id = c.id
             JOIN vendor_shipping_addresses csa ON c.id = csa.vendor_id AND csa.is_primary = 1
             WHERE rpo.route_id = ? 
@@ -261,8 +261,8 @@ router.post('/', async (req, res, next) => {
         // --- New Delivery Number Generation Logic ---
         const firstOrderId = orders[0];
         const [[customerRow]] = await conn.query(
-            `SELECT v.customer_of 
-             FROM sales_orders so 
+            `SELECT v.customer_of
+             FROM delivery_orders so 
              JOIN vendor v ON so.customer_id = v.id 
              WHERE so.id = ?`, 
             [firstOrderId]
