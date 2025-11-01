@@ -63,7 +63,7 @@ router.get('/', async (req, res, next) => {
         } catch (error) { return next(error); }
     }
     try {
-        const drivers = await q('SELECT * FROM driver WHERE is_deleted = 0');
+        const drivers = await q('SELECT * FROM drivers WHERE is_deleted = 0');
         res.json(drivers);
     } catch (err) {
         res.status(500).json({ error: 'Failed to fetch drivers', details: err.message });

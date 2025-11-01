@@ -171,7 +171,7 @@ app.use("/api/shipment", shipmentRoutes);
 app.use("/api/document-types", documentTypeRoutes);
 app.use("/api/shipment-documents", shipmentDocumentsRoutes);
 app.use("/api/shipment-stages", shipmentStageRoutes);
-app.use("/api/proforma", proformaRoutes);
+app.use("/api/proforma-invoices", proformaRoutes);
 app.use("/api/bank", bankRoutes);
 app.use("/api/partial-shipment", partialShipmentRoutes);
 app.use("/api/container-type", containerTypeRoutes);

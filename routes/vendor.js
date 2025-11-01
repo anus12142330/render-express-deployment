@@ -730,13 +730,36 @@ router.put('/:id', uploadVendor.array('attachments'), async (req, res) => {
    DELETE /api/vendors/attachments/:id
 ================================ */
 router.delete('/attachments/:id', async (req, res) => {
-    const { id } = req.params;
+    const attachmentId = Number(req.params.id);
+    const userId = req.session?.user?.id;
+    const userName = req.session?.user?.name || 'System';
+    if (!attachmentId) return res.status(400).json(errPayload("Invalid attachment ID."));
+
+    const conn = await db.promise().getConnection();
     try {
-        await db.promise().query(`DELETE FROM vendor_attachment WHERE id = ?`, [id]);
+        await conn.beginTransaction();
+
+        // Get file details before deleting
+        const [[attachment]] = await conn.query(`SELECT id, vendor_id, attachment_name FROM vendor_attachment WHERE id = ?`, [attachmentId]);
+        if (!attachment) return res.status(404).json(errPayload("Attachment not found."));
+
+        // Delete the attachment record
+        await conn.query(`DELETE FROM vendor_attachment WHERE id = ?`, [attachmentId]);
+
+        // Add history for the deletion
+        await conn.query(
+            `INSERT INTO vendor_history (vendor_id, user_id, action, details) VALUES (?, ?, ?, ?)`,
+            [attachment.vendor_id, userId, 'FILE_DELETED', JSON.stringify({ user: userName, file_name: attachment.attachment_name })]
+        );
+
+        await conn.commit();
         res.json({ success: true, message: 'Attachment deleted' });
     } catch (err) {
+        await conn.rollback();
         console.error('delete attachment:', err);
         res.status(500).json(errPayload('Failed to delete attachment', 'DB_ERROR', err.message));
+    } finally {
+        conn.release();
     }
 });
 

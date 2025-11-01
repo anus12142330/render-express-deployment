@@ -1679,12 +1679,23 @@ router.post("/create-from-po/:uniqid", upload.single('confirmation_attachment'),
 
         // 3. Create the new entry in the 'shipment' table
         const shipUniqid = `ship_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
-        await conn.query(
+        const [shipmentResult] = await conn.query(
             `INSERT INTO shipment (ship_uniqid, po_id, vendor_id, created_by, created_date)
              VALUES (?, ?, ?, ?, NOW())`,
             [shipUniqid, po.id, po.vendor_id, userId]
         );
+        const shipmentId = shipmentResult.insertId;
 
+        // Add history for shipment creation
+        await addHistory(conn, {
+            module: 'shipment',
+            moduleId: shipmentId,
+            userId: userId,
+            action: 'CREATED',
+            details: {
+                from_po: po.po_number
+            }
+        });
         // 4. Log history for status change
         await addHistory(conn, { module: 'purchase_order', moduleId: po.id, userId, action: 'STATUS_CHANGED', details: { to_status: 'Confirmed' } });
 
@@ -1722,6 +1733,55 @@ router.delete("/attachment/:id", async (req, res) => {
     } catch (err) {
         res.status(500).json({ error: { message: "Failed to delete attachment" } });
     } finally { conn.release(); }
+});
+
+/* ------------------------- get items for a PO ------------------------- */
+router.get("/items/:poId", async (req, res) => {
+    const poId = Number(req.params.poId);
+    if (!poId) {
+        return res.status(400).json(errPayload("Invalid Purchase Order ID."));
+    }
+
+    try {
+        const [items] = await db.promise().query(
+            `SELECT
+                 i.id,
+                 i.purchase_order_id,
+                 i.item_name,
+                 i.item_id as product_id, -- Alias to product_id for consistency
+                 i.hscode,
+                 i.quantity,
+                 i.rate,
+                 i.amount,
+                 i.uom_id,
+                 um.name as uom_label,
+                 -- Fetch primary product image
+                 (SELECT pi.file_path 
+                  FROM product_images pi 
+                  WHERE pi.product_id = i.item_id 
+                  ORDER BY pi.is_primary DESC, pi.id ASC 
+                  LIMIT 1) as image_url,
+                 -- Fetch packing alias and text from the first product_details entry
+                 (SELECT pd.packing_alias 
+                  FROM product_details pd 
+                  WHERE pd.product_id = i.item_id 
+                  ORDER BY pd.id ASC 
+                  LIMIT 1) as packing_alias,
+                 (SELECT pd.packing_text 
+                  FROM product_details pd 
+                  WHERE pd.product_id = i.item_id 
+                  ORDER BY pd.id ASC 
+                  LIMIT 1) as packing_text
+             FROM purchase_order_items AS i
+             LEFT JOIN uom_master um ON um.id = i.uom_id
+             WHERE i.purchase_order_id = ?
+             ORDER BY i.id ASC`,
+            [poId]
+        );
+        res.json(items || []);
+    } catch (err) {
+        res.status(500).json(errPayload(err?.message || "Failed to fetch purchase order items"));
+    }
 });
 
 export default router;
