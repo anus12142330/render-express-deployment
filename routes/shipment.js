@@ -856,6 +856,34 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
         const isEditing = shipment.shipment_stage_id >= 3;
         const [[commonDocType]] = await conn.query(`SELECT id FROM document_type WHERE code = 'underloading_common_photo' LIMIT 1`);
 
+         const keptCommonImages = JSON.parse(keptCommonImagesJson || '[]');
+
+        // --- Handle Image Deletions (if editing) ---
+        if (isEditing) {
+            // Common Images
+            if (commonDocType) {
+                const [existingCommonImageRows] = await conn.query(
+                    `SELECT id FROM shipment_file WHERE shipment_id = ? AND document_type_id = ?`,
+                    [shipment.id, commonDocType.id]
+                );
+                const existingCommonImageIds = existingCommonImageRows.map(f => f.id);
+                const keptCommonImageIds = keptCommonImages.map(img => Number(img.id)).filter(Boolean);
+                const commonImagesToDelete = existingCommonImageIds.filter(id => !keptCommonImageIds.includes(id));
+                if (commonImagesToDelete.length > 0) {
+                    await conn.query(`DELETE FROM shipment_file WHERE id IN (?)`, [commonImagesToDelete]);
+                }
+            }
+
+            // Container Images - Corrected Deletion Logic
+            const keptContainerImageIds = containers.flatMap(c => (c.images || []).map(img => img.id)).filter(Boolean);
+            // Get only the container IDs that actually exist in the database for this shipment
+            const [existingContainerIds] = await conn.query(`SELECT id FROM shipment_container WHERE shipment_id = ?`, [shipment.id]);
+            const containerIdsForQuery = existingContainerIds.map(c => c.id);
+            if (containerIdsForQuery.length > 0) {
+                await conn.query(`DELETE FROM shipment_container_file WHERE container_id IN (?) AND id NOT IN (?)`, [containerIdsForQuery, keptContainerImageIds.length > 0 ? keptContainerImageIds : [0]]);
+            }
+        }
+
         // Save common images
         const commonImages = files.filter(f => f.fieldname === 'common_images');
         for (const file of commonImages) {
@@ -882,25 +910,7 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
         }
         const changes = [];
 
-        // --- Handle Image Deletions (if editing) ---
-        if (isEditing) {
-            // Common Images
-            const existingCommonImageIds = (await conn.query(`SELECT id FROM shipment_file WHERE shipment_id = ? AND document_type_id = ?`, [shipment.id, commonDocType.id]))[0].map(f => f.id);
-            const keptCommonImages = JSON.parse(keptCommonImagesJson || '[]');
-            const commonImagesToDelete = existingCommonImageIds.filter(id => !keptCommonImages.some(img => img.id === id));
-            if (commonImagesToDelete.length > 0) {
-                await conn.query(`DELETE FROM shipment_file WHERE id IN (?)`, [commonImagesToDelete]);
-            }
-
-            // Container Images - Corrected Deletion Logic
-            const keptContainerImageIds = containers.flatMap(c => (c.images || []).map(img => img.id)).filter(Boolean);
-            // Get only the container IDs that actually exist in the database for this shipment
-            const [existingContainerIds] = await conn.query(`SELECT id FROM shipment_container WHERE shipment_id = ?`, [shipment.id]);
-            const containerIdsForQuery = existingContainerIds.map(c => c.id);
-            if (containerIdsForQuery.length > 0) {
-                await conn.query(`DELETE FROM shipment_container_file WHERE container_id IN (?) AND id NOT IN (?)`, [containerIdsForQuery, keptContainerImageIds.length > 0 ? keptContainerImageIds : [0]]);
-            }
-        }
+       
 
         for (const container of containers) {
             let containerId;
@@ -1048,7 +1058,8 @@ router.post("/:shipUniqid/underloading-air", upload.any(), async (req, res) => {
         if (isEditing && commonDocType) {
             const existingCommonImageIds = (await conn.query(`SELECT id FROM shipment_file WHERE shipment_id = ? AND document_type_id = ?`, [shipment.id, commonDocType.id]))[0].map(f => f.id);
             const keptCommonImages = JSON.parse(keptCommonImagesJson || '[]');
-            const commonImagesToDelete = existingCommonImageIds.filter(id => !keptCommonImages.some(img => img.id === id));
+            const keptCommonImageIds = keptCommonImages.map(img => Number(img.id)).filter(Boolean);
+            const commonImagesToDelete = existingCommonImageIds.filter(id => !keptCommonImageIds.includes(id));
 
             if (commonImagesToDelete.length > 0) {
                 await conn.query(`DELETE FROM shipment_file WHERE id IN (?)`, [commonImagesToDelete]);
