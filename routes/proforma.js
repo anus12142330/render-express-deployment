@@ -35,7 +35,7 @@ const n = (x, f = 0) => (Number.isFinite(Number(x)) ? Number(x) : f);
 const d = (x) => (x ? new Date(x) : null);
 
 async function tx(fn) {
-    const conn = await db.getConnection();
+    const conn = await db.promise().getConnection();
     try {
         await conn.beginTransaction();
         const result = await fn(conn);
@@ -176,7 +176,6 @@ router.get("/", async (req, res) => {
                 pi.uniqid,
                 pi.date_issue,
                 pi.proforma_invoice_no,
-                pi.contract_reference,
                 c.display_name as customer_name,
                 pi.contract_reference, 
                 COALESCE(c.display_name, pi.buyer_address) as customer_name,
@@ -220,28 +219,32 @@ router.post("/", upload.array("attachments", 20), async (req, res) => {
             // Prepare header data for insertion
             const headerData = [
                 `INSERT INTO proforma_invoice (
-           uniqid, expo_id, exporter, e_phone, e_fax, buyer_id, buyer_address, b_phone, b_fax,
+           uniqid, expo_id, exporter, e_phone, e_fax, buyer_id, consignee_id, buyer_address, b_phone, b_fax,
            consignee_name, consignee_address, c_phone, c_fax, port_loading, port_discharge,
            port_entry, country_destination, mode_of_transport, incoterms,
            partial_shipment, transhipment, proforma_invoice_no, date_issue, date_expiry,
            contract_reference, contract_date,
-           currency_sale, status_id, user_id,
+           currency_sale, exchange_rate, status_id, user_id,
            payment_terms_id, tenor, payment_description,
            bank_id,
            documents_provided, terms_conditions, other_terms,
            buyer_reference
-         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
                 uniqid,
                 v(header.expo_id), v(header.exporter), v(header.e_phone), v(header.e_fax),
                 v(header.buyer_id ?? header.buyer?.id),
+                v(header.consignee_id),
                 v(header.buyer_address, ""),
                 v(header.b_phone ?? header.buyer?.bill_phone ?? header.buyer?.ship_phone ?? ""),
                 v(header.b_fax ?? header.buyer?.bill_fax ?? header.buyer?.ship_fax ?? ""),
 
-                v(header.consignee_name),
-                v(header.consignee_address ?? ""),
-                v(header.c_phone ?? ""),
-                v(header.c_fax ?? ""),
+                // If consignee_id is null (Same as Buyer), use null for name, otherwise use provided name
+                header.consignee_id ? v(header.consignee_name) : null,
+                // If consignee_id is null (Same as Buyer), use buyer's address, otherwise use consignee's address
+                header.consignee_id ? v(header.consignee_address, "") : v(header.buyer_address, ""),
+                // If consignee_id is null (Same as Buyer), use buyer's phone/fax
+                header.consignee_id ? v(header.c_phone, "") : v(header.b_phone ?? header.buyer?.bill_phone ?? header.buyer?.ship_phone ?? ""),
+                header.consignee_id ? v(header.c_fax, "") : v(header.b_fax ?? header.buyer?.bill_fax ?? header.buyer?.ship_fax ?? ""),
                 v(header.port_loading), v(header.port_discharge), 
                 
                 v(header.port_entry), v(header.country_destination), 
@@ -250,9 +253,10 @@ router.post("/", upload.array("attachments", 20), async (req, res) => {
                 d(header.date_issue),
                 d(header.date_expiry),
 
-                v(header.contract_reference),
+                v(header.contract_reference, ""),
                 d(header.contract_date),
                 v(header.currency_sale),
+                v(header.exchange_rate),
                 v(header.status_id, 'DRAFT'), // Default to 'DRAFT' if not provided
                 v(header.user_id),
 
@@ -271,14 +275,15 @@ router.post("/", upload.array("attachments", 20), async (req, res) => {
                     const productName = it.product_name ?? it.productName ?? "";
                     const description = it.description ?? "";
                     const hscode = it.hscode ?? it.hsn ?? "";
-                    const quantity = it.quantity ?? it.qty ?? 0;
-                    const uomId = it.uom_id ?? it.uom ?? "";
+                    const quantity = it.quantity ?? it.qty ?? 0;                    
+                    const uomIdRaw = it.uom_id ?? it.uom ?? null;
+                    const uomId = (uomIdRaw != null && String(uomIdRaw).trim() !== "" && !isNaN(Number(uomIdRaw))) ? Number(uomIdRaw) : null;
                     const unitPrice = it.unit_price ?? it.unitPrice ?? 0;
                     const vatId = it.vat_id ?? it.vatId ?? null;
                     const vatRate = it.vat_rate ?? it.vatRate ?? 0;
                     const origin = it.origin ?? "";
                     const packingId = it.packing_id ?? it.packingId ?? null;
-
+ 
                     return [
                         proformaId,
                         v(productId),
@@ -286,7 +291,7 @@ router.post("/", upload.array("attachments", 20), async (req, res) => {
                         v(description, ""),
                         v(hscode, ""),
                         n(quantity, 0),
-                        v(uomId, ""),
+                        uomId,
                         n(unitPrice, 0),
                         v(vatId),
                         n(vatRate, 0),
@@ -330,10 +335,16 @@ router.post("/", upload.array("attachments", 20), async (req, res) => {
                 action: 'CREATED',
                 details: { proforma_invoice_no: finalPiNo }
             });
-            return proformaId;
+             return { proformaId, uniqid, proforma_invoice_no: finalPiNo };
         });
 
-        res.status(201).json({ success: true, proforma_invoice_id: result, message: "Proforma created" });
+        res.status(201).json({
+            success: true,
+            proforma_invoice_id: result.proformaId,
+            uniqid: result.uniqid,
+            proforma_invoice_no: result.proforma_invoice_no,
+            message: "Proforma created",
+        });
     } catch (e) {
         // Enhanced error logging
         console.error("--- PROFORMA CREATE FAILED ---");
@@ -385,31 +396,36 @@ router.put("/:id", upload.array("attachments", 20), async (req, res) => {
             // Prepare header update data (use numeric id in WHERE)
             const headerUpdateData = [
                 `UPDATE proforma_invoice SET 
-           expo_id=?, exporter=?, e_phone=?, e_fax=?, 
+           expo_id=?, exporter=?, e_phone=?, e_fax=?, consignee_id=?,
            buyer_id=?, buyer_address=?, b_phone=?, b_fax=?,
            consignee_name=?, consignee_address=?, c_phone=?, c_fax=?,
            port_loading=?, port_discharge=?, port_entry=?, country_destination=?, mode_of_transport=?, incoterms=?, partial_shipment=?, transhipment=?,
            proforma_invoice_no=?, date_issue=?, date_expiry=?,
            contract_reference=?, contract_date=?,
-           currency_sale=?, status_id=?, user_id=?,
+           currency_sale=?, exchange_rate=?, status_id=?, user_id=?,
            payment_terms_id=?, tenor=?, payment_description=?,
            bank_id=?,
            documents_provided=?, terms_conditions=?, other_terms=?,
            buyer_reference=? 
          WHERE id=?`, // Corrected SQL
                 v(header.expo_id), v(header.exporter), v(header.e_phone), v(header.e_fax),
+                v(header.consignee_id),
                 v(header.buyer_id ?? header.buyer?.id),
                 v(header.buyer_address, ""),
                 v(header.b_phone ?? header.buyer?.bill_phone ?? header.buyer?.ship_phone ?? ""),
                 v(header.b_fax ?? header.buyer?.bill_fax ?? header.buyer?.ship_fax ?? ""),
-                v(header.consignee_name),
-                v(header.consignee_address ?? ""),
-                v(header.c_phone ?? ""), v(header.c_fax ?? ""),
+                // If consignee_id is null (Same as Buyer), use null for name, otherwise use provided name
+                header.consignee_id ? v(header.consignee_name) : null,
+                // If consignee_id is null (Same as Buyer), use buyer's address, otherwise use consignee's address
+                header.consignee_id ? v(header.consignee_address, "") : v(header.buyer_address, ""),
+                // If consignee_id is null (Same as Buyer), use buyer's phone/fax
+                header.consignee_id ? v(header.c_phone, "") : v(header.b_phone ?? header.buyer?.bill_phone ?? header.buyer?.ship_phone ?? ""),
+                header.consignee_id ? v(header.c_fax, "") : v(header.b_fax ?? header.buyer?.bill_fax ?? header.buyer?.ship_fax ?? ""),
                 v(header.port_loading), v(header.port_discharge), v(header.port_entry), v(header.country_destination), 
                 v(header.mode_of_transport), v(header.incoterms), v(header.partial_shipment), v(header.transhipment),
                 v(header.proforma_invoice_no), d(header.date_issue), d(header.date_expiry),
-                v(header.contract_reference), d(header.contract_date),
-                v(header.currency_sale), v(header.status_id, 'DRAFT'), v(header.user_id),
+                v(header.contract_reference, ""), d(header.contract_date),
+                v(header.currency_sale), v(header.exchange_rate), v(header.status_id, 'DRAFT'), v(header.user_id),
                 v(payment?.payment_terms_id), v(payment?.tenor), v(payment?.description),
                 v(bank?.bank_id),
                 v(texts?.documents_provided), v(texts?.terms_conditions), v(texts?.other_terms),
@@ -427,8 +443,9 @@ router.put("/:id", upload.array("attachments", 20), async (req, res) => {
                     const productName = it.product_name ?? it.productName ?? "";
                     const description = it.description ?? "";
                     const hscode = it.hscode ?? it.hsn ?? "";
-                    const quantity = it.quantity ?? it.qty ?? 0;
-                    const uomId = it.uom_id ?? it.uom ?? "";
+                    const quantity = it.quantity ?? it.qty ?? 0;                    
+                    const uomIdRaw = it.uom_id ?? it.uom ?? null;
+                    const uomId = (uomIdRaw != null && String(uomIdRaw).trim() !== "" && !isNaN(Number(uomIdRaw))) ? Number(uomIdRaw) : null;
                     const unitPrice = it.unit_price ?? it.unitPrice ?? 0;
                     const vatId = it.vat_id ?? it.vatId ?? null;
                     const vatRate = it.vat_rate ?? it.vatRate ?? 0;
@@ -442,7 +459,7 @@ router.put("/:id", upload.array("attachments", 20), async (req, res) => {
                         v(description, ""),
                         v(hscode, ""),
                         n(quantity, 0),
-                        v(uomId, ""),
+                        uomId,
                         n(unitPrice, 0),
                         v(vatId),
                         n(vatRate, 0),
@@ -523,13 +540,19 @@ router.get("/:id", async (req, res) => {
                 p_discharge.name as port_discharge_name,
                 p_entry.name as port_entry_name,
                 c_dest.name as country_destination_name,
-                pt.terms as payment_terms_name
+                pt.terms as payment_terms_name,
+                c.display_name as buyer_name,
+                c.uniqid as buyer_uniqid,
+                consignee_details.display_name as consignee_name_from_db,
+                consignee_details.uniqid as consignee_uniqid
             FROM proforma_invoice pi
             LEFT JOIN delivery_place p_load ON p_load.id = pi.port_loading
             LEFT JOIN delivery_place p_discharge ON p_discharge.id = pi.port_discharge
             LEFT JOIN delivery_place p_entry ON p_entry.id = pi.port_entry
             LEFT JOIN country c_dest ON c_dest.id = pi.country_destination
             LEFT JOIN payment_terms pt ON pt.id = pi.payment_terms_id
+            LEFT JOIN vendor c ON c.id = pi.buyer_id
+            LEFT JOIN vendor consignee_details ON consignee_details.id = pi.consignee_id
             WHERE pi.uniqid=?
         `, [id]);
 
