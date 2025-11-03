@@ -10,6 +10,7 @@ const db = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
+  dateStrings: true, // Return DATE and DATETIME as 'YYYY-MM-DD HH:mm:ss' strings
 
   // keeps idle connections alive (important on Render)
   enableKeepAlive: true,

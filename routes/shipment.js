@@ -6,6 +6,7 @@ import mysql from 'mysql2/promise';
 import sharp from 'sharp';
 import crypto from 'crypto';
 import db from "../db.js";
+import dayjs from "dayjs";
 
 const router = express.Router();
 const errPayload = (message, type = "APP_ERROR", hint) => ({ error: { message, type, hint } });
@@ -268,15 +269,18 @@ router.put("/:shipUniqid/planned-details", upload.none(), async (req, res) => {
             shipping_line_name: 'Shipping Line', shipper: 'Shipper', consignee: 'Consignee', notify_party: 'Notify Party'
         };
 
-        const formatDate = (d) => d ? new Date(d).toISOString().split('T')[0] : null;
+        const formatDateForHistory = (dateValue) => {
+            if (!dateValue) return 'empty';
+            return dayjs(dateValue).format('DD-MMM-YYYY');
+        };
 
         for (const key in fieldsToCompare) {
-            const oldValue = key === 'etd_date' ? formatDate(oldShipment[key]) : (oldShipment[key] || '');
-            const newValue = req.body[key] || '';
+            const oldValue = oldShipment[key] || '';
+            const newValue = req.body[key] || ''; // The date from the form is already YYYY-MM-DD
             if (String(oldValue) !== String(newValue)) {
                 changes[fieldsToCompare[key]] = {
-                    from: oldValue || 'empty',
-                    to: newValue || 'empty'
+                    from: key === 'etd_date' ? formatDateForHistory(oldValue) : (oldValue || 'empty'),
+                    to: key === 'etd_date' ? formatDateForHistory(newValue) : (newValue || 'empty')
                 };
             }
         }
@@ -297,7 +301,7 @@ router.put("/:shipUniqid/planned-details", upload.none(), async (req, res) => {
             moduleId: oldShipment.id,
             userId: userId,
             action: 'PLANNED_DETAILS_UPDATED',
-            details: { changes: changes }
+            details: { changes: changes, user: userName }
         });
 
         await connection.commit();
