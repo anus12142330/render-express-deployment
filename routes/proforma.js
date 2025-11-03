@@ -66,9 +66,10 @@ function pad(n, w = 3) {
     const s = String(n);
     return s.length >= w ? s : "0".repeat(w - s.length) + s;
 }
-function currentYearPrefix() {
+function currentYearPrefix(type = 'proforma_invoice') {
+    const prefix = type === 'sales_order' ? 'AGSO' : 'AGPI';
     const yy = String(new Date().getFullYear()).slice(-2);
-    return `AGPI-${yy}-`;
+    return `${prefix}-${yy}-`;
 }
 function currentMonthSegment() {
     return String(new Date().getMonth() + 1).padStart(2, "0");
@@ -87,14 +88,14 @@ async function getMaxSequenceForYear(conn, yearPrefix) {
     const m = top.match(/(\d{3})$/);
     return m ? Number(m[1]) : 0;
 }
-async function generateNextProformaNumber(conn, { width = 3 } = {}) {
-    const prefix = currentYearPrefix();
+async function generateNextProformaNumber(conn, { width = 3, type = 'proforma_invoice' } = {}) {
+    const prefix = currentYearPrefix(type);
     const mm = currentMonthSegment();
     const seq = await getMaxSequenceForYear(conn, prefix);
     return `${prefix}${mm}${pad(seq + 1, width)}`;
 }
-async function ensureUniqueProformaNumber(conn, n, { width = 3 } = {}) {
-    let value = n || await generateNextProformaNumber(conn, { width });
+async function ensureUniqueProformaNumber(conn, n, { width = 3, type = 'proforma_invoice' } = {}) {
+    let value = n || await generateNextProformaNumber(conn, { width, type });
     for (let i = 0; i < 8; i++) {
         const [[dupe]] = await conn.query(
             "SELECT id FROM proforma_invoice WHERE proforma_invoice_no=? LIMIT 1",
@@ -103,19 +104,21 @@ async function ensureUniqueProformaNumber(conn, n, { width = 3 } = {}) {
         if (!dupe) return value;
         const m = value.match(/^(.*?)(\d{3})$/);
         value = m ? `${m[1]}${pad((parseInt(m[2], 10) || 0) + 1, width)}`
-            : await generateNextProformaNumber(conn, { width });
+            : await generateNextProformaNumber(conn, { width, type });
     }
     // last fallback
+    const prefix = currentYearPrefix(type);
     const mm = currentMonthSegment();
     const yy = String(new Date().getFullYear()).slice(-2);
-    return `AGPI-${yy}-${mm}${pad(Math.floor(Math.random()*999), width)}`;
+    return `${prefix}${mm}${pad(Math.floor(Math.random()*999), width)}`;
 }
 
 // ---- GET /api/proforma/next-number (promise API) ----
-router.get("/next-number", async (_req, res) => {
+router.get("/next-number", async (req, res) => {
+    const { invoice_type = 'proforma_invoice' } = req.query;
     const conn = await db.promise().getConnection();
     try {
-        const number = await generateNextProformaNumber(conn, { width: 3 });
+        const number = await generateNextProformaNumber(conn, { width: 3, type: invoice_type });
         res.json({ number });
     } catch (e) {
         res.status(500).json({
@@ -137,6 +140,7 @@ router.get("/", async (req, res) => {
         search = "",
         sort_field = "pi.date_issue",
         sort_order = "DESC",
+        status = ""
     } = req.query;
 
     const p = Number(page);
@@ -155,6 +159,11 @@ router.get("/", async (req, res) => {
             c.display_name LIKE ?
         )`);
         params.push(s, s, s, s);
+    }
+
+    if (status) {
+        whereClauses.push(`pi.status_id = ?`);
+        params.push(status);
     }
 
     const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
@@ -178,11 +187,17 @@ router.get("/", async (req, res) => {
                 pi.proforma_invoice_no,
                 c.display_name as customer_name,
                 pi.contract_reference, 
-                COALESCE(c.display_name, pi.buyer_address) as customer_name,
+                COALESCE(c.display_name, pi.buyer_address) as customer_display_name,
                 pi.status_id as status,
-                pi.grand_total as total_amount                
+                s.name as status_name,
+                s.bg_colour,
+                s.colour,
+                pi.grand_total as total_amount,
+                curr.name as currency_code
             FROM proforma_invoice pi
             LEFT JOIN vendor c ON c.id = pi.buyer_id
+            LEFT JOIN currency curr ON curr.id = pi.currency_sale
+            LEFT JOIN status s ON s.id = pi.status_id
             
             ${whereSql}
             ORDER BY ${sort_field} ${sort_order}
@@ -206,45 +221,47 @@ router.post("/", upload.array("attachments", 20), async (req, res) => {
             : req.body || {}; // If not multipart, payload is direct JSON body
         const userId = req.session?.user?.id;
 
-        const { header = {}, items = [], texts = {}, payment = {}, bank = {} } = payload;
+        const { header = {}, items = [], texts = {}, payment = {}, bank = {}, totals = {} } = payload;
 
         if (!header.proforma_invoice_no) return res.status(400).json({ error: "proforma_invoice_no is required" });
         if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: "At least one item is required" });
 
         const result = await tx(async (conn) => {
             // Ensure the PI number is unique before inserting
-            const finalPiNo = await ensureUniqueProformaNumber(conn, header.proforma_invoice_no);
+            const finalPiNo = await ensureUniqueProformaNumber(conn, header.proforma_invoice_no, { type: header.invoice_type });
             const uniqid = crypto.randomUUID();
 
             // Prepare header data for insertion
             const headerData = [
                 `INSERT INTO proforma_invoice (
-           uniqid, expo_id, exporter, e_phone, e_fax, buyer_id, consignee_id, buyer_address, b_phone, b_fax,
+           uniqid, invoice_type, expo_id, exporter, e_phone, e_fax, buyer_id, is_consignee_same_as_buyer, consignee_id, buyer_address, b_phone, b_fax,
            consignee_name, consignee_address, c_phone, c_fax, port_loading, port_discharge,
            port_entry, country_destination, mode_of_transport, incoterms,
            partial_shipment, transhipment, proforma_invoice_no, date_issue, date_expiry,
-           contract_reference, contract_date,
+           contract_reference, contract_date, sub_total, vat_total, grand_total,
            currency_sale, exchange_rate, status_id, user_id,
            payment_terms_id, tenor, payment_description,
            bank_id,
            documents_provided, terms_conditions, other_terms,
            buyer_reference
-         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
                 uniqid,
+                v(header.invoice_type, 'proforma_invoice'),
                 v(header.expo_id), v(header.exporter), v(header.e_phone), v(header.e_fax),
                 v(header.buyer_id ?? header.buyer?.id),
+                header.is_consignee_same_as_buyer ? 1 : 0,
                 v(header.consignee_id),
                 v(header.buyer_address, ""),
                 v(header.b_phone ?? header.buyer?.bill_phone ?? header.buyer?.ship_phone ?? ""),
                 v(header.b_fax ?? header.buyer?.bill_fax ?? header.buyer?.ship_fax ?? ""),
 
-                // If consignee_id is null (Same as Buyer), use null for name, otherwise use provided name
-                header.consignee_id ? v(header.consignee_name) : null,
-                // If consignee_id is null (Same as Buyer), use buyer's address, otherwise use consignee's address
-                header.consignee_id ? v(header.consignee_address, "") : v(header.buyer_address, ""),
-                // If consignee_id is null (Same as Buyer), use buyer's phone/fax
-                header.consignee_id ? v(header.c_phone, "") : v(header.b_phone ?? header.buyer?.bill_phone ?? header.buyer?.ship_phone ?? ""),
-                header.consignee_id ? v(header.c_fax, "") : v(header.b_fax ?? header.buyer?.bill_fax ?? header.buyer?.ship_fax ?? ""),
+                // If is_consignee_same_as_buyer is true, use null for name, otherwise use provided name
+                !header.is_consignee_same_as_buyer ? v(header.consignee_name) : 'Same as Buyer',
+                // If is_consignee_same_as_buyer is true, use buyer's address, otherwise use consignee's address
+                !header.is_consignee_same_as_buyer ? v(header.consignee_address, "") : 'Same as Buyer',
+                // If is_consignee_same_as_buyer is true, use buyer's phone/fax
+                !header.is_consignee_same_as_buyer ? v(header.c_phone, "") : null,
+                !header.is_consignee_same_as_buyer ? v(header.c_fax, "") : null,
                 v(header.port_loading), v(header.port_discharge), 
                 
                 v(header.port_entry), v(header.country_destination), 
@@ -255,6 +272,9 @@ router.post("/", upload.array("attachments", 20), async (req, res) => {
 
                 v(header.contract_reference, ""),
                 d(header.contract_date),
+                n(totals?.sub_total),
+                n(totals?.vat_total),
+                n(totals?.grand_total),
                 v(header.currency_sale),
                 v(header.exchange_rate),
                 v(header.status_id, 'DRAFT'), // Default to 'DRAFT' if not provided
@@ -277,6 +297,7 @@ router.post("/", upload.array("attachments", 20), async (req, res) => {
                     const hscode = it.hscode ?? it.hsn ?? "";
                     const quantity = it.quantity ?? it.qty ?? 0;                    
                     const uomIdRaw = it.uom_id ?? it.uom ?? null;
+                    const uomName = it.uom_name ?? null;
                     const uomId = (uomIdRaw != null && String(uomIdRaw).trim() !== "" && !isNaN(Number(uomIdRaw))) ? Number(uomIdRaw) : null;
                     const unitPrice = it.unit_price ?? it.unitPrice ?? 0;
                     const vatId = it.vat_id ?? it.vatId ?? null;
@@ -292,6 +313,7 @@ router.post("/", upload.array("attachments", 20), async (req, res) => {
                         v(hscode, ""),
                         n(quantity, 0),
                         uomId,
+                        v(uomName),
                         n(unitPrice, 0),
                         v(vatId),
                         n(vatRate, 0),
@@ -302,8 +324,8 @@ router.post("/", upload.array("attachments", 20), async (req, res) => {
 
                 await conn.query(
                     `INSERT INTO proforma_invoice_items
-               (proforma_invoice_id, product_id, product_name, description, hscode, quantity, uom_id, unit_price, vat_id, vat_rate, origin, packing_id)
-             VALUES ?`,
+               (proforma_invoice_id, product_id, product_name, description, hscode, quantity, uom_id, uom_name, unit_price, vat_id, vat_rate, origin, packing_id)
+             VALUES ?`, // Added uom_name
                     [itemRows]
                 );
             }
@@ -313,7 +335,7 @@ router.post("/", upload.array("attachments", 20), async (req, res) => {
                 const attRows = req.files.map((f) => [
                     proformaId,
                     f.originalname,
-                    path.join("uploads", "proforma", path.basename(f.path)).replace(/\\/g, "/"),
+                    path.relative(path.resolve(), f.path).replace(/\\/g, "/"),
                     f.mimetype.startsWith('image/') ? 'image' : 'document',
                     f.mimetype,
                     f.size,
@@ -371,7 +393,8 @@ router.put("/:id", upload.array("attachments", 20), async (req, res) => {
             ? JSON.parse(req.body?.payload || "{}")
             : req.body || {};
 
-        const { header = {}, items = [], texts = {}, payment = {}, bank = {} } = payload;
+        const { header = {}, items = [], texts = {}, payment = {}, bank = {}, totals = {} } = payload;
+        const deletedAttachmentIds = JSON.parse(req.body.deletedAttachmentIds || "[]");
 
         if (!header.proforma_invoice_no) return res.status(400).json({ error: "proforma_invoice_no is required" });
 
@@ -386,44 +409,56 @@ router.put("/:id", upload.array("attachments", 20), async (req, res) => {
 
             const proformaId = existing.id;
 
+            // --- Server-side prefix adjustment based on invoice_type ---
+            let finalPiNo = header.proforma_invoice_no;
+            if (header.invoice_type === 'sales_order' && finalPiNo.startsWith('AGPI-')) {
+                finalPiNo = finalPiNo.replace('AGPI-', 'AGSO-');
+            } else if (header.invoice_type === 'proforma_invoice' && finalPiNo.startsWith('AGSO-')) {
+                finalPiNo = finalPiNo.replace('AGSO-', 'AGPI-');
+            }
+            // --- End of prefix adjustment ---
+
+
             // Ensure the provided number doesn't clash with another existing record.
             const [[dupe]] = await conn.query(
                 "SELECT id FROM proforma_invoice WHERE proforma_invoice_no=? AND id != ? LIMIT 1",
-                [header.proforma_invoice_no, proformaId]
+                [finalPiNo, proformaId]
             );
-            if (dupe) throw new Error(`Proforma Invoice number ${header.proforma_invoice_no} is already in use by another document.`);
+            if (dupe) throw new Error(`Proforma Invoice number ${finalPiNo} is already in use by another document.`);
 
             // Prepare header update data (use numeric id in WHERE)
             const headerUpdateData = [
                 `UPDATE proforma_invoice SET 
-           expo_id=?, exporter=?, e_phone=?, e_fax=?, consignee_id=?,
+           invoice_type=?, expo_id=?, exporter=?, e_phone=?, e_fax=?, is_consignee_same_as_buyer=?, consignee_id=?,
            buyer_id=?, buyer_address=?, b_phone=?, b_fax=?,
            consignee_name=?, consignee_address=?, c_phone=?, c_fax=?,
            port_loading=?, port_discharge=?, port_entry=?, country_destination=?, mode_of_transport=?, incoterms=?, partial_shipment=?, transhipment=?,
-           proforma_invoice_no=?, date_issue=?, date_expiry=?,
+           proforma_invoice_no=?, date_issue=?, date_expiry=?, sub_total=?, vat_total=?, grand_total=?,
            contract_reference=?, contract_date=?,
            currency_sale=?, exchange_rate=?, status_id=?, user_id=?,
            payment_terms_id=?, tenor=?, payment_description=?,
            bank_id=?,
            documents_provided=?, terms_conditions=?, other_terms=?,
-           buyer_reference=? 
-         WHERE id=?`, // Corrected SQL
+           buyer_reference=?
+         WHERE id=?`,
+                v(header.invoice_type, 'proforma_invoice'),
                 v(header.expo_id), v(header.exporter), v(header.e_phone), v(header.e_fax),
+                header.is_consignee_same_as_buyer ? 1 : 0,
                 v(header.consignee_id),
                 v(header.buyer_id ?? header.buyer?.id),
                 v(header.buyer_address, ""),
                 v(header.b_phone ?? header.buyer?.bill_phone ?? header.buyer?.ship_phone ?? ""),
                 v(header.b_fax ?? header.buyer?.bill_fax ?? header.buyer?.ship_fax ?? ""),
-                // If consignee_id is null (Same as Buyer), use null for name, otherwise use provided name
-                header.consignee_id ? v(header.consignee_name) : null,
-                // If consignee_id is null (Same as Buyer), use buyer's address, otherwise use consignee's address
-                header.consignee_id ? v(header.consignee_address, "") : v(header.buyer_address, ""),
-                // If consignee_id is null (Same as Buyer), use buyer's phone/fax
-                header.consignee_id ? v(header.c_phone, "") : v(header.b_phone ?? header.buyer?.bill_phone ?? header.buyer?.ship_phone ?? ""),
-                header.consignee_id ? v(header.c_fax, "") : v(header.b_fax ?? header.buyer?.bill_fax ?? header.buyer?.ship_fax ?? ""),
-                v(header.port_loading), v(header.port_discharge), v(header.port_entry), v(header.country_destination), 
+                // If is_consignee_same_as_buyer is true, use null for name, otherwise use provided name
+                !header.is_consignee_same_as_buyer ? v(header.consignee_name) : 'Same as Buyer',
+                // If is_consignee_same_as_buyer is true, use buyer's address, otherwise use consignee's address
+                !header.is_consignee_same_as_buyer ? v(header.consignee_address, "") : 'Same as Buyer',
+                // If is_consignee_same_as_buyer is true, use buyer's phone/fax
+                !header.is_consignee_same_as_buyer ? v(header.c_phone, "") : null,
+                !header.is_consignee_same_as_buyer ? v(header.c_fax, "") : null,
+                v(header.port_loading), v(header.port_discharge), v(header.port_entry), v(header.country_destination),
                 v(header.mode_of_transport), v(header.incoterms), v(header.partial_shipment), v(header.transhipment),
-                v(header.proforma_invoice_no), d(header.date_issue), d(header.date_expiry),
+                v(finalPiNo), d(header.date_issue), d(header.date_expiry), n(totals?.sub_total), n(totals?.vat_total), n(totals?.grand_total),
                 v(header.contract_reference, ""), d(header.contract_date),
                 v(header.currency_sale), v(header.exchange_rate), v(header.status_id, 'DRAFT'), v(header.user_id),
                 v(payment?.payment_terms_id), v(payment?.tenor), v(payment?.description),
@@ -445,6 +480,7 @@ router.put("/:id", upload.array("attachments", 20), async (req, res) => {
                     const hscode = it.hscode ?? it.hsn ?? "";
                     const quantity = it.quantity ?? it.qty ?? 0;                    
                     const uomIdRaw = it.uom_id ?? it.uom ?? null;
+                    const uomName = it.uom_name ?? null;
                     const uomId = (uomIdRaw != null && String(uomIdRaw).trim() !== "" && !isNaN(Number(uomIdRaw))) ? Number(uomIdRaw) : null;
                     const unitPrice = it.unit_price ?? it.unitPrice ?? 0;
                     const vatId = it.vat_id ?? it.vatId ?? null;
@@ -460,6 +496,7 @@ router.put("/:id", upload.array("attachments", 20), async (req, res) => {
                         v(hscode, ""),
                         n(quantity, 0),
                         uomId,
+                        v(uomName),
                         n(unitPrice, 0),
                         v(vatId),
                         n(vatRate, 0),
@@ -469,10 +506,29 @@ router.put("/:id", upload.array("attachments", 20), async (req, res) => {
                 });
                 await conn.query(
                     `INSERT INTO proforma_invoice_items
-             (proforma_invoice_id, product_id, product_name, description, hscode, quantity, uom_id, unit_price, vat_id, vat_rate, origin, packing_id)
-           VALUES ?`,
+             (proforma_invoice_id, product_id, product_name, description, hscode, quantity, uom_id, uom_name, unit_price, vat_id, vat_rate, origin, packing_id)
+           VALUES ?`, // Added uom_name
                     [itemRows]
                 );
+            }
+
+            // --- Handle attachment deletions ---
+            if (Array.isArray(deletedAttachmentIds) && deletedAttachmentIds.length > 0) {
+                const [filesToDelete] = await conn.query(
+                    `SELECT id, file_path FROM proforma_invoice_attachments WHERE id IN (?) AND proforma_invoice_id = ?`,
+                    [deletedAttachmentIds, proformaId]
+                );
+
+                for (const file of filesToDelete) {
+                    // Delete from filesystem
+                    if (file.file_path) {
+                        const fullPath = path.resolve(file.file_path);
+                        await fs.promises.unlink(fullPath).catch(e => console.warn(`Failed to delete file from disk: ${fullPath}`, e));
+                    }
+                }
+
+                // Delete from database
+                await conn.query(`DELETE FROM proforma_invoice_attachments WHERE id IN (?)`, [deletedAttachmentIds]);
             }
 
             // add new attachments (use numeric proforma id)
@@ -480,7 +536,7 @@ router.put("/:id", upload.array("attachments", 20), async (req, res) => {
                 const attRows = req.files.map((f) => [
                     proformaId,
                     f.originalname,
-                    path.join("uploads", "proforma", path.basename(f.path)).replace(/\\/g, "/"),
+                    path.relative(path.resolve(), f.path).replace(/\\/g, "/"),
                     f.mimetype.startsWith('image/') ? 'image' : 'document',
                     f.mimetype,
                     f.size,
@@ -496,8 +552,8 @@ router.put("/:id", upload.array("attachments", 20), async (req, res) => {
 
             // --- Log changes for history ---
             const changes = [];
-            if (oldHeader.proforma_invoice_no !== header.proforma_invoice_no) {
-                changes.push({ field: 'proforma_invoice_no', from: oldHeader.proforma_invoice_no, to: header.proforma_invoice_no });
+            if (oldHeader.proforma_invoice_no !== finalPiNo) {
+                changes.push({ field: 'proforma_invoice_no', from: oldHeader.proforma_invoice_no, to: finalPiNo });
             }
             // Add more field comparisons here if needed...
 
@@ -540,11 +596,26 @@ router.get("/:id", async (req, res) => {
                 p_discharge.name as port_discharge_name,
                 p_entry.name as port_entry_name,
                 c_dest.name as country_destination_name,
+                mot.name as mode_of_transport_name,
+                inc.name as incoterms_name,
+                ps.name as partial_shipment_name,
+                ts.name as transhipment_name,
                 pt.terms as payment_terms_name,
                 c.display_name as buyer_name,
                 c.uniqid as buyer_uniqid,
                 consignee_details.display_name as consignee_name_from_db,
-                consignee_details.uniqid as consignee_uniqid
+                consignee_details.uniqid as consignee_uniqid,
+                b.bank_name,
+                b.acc_name as account_name,
+                b.acc_no as account_number,
+                b.iban_no as iban,
+                b.swift_code as swift,
+                s.name as status_name,
+                s.bg_colour,
+                s.colour,
+                pi.exporter,
+                pi.e_phone,
+                pi.e_fax
             FROM proforma_invoice pi
             LEFT JOIN delivery_place p_load ON p_load.id = pi.port_loading
             LEFT JOIN delivery_place p_discharge ON p_discharge.id = pi.port_discharge
@@ -553,13 +624,31 @@ router.get("/:id", async (req, res) => {
             LEFT JOIN payment_terms pt ON pt.id = pi.payment_terms_id
             LEFT JOIN vendor c ON c.id = pi.buyer_id
             LEFT JOIN vendor consignee_details ON consignee_details.id = pi.consignee_id
+            LEFT JOIN mode_of_shipment mot ON mot.id = pi.mode_of_transport
+            LEFT JOIN inco_terms inc ON inc.id = pi.incoterms
+            LEFT JOIN partial_shipment ps ON ps.id = pi.partial_shipment
+            LEFT JOIN partial_shipment ts ON ts.id = pi.transhipment
+            LEFT JOIN acc_bank_details b ON b.id = pi.bank_id
+            LEFT JOIN status s ON s.id = pi.status_id
             WHERE pi.uniqid=?
         `, [id]);
 
         if (!header) return res.status(404).json({ error: "Not found" });
 
         const [items] = await db.promise().query(
-            "SELECT * FROM proforma_invoice_items WHERE proforma_invoice_id=? ORDER BY id",
+            `SELECT 
+                pii.*,
+                um.name as uom_name, 
+                um.acronyms as uom_code,
+                (SELECT file_path 
+                 FROM product_images 
+                 WHERE product_id = pii.product_id 
+                 ORDER BY is_primary DESC, id ASC 
+                 LIMIT 1) as product_image
+             FROM proforma_invoice_items pii
+             LEFT JOIN uom_master um ON um.id = pii.uom_id
+             WHERE pii.proforma_invoice_id = ? 
+             ORDER BY pii.id`,
             [header.id]
         );
         const [attachments] = await db.promise().query(
@@ -569,6 +658,45 @@ router.get("/:id", async (req, res) => {
         res.json({ header, items, attachments });
     } catch (e) {
         res.status(500).json({ error: "Failed to fetch proforma", detail: e.message });
+    }
+});
+
+/* ============================================================================
+   PUT /:uniqid/status
+============================================================================ */
+router.put("/:id/status", async (req, res) => {
+    const { id } = req.params; // uniqid
+    const { status_id } = req.body;
+    const userId = req.session?.user?.id;
+
+    if (!status_id) {
+        return res.status(400).json(errPayload("status_id is required."));
+    }
+
+    const conn = await db.promise().getConnection();
+    try {
+        await conn.beginTransaction();
+
+        const [[pi]] = await conn.query("SELECT id, status_id as old_status_id FROM proforma_invoice WHERE uniqid = ?", [id]);
+        if (!pi) {
+            throw new Error("Proforma Invoice not found.");
+        }
+
+        // Update the status
+        await conn.query("UPDATE proforma_invoice SET status_id = ? WHERE id = ?", [status_id, pi.id]);
+
+        // Add history record
+        const [[oldStatus]] = await conn.query("SELECT name FROM status WHERE id = ?", [pi.old_status_id]);
+        const [[newStatus]] = await conn.query("SELECT name FROM status WHERE id = ?", [status_id]);
+        await addHistory(conn, { module: 'proforma_invoice', moduleId: pi.id, userId, action: 'STATUS_CHANGED', details: { from: oldStatus?.name || pi.old_status_id, to: newStatus?.name || status_id } });
+
+        await conn.commit();
+        res.json({ success: true, message: "Status updated successfully." });
+    } catch (error) {
+        await conn.rollback();
+        res.status(500).json(errPayload(error.message || "Failed to update status."));
+    } finally {
+        conn.release();
     }
 });
 

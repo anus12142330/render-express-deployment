@@ -148,27 +148,17 @@ router.get('/', async (req, res) => {
                     p.reorder_point,
                     COALESCE(p.hscode, '') AS hscode,
                     0 AS unit_price,
-                    COALESCE((
-                                 SELECT SUM(s2.qty)
-                                 FROM product_opening_stock s2
-                                 WHERE s2.product_id = p.id
-                             ), 0) AS stock,
-                    (
-                        SELECT i.file_path
-                        FROM product_images i
-                        WHERE i.product_id = p.id
-                        ORDER BY i.is_primary DESC, i.id ASC
-                        LIMIT 1
-                    ) AS image_url
-                    ,
-                    COALESCE((
-                                 SELECT i.thumbnail_path
-                                 FROM product_images i
-                                 WHERE i.product_id = p.id
-                                 ORDER BY i.is_primary DESC, i.id ASC
-                                 LIMIT 1
-                             ), '') AS thumbnail_url
-                    ,
+                    COALESCE((SELECT SUM(s2.qty) FROM product_opening_stock s2 WHERE s2.product_id = p.id), 0) AS stock,
+                    -- Correctly fetch the primary image's file_path, then any image's file_path
+                    COALESCE(
+                        (SELECT pi.file_path FROM product_images pi WHERE pi.product_id = p.id AND pi.is_primary = 1 LIMIT 1),
+                        (SELECT pi.file_path FROM product_images pi WHERE pi.product_id = p.id ORDER BY pi.id ASC LIMIT 1)
+                    ) AS image_url,
+                    -- Correctly fetch the primary image's thumbnail_path, then any image's thumbnail_path
+                    COALESCE(
+                        (SELECT pi.thumbnail_path FROM product_images pi WHERE pi.product_id = p.id AND pi.is_primary = 1 LIMIT 1),
+                        (SELECT pi.thumbnail_path FROM product_images pi WHERE pi.product_id = p.id ORDER BY pi.id ASC LIMIT 1)
+                    ) AS thumbnail_url,
                     (
                         SELECT pd.packing_alias
                         FROM product_details pd 

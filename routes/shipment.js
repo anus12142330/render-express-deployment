@@ -75,31 +75,40 @@ router.get("/board", async (req, res) => {
       SELECT
         s.ship_uniqid,
         s.id AS shipment_id,
+        s.po_id,
+        s.vendor_id,
+        po.shipment_stage_id AS stage_id,
+        po.confirmation_type,
+        po.no_containers, -- This is the total
+        po.containers_stock_sales,
+        po.containers_back_to_back,
         s.vessel_name,
         po.po_number,
-        po.vendor_id,        
-        po.id AS po_id,
         po.mode_shipment_id,
-        po.no_containers,
-        po.confirmation_type,
         v.display_name as vendor_name,
         c.display_name as customer_name,
-        po.shipment_stage_id AS stage_id,        
         po.po_uniqid AS po_uniqid,
         dpl.name as loading_name,
         dpd.name as discharge_name,
-        GROUP_CONCAT(CONCAT(poi.item_name, ' (', poi.quantity, ')') SEPARATOR ' : ') as products
+        CONCAT('• ', GROUP_CONCAT(DISTINCT poi.item_name SEPARATOR '\n• ')) as products,
+        (
+            SELECT COUNT(*) 
+            FROM shipment_log sl 
+            WHERE sl.shipment_id = s.id 
+              AND sl.user_id != ? 
+              AND sl.id > COALESCE((SELECT last_read_log_id FROM shipment_log_read_status WHERE shipment_id = s.id AND user_id = ?), 0)
+        ) as unread_log_count
       FROM shipment s
-      JOIN purchase_orders po ON po.id = s.po_id
-      LEFT JOIN vendor v ON v.id = s.vendor_id
-      LEFT JOIN vendor c ON c.id = po.confirmation_customer_id
+      LEFT JOIN purchase_orders po ON po.id = s.po_id
+      LEFT JOIN vendor v ON v.id = s.vendor_id -- Vendor from shipment table
+      LEFT JOIN vendor c ON c.id = po.confirmation_customer_id -- Customer from purchase_orders table for B2B
       LEFT JOIN delivery_place dpl ON dpl.id=po.port_loading
       LEFT JOIN delivery_place dpd ON dpd.id=po.port_discharge
       LEFT JOIN purchase_order_items poi ON poi.purchase_order_id = po.id
       WHERE po.shipment_stage_id > 0 AND s.is_inactive = 0
       GROUP BY s.id
       ORDER BY po.shipment_stage_id, s.id DESC
-      `
+      `, [req.session?.user?.id || 0, req.session?.user?.id || 0]
         );
         res.json(rows || []);
     } catch (e) {
@@ -122,34 +131,59 @@ router.get("/:shipUniqid", async (req, res) => {
            po.shipment_stage_id AS stage_id, 
            po.mode_shipment_id, po.no_containers,
            st.name AS stage_name,
-           v.display_name AS vendor_name, 
+           v.display_name AS vendor_name,           
+           va.bill_address_1, va.bill_address_2, va.bill_city, va.bill_zip_code,
+           v_state.name AS vendor_state_name,
+           v_country.name AS vendor_country_name,
+           vc.first_name as vendor_contact_first_name,
+           vc.last_name as vendor_contact_last_name,
+           vc.email as vendor_contact_email,
+           vc.phone as vendor_contact_phone,
+           vc.mobile as vendor_contact_mobile,
            dpl.name AS loading_name, 
            dpd.name AS discharge_name,
            inco.name AS inco_name,
            ms.name AS mode_shipment_name,
-           ct.name AS container_type_name,
+           -- Company details for consignee
+           cs.name AS company_name,
+           cs.full_address AS company_address,
+           cs.country AS company_country,
+           ct.name AS container_type_name, 
            cl.name AS container_load_name
       FROM shipment s
       JOIN purchase_orders po ON po.id = s.po_id      
       LEFT JOIN mode_of_shipment ms ON ms.id = po.mode_shipment_id
       LEFT JOIN inco_terms inco ON inco.id = po.inco_terms_id
       LEFT JOIN shipment_stage st ON st.id = po.shipment_stage_id
-      LEFT JOIN vendor v ON v.id = s.vendor_id
+      LEFT JOIN vendor v ON v.id = s.vendor_id      
+      LEFT JOIN vendor_address va ON va.vendor_id = v.id
+      LEFT JOIN state v_state ON v_state.id = va.bill_state_id
+      LEFT JOIN country v_country ON v_country.id = va.bill_country_id
+      LEFT JOIN contact vc ON vc.vendor_id = v.id AND vc.is_primary = 1
       LEFT JOIN delivery_place dpl ON dpl.id = po.port_loading
       LEFT JOIN delivery_place dpd ON dpd.id = po.port_discharge
       LEFT JOIN container_type ct ON ct.id = po.container_type_id
+      LEFT JOIN company_settings cs ON cs.id = po.company_id
       LEFT JOIN container_load cl ON cl.id = po.container_load_id
      WHERE s.ship_uniqid = ? LIMIT 1`, [id]);
     if (!row) return res.status(404).json({ error: { message: "Not found" } });
     
     // Also fetch PO items
     const [poItems] = await db.promise().query(`
-        SELECT i.item_name, i.quantity, um.name as uom_name
+        SELECT i.item_name, i.description, i.quantity, i.hscode,
+               (SELECT SUM(sc.net_weight) FROM shipment_container_item sc WHERE sc.product_id = i.item_id AND sc.container_id IN (SELECT id FROM shipment_container WHERE shipment_id = ?)) as net_weight,
+               (SELECT SUM(sc.gross_weight) FROM shipment_container_item sc WHERE sc.product_id = i.item_id AND sc.container_id IN (SELECT id FROM shipment_container WHERE shipment_id = ?)) as gross_weight,
+               um.name as uom_name,
+               (SELECT pi.file_path 
+                FROM product_images pi 
+                WHERE pi.product_id = i.item_id 
+                ORDER BY pi.is_primary DESC, pi.id ASC 
+                LIMIT 1) as image_url
         FROM purchase_order_items i
         LEFT JOIN uom_master um ON um.id = i.uom_id
         WHERE i.purchase_order_id = ?
         ORDER BY i.id ASC
-    `, [row.po_id]);
+    `, [row.id, row.id, row.po_id]);
     
     // Also fetch container details if they exist
     const [containers] = await db.promise().query(`SELECT * FROM shipment_container WHERE shipment_id = ?`, [row.id]);
@@ -185,14 +219,23 @@ router.get("/:shipUniqid", async (req, res) => {
         });
     }
     
-    // Also fetch common files for the shipment
-    const [commonFiles] = await db.promise().query(`
+    // Fetch common files for the shipment (from shipment_file table)
+    const [shipmentFiles] = await db.promise().query(`
         SELECT sf.*, dt.name as document_type_name, dt.code as document_type_code
         FROM shipment_file sf
         JOIN document_type dt ON dt.id = sf.document_type_id
         WHERE sf.shipment_id = ?`, [row.id]);
     
-    res.json({ ...row, po_items: poItems || [], containers: containers || [], commonFiles: commonFiles || [] });
+    // Fetch files attached to the original Purchase Order (from purchase_order_attachments table)
+    const [poAttachments] = await db.promise().query(`
+        SELECT id, file_name, file_path, mime_type, size_bytes, created_at
+        FROM purchase_order_attachments
+        WHERE purchase_order_id = ?`, [row.po_id]);
+
+    // Combine both sets of files into one `commonFiles` array for the frontend
+    const allFiles = [...(shipmentFiles || []), ...(poAttachments || []).map(f => ({ ...f, document_type_code: 'po_document' }))];
+    
+    res.json({ ...row, po_items: poItems || [], containers: containers || [], commonFiles: allFiles });
 });
 
 /* ---------- update planned details (from wizard edit) ---------- */

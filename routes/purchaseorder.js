@@ -1670,22 +1670,16 @@ router.get("/items/:poId", async (req, res) => {
                  i.uom_id,
                  um.name as uom_label,
                  -- Fetch primary product image
-                 (SELECT pi.file_path 
+                 (SELECT pi.thumbnail_path 
                   FROM product_images pi 
                   WHERE pi.product_id = i.item_id 
                   ORDER BY pi.is_primary DESC, pi.id ASC 
-                  LIMIT 1) as image_url,
-                 -- Fetch packing alias and text from the first product_details entry
-                 (SELECT pd.packing_alias 
-                  FROM product_details pd 
-                  WHERE pd.product_id = i.item_id 
-                  ORDER BY pd.id ASC 
-                  LIMIT 1) as packing_alias,
-                 (SELECT pd.packing_text 
-                  FROM product_details pd 
-                  WHERE pd.product_id = i.item_id 
-                  ORDER BY pd.id ASC 
-                  LIMIT 1) as packing_text
+                  LIMIT 1) as thumbnail_path,
+                 (SELECT pi.file_path
+                  FROM product_images pi 
+                  WHERE pi.product_id = i.item_id 
+                  ORDER BY pi.is_primary DESC, pi.id ASC 
+                  LIMIT 1) as image_url
              FROM purchase_order_items AS i
              LEFT JOIN uom_master um ON um.id = i.uom_id
              WHERE i.purchase_order_id = ?
@@ -1697,5 +1691,97 @@ router.get("/items/:poId", async (req, res) => {
         res.status(500).json(errPayload(err?.message || "Failed to fetch purchase order items"));
     }
 });
+
+router.post("/create-from-po/:uniqid", upload.single('confirmation_attachment'), async (req, res) => {
+    const { uniqid } = req.params;
+    const { containers_stock_sales, containers_back_to_back, customer_id } = req.body;
+    const userId = req.session?.user?.id;
+    const attachment = req.file;
+
+    if (!userId) return res.status(401).json(errPayload("Authentication required."));
+
+    const conn = await db.promise().getConnection();
+    try {
+        await conn.beginTransaction();
+
+        // --- 1. Fetch PO Details & Validate Container Counts ---
+        const [[po]] = await conn.query(
+            `SELECT id, vendor_id, po_number, no_containers FROM purchase_orders WHERE po_uniqid = ? LIMIT 1`,
+            [uniqid]
+        );
+        if (!po) {
+            throw new Error("Purchase Order not found.");
+        }
+
+        const stockContainers = Number(containers_stock_sales) || 0;
+        const b2bContainers = Number(containers_back_to_back) || 0;
+        const totalEntered = stockContainers + b2bContainers;
+
+        if (totalEntered !== (Number(po.no_containers) || 0)) {
+            throw new Error(`Container count mismatch. PO has ${po.no_containers}, but ${totalEntered} were provided.`);
+        }
+        if (b2bContainers > 0 && !customer_id) { // This validation is still important
+            throw new Error('Customer is required for Back to Back sales.');
+        }
+
+        // --- 2. Determine Confirmation Type ---
+        let confirmationType;
+        if (stockContainers > 0 && b2bContainers === 0) {
+            confirmationType = 'stock_and_sales';
+        } else if (b2bContainers > 0 && stockContainers === 0) {
+            confirmationType = 'back_to_back';
+        } else {
+            confirmationType = 'mixed';
+        }
+
+        // --- 3. Create a SINGLE Shipment Record ---
+        const shipUniqid = `ship_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
+        const [shipmentResult] = await conn.query(
+            `INSERT INTO shipment (ship_uniqid, po_id, vendor_id, created_by, created_date) VALUES (?, ?, ?, ?, NOW())`,
+            [shipUniqid, po.id, po.vendor_id, userId]
+        );
+        const newShipmentId = shipmentResult.insertId;
+
+        // --- 4. Update the Purchase Order with all confirmation details ---
+        await conn.query(
+            `UPDATE purchase_orders SET 
+                status_id = 7, 
+                shipment_stage_id = 1,
+                confirmation_type = ?,
+                confirmation_customer_id = ?,
+                containers_stock_sales = ?,
+                containers_back_to_back = ?
+             WHERE id = ?`,
+            [confirmationType, (b2bContainers > 0 ? customer_id : null), stockContainers, b2bContainers, po.id]
+        );
+
+        // --- 5. Handle Attachment ---
+        if (attachment) {
+            await conn.query(
+                `INSERT INTO purchase_order_attachments
+                   (purchase_order_id, file_name, file_path, mime_type, size_bytes, created_at, category)
+                 VALUES (?, ?, ?, ?, ?, NOW(), ?)`,
+                [po.id, attachment.originalname, relPath(attachment), attachment.mimetype, attachment.size, 'CONFIRMATION']
+            );
+        }
+
+        // --- 6. Log History ---
+        await addHistory(conn, { module: 'purchase_order', moduleId: po.id, userId, action: 'STATUS_CHANGED', details: { to_status: 'Confirmed' } });
+        await addHistory(conn, { module: 'shipment', moduleId: newShipmentId, userId, action: 'CREATED', details: { from_po: po.po_number } });
+
+        await conn.commit();
+        res.status(201).json({ message: "Shipment created successfully.", shipment: { id: newShipmentId, uniqid: shipUniqid } });
+
+    } catch (error) {
+        await conn.rollback();
+        console.error("Failed to create shipment from PO:", error);
+        res.status(500).json(errPayload(error.message || "An error occurred."));
+    } finally {
+        conn.release();
+    }
+});
+
+
+
 
 export default router;
