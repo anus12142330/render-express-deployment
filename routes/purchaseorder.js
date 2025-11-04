@@ -6,10 +6,19 @@ import path from "path";
 import fs from "fs";
 import crypto from "crypto";
 import dayjs from "dayjs";
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+import generatePdf from "./generatePdf.js";
 
 const router = express.Router();
 
 /* ------------------------------ helpers ------------------------------ */
+const PO_PDF_DIR = path.resolve("uploads/purchaseorder/pdf");
+fs.mkdirSync(PO_PDF_DIR, { recursive: true });
+
+
 const errPayload = (message, type = "APP_ERROR", hint) => ({ error: { message, type, hint } });
 
 const PO_UPLOAD_DIR = path.resolve("uploads/purchaseorder");
@@ -21,6 +30,12 @@ const poStorage = multer.diskStorage({
         cb(null, crypto.randomBytes(16).toString("hex") + path.extname(file.originalname)),
 });
 const upload = multer({ storage: poStorage });
+
+const pdfStorage = multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, PO_PDF_DIR),
+    filename: (_req, file, cb) => cb(null, `po_${crypto.randomBytes(12).toString("hex")}${path.extname(file.originalname)}`),
+});
+const uploadPdf = multer({ storage: pdfStorage });
 
 const uploadFields = upload.fields([
     { name: "poAttachment", maxCount: 1 }, // legacy single
@@ -1337,12 +1352,13 @@ router.put("/:uniqid", uploadFields, async (req, res) => {
 });
 
 /* ---------------------------------- approve --------------------------------- */
-router.post('/:id/approve', async (req, res) => { // Corrected from previous diff, path is correct
+router.post('/:id/approve', uploadPdf.single('pdfFile'), async (req, res) => {
     const { id } = req.params;
     const { comment } = req.body;
     const userId = req.session?.user?.id;
     const userName = req.session?.user?.name;
-
+    const pdfFile = req.file;
+    
     if (!userId) {
         return res.status(401).json(errPayload('Authentication required.'));
     }
@@ -1351,14 +1367,18 @@ router.post('/:id/approve', async (req, res) => { // Corrected from previous dif
     try {
         await conn.beginTransaction();
 
+        // Determine the PDF path to save. It will be null if no file was uploaded.
+        const pdfPath = pdfFile ? path.join('uploads/purchaseorder/pdf', pdfFile.filename).replace(/\\/g, '/') : null;
+
         const [updateResult] = await conn.query(
             `UPDATE purchase_orders SET
                 status_id = ?,
                 approval_comment = ?,
                 approved_by_id = ?,
-                approved_at = NOW()             
+                approved_at = NOW(),
+                pdf_path = ?
              WHERE id = ? AND status_id = ?`, // Only approve if status is 'Submitted for Approval'
-            [1, comment || null, userId, id, 8] // 1: Approved, 8: Submitted for Approval
+            [1, comment || null, userId, pdfPath, id, 8] // 1: Approved, 8: Submitted for Approval
         );
 
         const updatedCount = updateResult.affectedRows;
@@ -1393,11 +1413,16 @@ router.post('/:id/approve', async (req, res) => { // Corrected from previous dif
 
         res.status(200).json({ message: 'Purchase Order approved successfully.' });
     } catch (error) {
+        // If something fails, delete the uploaded PDF file to prevent orphans
+        if (pdfFile) {
+            fs.promises.unlink(pdfFile.path).catch(err => console.error("Failed to clean up PDF on error:", err));
+        }
         await conn.rollback();
         console.error('Failed to approve PO:', error);
         res.status(500).json(errPayload(error.message || 'An error occurred during approval.'));
     } finally {
         conn.release();
+
     }
 });
 
@@ -1447,6 +1472,7 @@ router.post('/:id/reject', async (req, res) => {
         conn.release();
     }
 });
+
 /* ------------------------------- status update ---------------------------- */
 router.put("/:uniqid/status", async (req, res) => {
     const uniqid = req.params.uniqid;
