@@ -1807,6 +1807,41 @@ router.post("/create-from-po/:uniqid", upload.single('confirmation_attachment'),
     }
 });
 
+/* ------------------------- generate and save pdf ------------------------ */
+router.post('/:id/generate-and-save-pdf', uploadPdf.single('pdfFile'), async (req, res) => {
+    const { id } = req.params; // This is the PO *numeric* ID
+    const userId = req.session?.user?.id;
+    const pdfFile = req.file;
+
+    if (!userId) {
+        return res.status(401).json(errPayload('Authentication required.'));
+    }
+    if (!pdfFile) {
+        return res.status(400).json(errPayload('No PDF file was uploaded.'));
+    }
+
+    const conn = await db.promise().getConnection();
+    try {
+        const [[po]] = await conn.query('SELECT id FROM purchase_orders WHERE id = ?', [id]);
+        if (!po) {
+            // Clean up uploaded file if PO doesn't exist
+            fs.promises.unlink(pdfFile.path).catch(err => console.error("Failed to clean up PDF on error:", err));
+            return res.status(404).json(errPayload('Purchase Order not found.'));
+        }
+
+        // The file is already saved by multer, we just need the relative path
+        const relativePdfPath = path.join('uploads/purchaseorder/pdf', pdfFile.filename).replace(/\\/g, '/');
+
+        // Update the purchase_orders table with the path to the generated PDF
+        await conn.query('UPDATE purchase_orders SET pdf_path = ? WHERE id = ?', [relativePdfPath, id]);
+
+        res.status(200).json({ message: 'PDF saved successfully.', path: relativePdfPath });
+    } catch (error) {
+        res.status(500).json(errPayload(error.message || 'Failed to save PDF.'));
+    } finally {
+        conn.release();
+    }
+});
 
 
 
