@@ -135,6 +135,7 @@ router.get("/:shipUniqid", async (req, res) => {
            po.pdf_path, po.documents_payment_ids, po.documents_payment_labels,
            s.bl_type, s.freight_amount_currency_id,
            st.name AS stage_name,
+           curr.name AS freight_currency_name,
            v.display_name AS vendor_name,           
            va.bill_address_1, va.bill_address_2, va.bill_city, va.bill_zip_code,
            v_state.name AS vendor_state_name,
@@ -168,6 +169,7 @@ router.get("/:shipUniqid", async (req, res) => {
       LEFT JOIN delivery_place dpd ON dpd.id = po.port_discharge
       LEFT JOIN container_type ct ON ct.id = po.container_type_id
       LEFT JOIN company_settings cs ON cs.id = po.company_id
+      LEFT JOIN currency curr ON curr.id = s.freight_amount_currency_id
       LEFT JOIN container_load cl ON cl.id = po.container_load_id
      WHERE s.ship_uniqid = ? LIMIT 1`, [id]);
     if (!row) return res.status(404).json({ error: { message: "Not found" } });
