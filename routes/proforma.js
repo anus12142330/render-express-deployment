@@ -234,9 +234,9 @@ router.post("/", upload.array("attachments", 20), async (req, res) => {
             // Prepare header data for insertion
             const headerData = [
                 `INSERT INTO proforma_invoice (
-           uniqid, invoice_type, expo_id, exporter, e_phone, e_fax, buyer_id, is_consignee_same_as_buyer, consignee_id, buyer_address, b_phone, b_fax,
+           uniqid, invoice_type, expo_id, exporter, e_phone, e_fax, buyer_id, is_consignee_same_as_buyer, consignee_id, buyer_address, b_phone, b_fax, 
            consignee_name, consignee_address, c_phone, c_fax, port_loading, port_discharge,
-           port_entry, country_destination, mode_of_transport, incoterms,
+           port_entry, country_destination, mode_of_transport, incoterms, terms_of_delivery, containerized, delivery_schedule,
            partial_shipment, transhipment, proforma_invoice_no, date_issue, date_expiry,
            contract_reference, contract_date, sub_total, vat_total, grand_total,
            currency_sale, exchange_rate, status_id, user_id,
@@ -244,7 +244,7 @@ router.post("/", upload.array("attachments", 20), async (req, res) => {
            bank_id,
            documents_provided, terms_conditions, other_terms,
            buyer_reference
-         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
                 uniqid,
                 v(header.invoice_type, 'proforma_invoice'),
                 v(header.expo_id), v(header.exporter), v(header.e_phone), v(header.e_fax),
@@ -264,8 +264,10 @@ router.post("/", upload.array("attachments", 20), async (req, res) => {
                 !header.is_consignee_same_as_buyer ? v(header.c_fax, "") : null,
                 v(header.port_loading), v(header.port_discharge), 
                 
-                v(header.port_entry), v(header.country_destination), 
-                v(header.mode_of_transport), v(header.incoterms), v(header.partial_shipment), v(header.transhipment),
+                v(header.port_entry), v(header.country_destination),
+                v(header.mode_of_transport), v(header.incoterms),
+                v(header.terms_of_delivery), v(header.containerized), v(header.delivery_schedule),
+                v(header.partial_shipment), v(header.transhipment),
                 v(finalPiNo),
                 d(header.date_issue),
                 d(header.date_expiry),
@@ -430,7 +432,7 @@ router.put("/:id", upload.array("attachments", 20), async (req, res) => {
             const headerUpdateData = [
                 `UPDATE proforma_invoice SET 
            invoice_type=?, expo_id=?, exporter=?, e_phone=?, e_fax=?, is_consignee_same_as_buyer=?, consignee_id=?,
-           buyer_id=?, buyer_address=?, b_phone=?, b_fax=?,
+           buyer_id=?, buyer_address=?, b_phone=?, b_fax=?, 
            consignee_name=?, consignee_address=?, c_phone=?, c_fax=?,
            port_loading=?, port_discharge=?, port_entry=?, country_destination=?, mode_of_transport=?, incoterms=?, partial_shipment=?, transhipment=?,
            proforma_invoice_no=?, date_issue=?, date_expiry=?, sub_total=?, vat_total=?, grand_total=?,
@@ -438,7 +440,8 @@ router.put("/:id", upload.array("attachments", 20), async (req, res) => {
            currency_sale=?, exchange_rate=?, status_id=?, user_id=?,
            payment_terms_id=?, tenor=?, payment_description=?,
            bank_id=?,
-           documents_provided=?, terms_conditions=?, other_terms=?,
+           documents_provided=?, terms_conditions=?, other_terms=?, 
+           terms_of_delivery=?, containerized=?, delivery_schedule=?,
            buyer_reference=?
          WHERE id=?`,
                 v(header.invoice_type, 'proforma_invoice'),
@@ -458,12 +461,15 @@ router.put("/:id", upload.array("attachments", 20), async (req, res) => {
                 !header.is_consignee_same_as_buyer ? v(header.c_fax, "") : null,
                 v(header.port_loading), v(header.port_discharge), v(header.port_entry), v(header.country_destination),
                 v(header.mode_of_transport), v(header.incoterms), v(header.partial_shipment), v(header.transhipment),
-                v(finalPiNo), d(header.date_issue), d(header.date_expiry), n(totals?.sub_total), n(totals?.vat_total), n(totals?.grand_total),
+                v(finalPiNo), d(header.date_issue), d(header.date_expiry), n(totals?.sub_total), n(totals?.vat_total), n(totals?.grand_total), 
                 v(header.contract_reference, ""), d(header.contract_date),
                 v(header.currency_sale), v(header.exchange_rate), v(header.status_id, 'DRAFT'), v(header.user_id),
                 v(payment?.payment_terms_id), v(payment?.tenor), v(payment?.description),
                 v(bank?.bank_id),
                 v(texts?.documents_provided), v(texts?.terms_conditions), v(texts?.other_terms),
+                v(header.terms_of_delivery),
+                v(header.containerized),
+                v(header.delivery_schedule),
                 v(header.buyer_reference),
                 proformaId,
             ];
@@ -609,13 +615,16 @@ router.get("/:id", async (req, res) => {
                 b.acc_name as account_name,
                 b.acc_no as account_number,
                 b.iban_no as iban,
-                b.swift_code as swift,
+                b.swift_code as swift,                
                 s.name as status_name,
                 s.bg_colour,
                 s.colour,
                 pi.exporter,
                 pi.e_phone,
-                pi.e_fax
+                pi.e_fax,
+                curr.currency_fullname as currency_name,
+                curr.name as currency_name,
+                curr.label as currency_label
             FROM proforma_invoice pi
             LEFT JOIN delivery_place p_load ON p_load.id = pi.port_loading
             LEFT JOIN delivery_place p_discharge ON p_discharge.id = pi.port_discharge
@@ -630,6 +639,7 @@ router.get("/:id", async (req, res) => {
             LEFT JOIN partial_shipment ts ON ts.id = pi.transhipment
             LEFT JOIN acc_bank_details b ON b.id = pi.bank_id
             LEFT JOIN status s ON s.id = pi.status_id
+            LEFT JOIN currency curr ON curr.id = pi.currency_sale
             WHERE pi.uniqid=?
         `, [id]);
 
@@ -655,7 +665,12 @@ router.get("/:id", async (req, res) => {
             "SELECT * FROM proforma_invoice_attachments WHERE proforma_invoice_id=? ORDER BY id",
             [header.id]
         );
-        res.json({ header, items, attachments });
+
+        const [[docTemplate]] = await db.promise().query(
+            "SELECT sign_path, stamp_path FROM document_templates WHERE document_id = 13 AND FIND_IN_SET(?, company_ids)",
+            [header.expo_id]
+        );
+        res.json({ header, items, attachments, docTemplate: docTemplate || null });
     } catch (e) {
         res.status(500).json({ error: "Failed to fetch proforma", detail: e.message });
     }

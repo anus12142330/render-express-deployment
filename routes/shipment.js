@@ -132,7 +132,8 @@ router.get("/:shipUniqid", async (req, res) => {
     SELECT s.*, po.po_number, po.po_uniqid, 
            po.shipment_stage_id AS stage_id, 
            po.mode_shipment_id, po.no_containers,
-           po.pdf_path,
+           po.pdf_path, po.documents_payment_ids, po.documents_payment_labels,
+           s.bl_type, s.freight_amount_currency_id,
            st.name AS stage_name,
            v.display_name AS vendor_name,           
            va.bill_address_1, va.bill_address_2, va.bill_city, va.bill_zip_code,
@@ -170,6 +171,14 @@ router.get("/:shipUniqid", async (req, res) => {
       LEFT JOIN container_load cl ON cl.id = po.container_load_id
      WHERE s.ship_uniqid = ? LIMIT 1`, [id]);
     if (!row) return res.status(404).json({ error: { message: "Not found" } });
+
+    // Fetch PO documents
+    const [poDocuments] = await db.promise().query(`
+        SELECT spd.id, spd.document_type_id, spd.document_name, dt.name as document_type_name
+        FROM shipment_po_document spd
+        JOIN document_type dt ON dt.id = spd.document_type_id
+        WHERE spd.shipment_id = ?
+    `, [row.id]);
     
     // Also fetch PO items
     const [poItems] = await db.promise().query(`
@@ -238,7 +247,7 @@ router.get("/:shipUniqid", async (req, res) => {
     // Combine both sets of files into one `commonFiles` array for the frontend
     const allFiles = [...(shipmentFiles || []), ...(poAttachments || []).map(f => ({ ...f, document_type_code: 'po_document' }))];
     
-    res.json({ ...row, po_items: poItems || [], containers: containers || [], commonFiles: allFiles });
+    res.json({ ...row, po_items: poItems || [], containers: containers || [], commonFiles: allFiles, po_documents: poDocuments || [] });
 });
 
 /* ---------- update planned details (from wizard edit) ---------- */
@@ -253,7 +262,7 @@ router.put("/:shipUniqid/planned-details", upload.none(), async (req, res) => {
 
         const {
             bl_description, free_time,
-            discharge_port_local_charges, discharge_port_agent, freight_charges, freight_payment_terms, freight_amount_if_payable,
+            discharge_port_local_charges, discharge_port_agent, freight_charges, freight_payment_terms, freight_amount_if_payable, freight_amount_currency_id, bl_type, po_documents,
             etd_date, vessel_name, shipping_line_name, shipper, consignee, notify_party
         } = req.body;
 
@@ -266,7 +275,7 @@ router.put("/:shipUniqid/planned-details", upload.none(), async (req, res) => {
         const fieldsToCompare = {
             bl_description: 'BL Description', free_time: 'Free Time',
             discharge_port_local_charges: 'POD Local Charges', discharge_port_agent: 'POD Agent', freight_charges: 'Freight Charges',
-            freight_payment_terms: 'Freight Terms',
+            freight_payment_terms: 'Freight Terms', bl_type: 'BL Type', freight_amount_currency_id: 'Freight Currency',
             freight_amount_if_payable: 'Freight Amount', etd_date: 'ETD', vessel_name: 'Vessel Name',
             shipping_line_name: 'Shipping Line', shipper: 'Shipper', consignee: 'Consignee', notify_party: 'Notify Party'
         };
@@ -290,13 +299,28 @@ router.put("/:shipUniqid/planned-details", upload.none(), async (req, res) => {
         await connection.query(
             `UPDATE shipment SET
                 bl_description = ?, free_time = ?, discharge_port_local_charges = ?,
-                discharge_port_agent = ?, freight_charges = ?, freight_payment_terms = ?, freight_amount_if_payable = ?,
+                discharge_port_agent = ?, freight_charges = ?, freight_payment_terms = ?, freight_amount_if_payable = ?, freight_amount_currency_id = ?, bl_type = ?,
                 etd_date = ?, vessel_name = ?, shipping_line_name = ?, shipper = ?, consignee = ?, notify_party = ?,
                 updated_date = NOW()
             WHERE id = ?`,
-            [bl_description || null, free_time || null, discharge_port_local_charges || null, discharge_port_agent || null, freight_charges || null, freight_payment_terms || null, freight_amount_if_payable || null, etd_date || null, vessel_name || null, shipping_line_name || null, shipper || null, consignee || null, notify_party || null, oldShipment.id]
+            [bl_description || null, free_time || null, discharge_port_local_charges || null, discharge_port_agent || null, freight_charges || null, freight_payment_terms || null, freight_amount_if_payable || null, freight_amount_currency_id || null, bl_type || null, etd_date || null, vessel_name || null, shipping_line_name || null, shipper || null, consignee || null, notify_party || null, oldShipment.id]
         );
 
+        // Handle PO Documents
+        await connection.query('DELETE FROM shipment_po_document WHERE shipment_id = ?', [oldShipment.id]);
+        const poDocumentsParsed = typeof po_documents === 'string' ? JSON.parse(po_documents) : po_documents;
+        if (poDocumentsParsed && Array.isArray(poDocumentsParsed) && poDocumentsParsed.length > 0) {
+            const poDocValues = poDocumentsParsed
+                .filter(doc => doc.document_type_id) // Ensure document type is selected
+                .map(doc => [oldShipment.id, doc.document_type_id, null]);
+            
+            if (poDocValues.length > 0) {
+                await connection.query(
+                    'INSERT INTO shipment_po_document (shipment_id, document_type_id, document_name) VALUES ?',
+                    [poDocValues]
+                );
+            }
+        }
         // Add history for the update
         await addHistory(connection, {
             module: 'shipment',
@@ -804,7 +828,7 @@ router.post("/create-from-po", upload.none(), async (req, res) => {
         const {
             po_id, // This is the purchase_order.id
             bl_description, free_time, discharge_port_local_charges, discharge_port_agent, freight_charges,
-            freight_payment_terms, freight_amount_if_payable,
+            freight_payment_terms, freight_amount_if_payable, freight_amount_currency_id, bl_type, po_documents,
             etd_date, vessel_name, shipping_line_name, shipper, consignee, notify_party
         } = req.body;
 
@@ -823,17 +847,33 @@ router.post("/create-from-po", upload.none(), async (req, res) => {
         await connection.query(
             `UPDATE shipment SET
                 bl_description = ?, free_time = ?, discharge_port_local_charges = ?, discharge_port_agent = ?,
-                freight_charges = ?, freight_payment_terms = ?, freight_amount_if_payable = ?,
+                freight_charges = ?, freight_payment_terms = ?, freight_amount_if_payable = ?, freight_amount_currency_id = ?, bl_type = ?,
                 etd_date = ?, vessel_name = ?, shipping_line_name = ?, shipper = ?, consignee = ?, notify_party = ?
             WHERE id = ?`,
             [
                 bl_description || null, free_time || null, discharge_port_local_charges || null,
-                discharge_port_agent || null, freight_charges || null, freight_payment_terms || null, freight_amount_if_payable || null,
+                discharge_port_agent || null, freight_charges || null, freight_payment_terms || null, freight_amount_if_payable || null, freight_amount_currency_id || null, bl_type || null,
                 etd_date || null, vessel_name || null, shipping_line_name || null, shipper || null, consignee || null, notify_party || null,
                 shipment.id
             ]
         );
         const shipmentId = shipment.id;
+
+        // Handle PO Documents
+        await connection.query('DELETE FROM shipment_po_document WHERE shipment_id = ?', [shipmentId]);
+        const poDocumentsParsed = typeof po_documents === 'string' ? JSON.parse(po_documents) : po_documents;
+        if (poDocumentsParsed && Array.isArray(poDocumentsParsed) && poDocumentsParsed.length > 0) {
+            const poDocValues = poDocumentsParsed
+                .filter(doc => doc.document_type_id)
+                .map(doc => [shipmentId, doc.document_type_id, null]);
+            
+            if (poDocValues.length > 0) {
+                await connection.query(
+                    'INSERT INTO shipment_po_document (shipment_id, document_type_id, document_name) VALUES ?',
+                    [poDocValues]
+                );
+            }
+        }
 
         // Move PO to Stage 2 (Planned)
         await connection.query(`UPDATE purchase_orders SET shipment_stage_id = 2 WHERE id = ?`, [shipment.po_id]);
