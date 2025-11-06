@@ -1771,14 +1771,19 @@ router.post("/create-from-po/:uniqid", upload.single('confirmation_attachment'),
         // --- 4. Update the Purchase Order with all confirmation details ---
         await conn.query(
             `UPDATE purchase_orders SET 
-                status_id = 7, 
-                shipment_stage_id = 1,
+                status_id = 7,
                 confirmation_type = ?,
                 confirmation_customer_id = ?,
                 containers_stock_sales = ?,
                 containers_back_to_back = ?
              WHERE id = ?`,
             [confirmationType, (b2bContainers > 0 ? customer_id : null), stockContainers, b2bContainers, po.id]
+        );
+
+        // --- Set the initial stage on the NEW shipment record ---
+        await conn.query(
+            `UPDATE shipment SET shipment_stage_id = 1 WHERE id = ?`,
+            [newShipmentId]
         );
 
         // --- 5. Handle Attachment ---

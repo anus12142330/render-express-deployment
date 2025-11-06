@@ -69,7 +69,7 @@ router.get("/board", async (req, res) => {
     try {
         const limit = Number(req.query.limit) || 0;
         const limitClause = limit > 0
-            ? `AND s.id IN (SELECT id FROM shipment WHERE po_id IN (SELECT id FROM purchase_orders WHERE shipment_stage_id = 1) ORDER BY id DESC LIMIT ${limit})`
+            ? `AND s.id IN (SELECT id FROM shipment WHERE shipment_stage_id = 1 ORDER BY id DESC LIMIT ${limit})`
             : '';
         const [rows] = await db.promise().query(
             `
@@ -78,12 +78,24 @@ router.get("/board", async (req, res) => {
         s.id AS shipment_id,
         s.po_id,
         s.vendor_id,
-        po.shipment_stage_id AS stage_id,
+        s.shipment_stage_id AS stage_id,        
         po.confirmation_type,
-        po.no_containers, -- This is the total
-        po.containers_stock_sales,
-        po.containers_back_to_back,
+        CASE
+            WHEN s.shipment_stage_id >= 2 THEN s.no_containers
+            ELSE po.no_containers
+        END AS no_containers,
+        CASE
+            WHEN s.shipment_stage_id >= 2 THEN s.containers_stock_sales
+            ELSE po.containers_stock_sales
+        END AS containers_stock_sales,
+        CASE
+            WHEN s.shipment_stage_id >= 2 THEN s.containers_back_to_back
+            ELSE po.containers_back_to_back
+        END AS containers_back_to_back,
         s.vessel_name,
+        s.total_lots, -- Fetch total_lots directly from the DB
+        s.lot_number,
+        s.parent_shipment_id,
         po.po_number,
         po.mode_shipment_id,
         po.pdf_path,
@@ -103,15 +115,16 @@ router.get("/board", async (req, res) => {
       FROM shipment s
       LEFT JOIN purchase_orders po ON po.id = s.po_id
       LEFT JOIN vendor v ON v.id = s.vendor_id -- Vendor from shipment table
-      LEFT JOIN vendor c ON c.id = po.confirmation_customer_id -- Customer from purchase_orders table for B2B
+      LEFT JOIN vendor c ON c.id = po.confirmation_customer_id
       LEFT JOIN delivery_place dpl ON dpl.id=po.port_loading
       LEFT JOIN delivery_place dpd ON dpd.id=po.port_discharge
       LEFT JOIN purchase_order_items poi ON poi.purchase_order_id = po.id
-      WHERE po.shipment_stage_id > 0 AND s.is_inactive = 0
+      WHERE s.shipment_stage_id > 0 AND s.is_inactive = 0
       GROUP BY s.id
-      ORDER BY po.shipment_stage_id, s.id DESC
+      ORDER BY s.shipment_stage_id, s.id DESC
       `, [req.session?.user?.id || 0, req.session?.user?.id || 0]
         );
+
         res.json(rows || []);
     } catch (e) {
         res.status(500).json({
@@ -129,8 +142,8 @@ router.get("/board", async (req, res) => {
 router.get("/:shipUniqid", async (req, res) => {
     const id = req.params.shipUniqid;
     const [[row]] = await db.promise().query(`
-    SELECT s.*, po.po_number, po.po_uniqid, 
-           po.shipment_stage_id AS stage_id, 
+    SELECT s.*, po.po_number, po.po_uniqid,
+           s.shipment_stage_id AS stage_id,
            po.mode_shipment_id, po.no_containers,
            po.pdf_path, po.documents_payment_ids, po.documents_payment_labels,
            s.bl_type, s.freight_amount_currency_id,
@@ -158,8 +171,8 @@ router.get("/:shipUniqid", async (req, res) => {
       FROM shipment s
       JOIN purchase_orders po ON po.id = s.po_id      
       LEFT JOIN mode_of_shipment ms ON ms.id = po.mode_shipment_id
-      LEFT JOIN inco_terms inco ON inco.id = po.inco_terms_id
-      LEFT JOIN shipment_stage st ON st.id = po.shipment_stage_id
+      LEFT JOIN inco_terms inco ON inco.id = po.inco_terms_id      
+      LEFT JOIN shipment_stage st ON st.id = s.shipment_stage_id
       LEFT JOIN vendor v ON v.id = s.vendor_id      
       LEFT JOIN vendor_address va ON va.vendor_id = v.id
       LEFT JOIN state v_state ON v_state.id = va.bill_state_id
@@ -178,7 +191,7 @@ router.get("/:shipUniqid", async (req, res) => {
     const [poDocuments] = await db.promise().query(`
         SELECT spd.id, spd.document_type_id, spd.document_name, dt.name as document_type_name
         FROM shipment_po_document spd
-        JOIN document_type dt ON dt.id = spd.document_type_id
+       JOIN document_type dt ON dt.id = spd.document_type_id
         WHERE spd.shipment_id = ?
     `, [row.id]);
     
@@ -235,7 +248,7 @@ router.get("/:shipUniqid", async (req, res) => {
     
     // Fetch common files for the shipment (from shipment_file table)
     const [shipmentFiles] = await db.promise().query(`
-        SELECT sf.*, dt.name as document_type_name, dt.code as document_type_code
+        SELECT sf.*, dt.name as document_type_name, dt.code as document_type_code, sf.is_draft
         FROM shipment_file sf
         JOIN document_type dt ON dt.id = sf.document_type_id
         WHERE sf.shipment_id = ?`, [row.id]);
@@ -585,9 +598,9 @@ router.put("/:shipUniqid/move", async (req, res) => {
         const userName = req.session?.user?.name ?? 'System';
 
         const [[row]] = await db.promise().query(
-            `SELECT s.id AS shipment_id, s.po_id, po.shipment_stage_id,
+            `SELECT s.id AS shipment_id, s.po_id, s.shipment_stage_id,
              dpl.name as loading_name,dpd.name as discharge_name
-         FROM shipment s JOIN purchase_orders po ON po.id = s.po_id
+         FROM shipment s JOIN purchase_orders po ON po.id = s.po_id -- Keep join for port names
          LEFT JOIN vendor v ON v.id=s.vendor_id
          LEFT JOIN delivery_place dpl ON dpl.id=po.port_loading
          LEFT JOIn delivery_place dpd ON dpd.id=po.port_discharge
@@ -745,8 +758,8 @@ router.put("/:shipUniqid/move", async (req, res) => {
             // other stages: keep payload in history only
         }
 
-        // update PO stage
-        await db.promise().query(`UPDATE purchase_orders SET shipment_stage_id = ? WHERE id = ?`, [toStageId, row.po_id]);
+        // update SHIPMENT stage
+        await db.promise().query(`UPDATE shipment SET shipment_stage_id = ? WHERE id = ?`, [toStageId, row.shipment_id]);
 
         // Get stage names for history
         const [[fromStage]] = await db.promise().query(`SELECT name FROM shipment_stage WHERE id = ?`, [fromStageId]);
@@ -837,7 +850,7 @@ router.post("/create-from-po", upload.none(), async (req, res) => {
         // Find the existing shipment record linked to the Purchase Order
         // The frontend sends shipment.id as po_id, so we find by shipment.id
         const [[shipment]] = await connection.query(
-            `SELECT s.id, s.ship_uniqid, s.po_id FROM shipment s JOIN purchase_orders po ON s.po_id = po.id WHERE po.id = ? AND po.shipment_stage_id = 1`,
+            `SELECT s.id, s.ship_uniqid, s.po_id FROM shipment s WHERE s.po_id = ? AND s.shipment_stage_id = 1`,
             [po_id]
         );
 
@@ -845,18 +858,34 @@ router.post("/create-from-po", upload.none(), async (req, res) => {
             return res.status(404).json(errPayload("Shipment not found or it is not in the 'To Do List' stage."));
         }
 
+        // Fetch the original container counts from the PO
+        const [[poDetails]] = await connection.query(
+            `SELECT containers_back_to_back, containers_stock_sales, no_containers FROM purchase_orders WHERE id = ?`,
+            [shipment.po_id]
+        );
+
+        if (!poDetails) {
+            return res.status(404).json(errPayload("Associated Purchase Order not found."));
+        }
+
+        // Use the counts from the PO, not the request body
+        const b2bCount = Number(poDetails.containers_back_to_back) || 0;
+        const ssCount = Number(poDetails.containers_stock_sales) || 0;
+        const totalContainers = Number(poDetails.no_containers) || 0;
+
         // UPDATE the existing shipment record with the details from the wizard
         await connection.query(
             `UPDATE shipment SET
                 bl_description = ?, free_time = ?, discharge_port_local_charges = ?, discharge_port_agent = ?,
                 freight_charges = ?, freight_payment_terms = ?, freight_amount_if_payable = ?, freight_amount_currency_id = ?, bl_type = ?,
-                etd_date = ?, vessel_name = ?, shipping_line_name = ?, shipper = ?, consignee = ?, notify_party = ?
+                etd_date = ?, vessel_name = ?, shipping_line_name = ?, shipper = ?, consignee = ?, notify_party = ?,
+                containers_back_to_back = ?, containers_stock_sales = ?, no_containers = ?
             WHERE id = ?`,
             [
                 bl_description || null, free_time || null, discharge_port_local_charges || null,
                 discharge_port_agent || null, freight_charges || null, freight_payment_terms || null, freight_amount_if_payable || null, freight_amount_currency_id || null, bl_type || null,
                 etd_date || null, vessel_name || null, shipping_line_name || null, shipper || null, consignee || null, notify_party || null,
-                shipment.id
+                b2bCount, ssCount, totalContainers, shipment.id
             ]
         );
         const shipmentId = shipment.id;
@@ -877,8 +906,8 @@ router.post("/create-from-po", upload.none(), async (req, res) => {
             }
         }
 
-        // Move PO to Stage 2 (Planned)
-        await connection.query(`UPDATE purchase_orders SET shipment_stage_id = 2 WHERE id = ?`, [shipment.po_id]);
+        // Move SHIPMENT to Stage 2 (Planned)
+        await connection.query(`UPDATE shipment SET shipment_stage_id = 2 WHERE id = ?`, [shipment.id]);
 
         // Add to history
         await addHistory(connection, {
@@ -904,10 +933,143 @@ router.post("/create-from-po", upload.none(), async (req, res) => {
     }
 });
 
+/* ---------- split a shipment (for partial shipment) and move to underloading ---------- */
+router.post("/:shipUniqid/split-shipment", async (req, res) => {
+    const { shipUniqid } = req.params;
+    const { b2b_containers, ss_containers } = req.body;
+    const userId = req.session?.user?.id;
+    const userName = req.session?.user?.name || 'System';
+
+    const b2bCount = Number(b2b_containers) || 0;
+    const ssCount = Number(ss_containers) || 0;
+    const totalMoving = b2bCount + ssCount;
+
+    if (totalMoving <= 0) {
+        return res.status(400).json(errPayload("At least one container must be moved."));
+    }
+
+    const conn = await db.promise().getConnection();
+    try {
+        await conn.beginTransaction();
+
+        // 1. Get original shipment and PO details
+        const [[originalShipment]] = await conn.query(
+            `SELECT s.*, po.po_number, s.shipment_stage_id
+             FROM shipment s 
+             JOIN purchase_orders po ON s.po_id = po.id 
+             WHERE s.ship_uniqid = ?`,
+            [shipUniqid]
+        );
+
+        if (!originalShipment) return res.status(404).json(errPayload("Original shipment not found."));
+
+        if (b2bCount > originalShipment.containers_back_to_back || ssCount > originalShipment.containers_stock_sales) {
+            return res.status(400).json(errPayload("Cannot move more containers than are available."));
+        }
+
+        // --- Lot Number Logic ---
+        // 1. Find the root shipment (the ultimate ancestor)
+        let rootShipmentId = originalShipment.id;
+        let current = originalShipment;
+        while (current.parent_shipment_id) {
+            const [[parent]] = await conn.query(`SELECT id, parent_shipment_id FROM shipment WHERE id = ?`, [current.parent_shipment_id]);
+            if (!parent) break;
+            rootShipmentId = parent.id;
+            current = parent;
+        }
+
+        // 2. Count lots already moved to Underloading or beyond to determine the next lot number in the queue.
+        const [[{ count }]] = await conn.query(
+            `SELECT COUNT(*) as count FROM shipment WHERE (id = ? OR parent_shipment_id = ?) AND shipment_stage_id >= 3`,
+            [rootShipmentId, rootShipmentId]
+        );
+        const newLotNumber = count + 1;
+
+        // 2. Create the new shipment record for the partial shipment
+        const newShipUniqid = crypto.randomBytes(8).toString('hex');
+       const [shipResult] = await conn.query(
+            `INSERT INTO shipment (
+                po_id, ship_uniqid, vendor_id, shipment_stage_id,
+                containers_back_to_back, containers_stock_sales, no_containers, lot_number, total_lots,
+                created_by, parent_shipment_id
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+                originalShipment.po_id, newShipUniqid, originalShipment.vendor_id, 3, // New shipment starts at Stage 3 (Underloading)
+               b2bCount, ssCount, totalMoving, newLotNumber, 1, // Default total_lots to 1, will be updated by recalculate
+                userId, originalShipment.id
+            ]
+        );
+
+        const newShipmentId = shipResult.insertId;
+
+        // 3. Copy planned details from the original shipment
+        await conn.query(
+            `UPDATE shipment SET shipper = ?, consignee = ?, notify_party = ?, bl_description = ?, free_time = ?, bl_type = ?, freight_payment_terms = ?, freight_amount_if_payable = ?, freight_amount_currency_id = ?, etd_date = ?, vessel_name = ?, shipping_line_name = ? WHERE id = ?`,
+            [originalShipment.shipper, originalShipment.consignee, originalShipment.notify_party, originalShipment.bl_description, originalShipment.free_time, originalShipment.bl_type, originalShipment.freight_payment_terms, originalShipment.freight_amount_if_payable, originalShipment.freight_amount_currency_id, originalShipment.etd_date, originalShipment.vessel_name, originalShipment.shipping_line_name, newShipmentId]
+        );
+
+         // 4. Copy existing shipment_po_document entries to the new shipment
+         const [existingPoDocuments] = await conn.query(
+            `SELECT document_type_id FROM shipment_po_document WHERE shipment_id = ?`,
+            [originalShipment.id]
+        );
+
+        for (const doc of existingPoDocuments) {
+            await conn.query(
+                `INSERT INTO shipment_po_document (shipment_id, document_type_id) VALUES (?, ?)`,
+                [newShipmentId, doc.document_type_id]
+            );
+        }
+
+        // --- Trigger recalculation of lot numbers and total_lots for the entire family ---
+        // This ensures total_lots is accurate for all family members after a split.
+        await recalculateLotNumbersInternal(conn, originalShipment.id, userId, userName);
+
+        // 3. Update the original SHIPMENT with remaining container counts
+        await conn.query(
+            `UPDATE shipment SET containers_back_to_back = containers_back_to_back - ?, containers_stock_sales = containers_stock_sales - ?, no_containers = no_containers - ? WHERE id = ?`,
+            [b2bCount, ssCount, totalMoving, originalShipment.id]
+        );
+
+        // 5. Add history log for the split action
+        await addHistory(conn, {
+            module: 'shipment',
+            moduleId: originalShipment.id,
+            userId: userId,
+            action: 'SHIPMENT_SPLIT',
+            details: {
+                user: userName,
+                original_po: originalShipment.po_number,
+                new_shipment_id: newShipmentId,
+                moved_b2b: b2bCount,
+                moved_ss: ssCount
+            }
+        });
+
+        // Also add a creation log for the new shipment
+        await addHistory(conn, {
+            module: 'shipment',
+            moduleId: newShipmentId,
+            userId: userId,
+            action: 'SHIPMENT_CREATED_FROM_SPLIT',
+            details: { user: userName, source_po: originalShipment.po_number }
+        });
+
+        await conn.commit();
+        res.json({ ok: true, newShipUniqid: newShipUniqid, newShipmentId: newShipmentId });
+    } catch (e) {
+        await conn.rollback();
+
+        res.status(500).json(errPayload("Failed to split shipment.", "DB_ERROR", e.message));
+    } finally {
+        conn.release();
+    }
+});
+
 /* ---------- save underloading details (SEA) and move to stage 3 ---------- */
 router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
     const { shipUniqid } = req.params;
-    const { pickup_date } = req.body;
+    const { etd_date, vessel_name, eta_date } = req.body;
     const keptCommonImagesJson = req.body.keptCommonImages || '[]'; // Safely get kept images
     const containers = JSON.parse(req.body.containers || '[]');
     const files = req.files || [];
@@ -918,10 +1080,16 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
     try {
         await conn.beginTransaction();
 
-        const [[shipment]] = await conn.query(`SELECT s.id, s.po_id, po.shipment_stage_id FROM shipment s JOIN purchase_orders po ON s.po_id = po.id WHERE s.ship_uniqid = ?`, [shipUniqid]);
+        const [[shipment]] = await conn.query(`SELECT id, po_id, shipment_stage_id FROM shipment WHERE ship_uniqid = ?`, [shipUniqid]);
         if (!shipment) throw new Error("Shipment not found.");
 
-        const isEditing = shipment.shipment_stage_id >= 3;
+        // Update common shipment details
+        await conn.query(
+            `UPDATE shipment SET etd_date = ?, vessel_name = ?, eta_date = ? WHERE id = ?`,
+            [etd_date || null, vessel_name || null, eta_date || null, shipment.id]
+        );
+
+        const isEditing = shipment.shipment_stage_id === 3;
         const [[commonDocType]] = await conn.query(`SELECT id FROM document_type WHERE code = 'underloading_common_photo' LIMIT 1`);
 
          const keptCommonImages = JSON.parse(keptCommonImagesJson || '[]');
@@ -987,8 +1155,8 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
                 containerId = container.id;
                 // UPDATE existing container
                 await conn.query(
-                    `UPDATE shipment_container SET container_no = ?, seal_no = ?, pickup_date = ? WHERE id = ? AND shipment_id = ?`,
-                    [container.container_no, container.seal_no, pickup_date || null, containerId, shipment.id]
+                    `UPDATE shipment_container SET container_no = ?, seal_no = ?, pickup_date = ? WHERE id = ?`,
+                    [container.container_no, container.seal_no || null, container.pickup_date || null, containerId]
                 );
                 // Log changes for history
                 const old = oldContainers[containerId];
@@ -1004,7 +1172,7 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
                 // INSERT new container
                 const [containerResult] = await conn.query(
                     `INSERT INTO shipment_container (shipment_id, container_no, seal_no, pickup_date) VALUES (?, ?, ?, ?)`,
-                    [shipment.id, container.container_no, container.seal_no, pickup_date || null]
+                    [shipment.id, container.container_no, container.seal_no || null, container.pickup_date || null]
                 );
                 containerId = containerResult.insertId;
             }
@@ -1052,7 +1220,29 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
             }
         } else {
             // This is a new entry, so move the stage and log the stage change.
-            await conn.query(`UPDATE purchase_orders SET shipment_stage_id = 3 WHERE id = ?`, [shipment.po_id]);
+
+            // --- Lot Number Logic for Last Lot ---
+            // If this is the last part of a split being moved, it needs its lot number assigned.
+            if (shipment.parent_shipment_id || shipment.lot_number > 1) {
+                let rootShipmentId = shipment.parent_shipment_id || shipment.id;
+                let current = shipment;
+                // Find the ultimate ancestor
+                while (current.parent_shipment_id) {
+                    const [[parent]] = await conn.query(`SELECT id, parent_shipment_id FROM shipment WHERE id = ?`, [current.parent_shipment_id]);
+                    if (!parent) break;
+                    rootShipmentId = parent.id;
+                    current = parent;
+                }
+                // Count lots already in Underloading or beyond to determine this lot's number
+                const [[{ count }]] = await conn.query(
+                    `SELECT COUNT(*) as count FROM shipment WHERE (id = ? OR parent_shipment_id = ?) AND shipment_stage_id >= 3`,
+                    [rootShipmentId, rootShipmentId]
+                );
+                const thisLotNumber = count + 1;
+                await conn.query(`UPDATE shipment SET lot_number = ? WHERE id = ?`, [thisLotNumber, shipment.id]);
+            }
+
+            await conn.query(`UPDATE shipment SET shipment_stage_id = 3 WHERE id = ?`, [shipment.id]);
             await addHistory(conn, {
                 module: 'shipment',
                 moduleId: shipment.id,
@@ -1090,10 +1280,10 @@ router.post("/:shipUniqid/underloading-air", upload.any(), async (req, res) => {
     try {
         await conn.beginTransaction();
 
-        const [[shipment]] = await conn.query(`SELECT s.id, s.po_id, s.airway_bill_no, s.flight_no, po.shipment_stage_id FROM shipment s JOIN purchase_orders po ON s.po_id = po.id WHERE s.ship_uniqid = ?`, [shipUniqid]);
+        const [[shipment]] = await conn.query(`SELECT id, po_id, airway_bill_no, flight_no, shipment_stage_id FROM shipment WHERE ship_uniqid = ?`, [shipUniqid]);
         if (!shipment) throw new Error("Shipment not found.");
 
-        const isEditing = shipment.shipment_stage_id >= 3;
+        const isEditing = shipment.shipment_stage_id === 3;
 
         // Update shipment with Airway Bill and Flight No
         await conn.query(
@@ -1164,7 +1354,26 @@ router.post("/:shipUniqid/underloading-air", upload.any(), async (req, res) => {
             });
         } else {
             // This is a new entry, so move the stage and log the stage change.
-            await conn.query(`UPDATE purchase_orders SET shipment_stage_id = 3 WHERE id = ?`, [shipment.po_id]);
+
+            // --- Lot Number Logic for Last Lot (Air) ---
+            if (shipment.parent_shipment_id || shipment.lot_number > 1) {
+                let rootShipmentId = shipment.parent_shipment_id || shipment.id;
+                let current = shipment;
+                while (current.parent_shipment_id) {
+                    const [[parent]] = await conn.query(`SELECT id, parent_shipment_id FROM shipment WHERE id = ?`, [current.parent_shipment_id]);
+                    if (!parent) break;
+                    rootShipmentId = parent.id;
+                    current = parent;
+                }
+                const [[{ count }]] = await conn.query(
+                    `SELECT COUNT(*) as count FROM shipment WHERE (id = ? OR parent_shipment_id = ?) AND shipment_stage_id >= 3`,
+                    [rootShipmentId, rootShipmentId]
+                );
+                const thisLotNumber = count + 1;
+                await conn.query(`UPDATE shipment SET lot_number = ? WHERE id = ?`, [thisLotNumber, shipment.id]);
+            }
+
+            await conn.query(`UPDATE shipment SET shipment_stage_id = 3 WHERE id = ?`, [shipment.id]);
             await addHistory(conn, {
                 module: 'shipment',
                 moduleId: shipment.id,
@@ -1184,6 +1393,193 @@ router.post("/:shipUniqid/underloading-air", upload.any(), async (req, res) => {
     } catch (e) {
         await conn.rollback();
         res.status(500).json(errPayload("Failed to save air freight details", "DB_ERROR", e.message));
+    } finally {
+        conn.release();
+    }
+});
+
+/* ---------- move to sailed (4) with confirmed details and docs ---------- */
+router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
+    const { shipUniqid } = req.params;
+    const userId = req.session?.user?.id;
+    const userName = req.session?.user?.name || 'System';
+    const conn = await db.promise().getConnection();
+
+    try {
+        await conn.beginTransaction();
+
+        const { confirm_sailing_date, confirm_vessel_name, confirm_eta_date, documents_meta } = req.body;
+
+        // --- 1. Validate Input ---
+        if (!confirm_sailing_date || !confirm_vessel_name || !confirm_eta_date) {
+            return res.status(400).json(errPayload("Sailing Date, Vessel Name, and ETA are all required."));
+        }
+
+        const [[shipment]] = await conn.query(`SELECT id, shipment_stage_id FROM shipment WHERE ship_uniqid = ?`, [shipUniqid]);
+        if (!shipment) {
+            throw new Error("Shipment not found.");
+        }
+        if (shipment.shipment_stage_id < 3) {
+            return res.status(400).json(errPayload("Shipment must be in or past the 'Underloading' stage to confirm sailed details."));
+        }
+
+        // --- 2. Fetch old values for history comparison ---
+        const [[oldShipmentDetails]] = await conn.query(
+            `SELECT etd_date, vessel_name, eta_date FROM shipment WHERE id = ?`,
+            [shipment.id]
+        );
+
+        const changes = {};
+        const formatDateForHistory = (dateValue) => dateValue ? dayjs(dateValue).format('DD-MMM-YYYY') : 'empty';
+
+        // Compare Sailing Date (ETD)
+        if (formatDateForHistory(oldShipmentDetails.etd_date) !== formatDateForHistory(confirm_sailing_date)) {
+            changes['Sailing Date (ETD)'] = {
+                from: formatDateForHistory(oldShipmentDetails.etd_date),
+                to: formatDateForHistory(confirm_sailing_date)
+            };
+        }
+        // Compare Vessel Name
+        if (oldShipmentDetails.vessel_name !== confirm_vessel_name) {
+            changes['Vessel Name'] = {
+                from: oldShipmentDetails.vessel_name || 'empty',
+                to: confirm_vessel_name || 'empty'
+            };
+        }
+        // Compare Discharge Port ETA
+        if (formatDateForHistory(oldShipmentDetails.eta_date) !== formatDateForHistory(confirm_eta_date)) {
+            changes['Discharge Port ETA'] = {
+                from: formatDateForHistory(oldShipmentDetails.eta_date),
+                to: formatDateForHistory(confirm_eta_date)
+            };
+        }
+
+        // --- 2. Update Shipment with Confirmed Details ---
+        await conn.query(`UPDATE shipment SET sailing_date = ?, vessel_name = ?, eta_date = ? WHERE id = ?`, [confirm_sailing_date, confirm_vessel_name, confirm_eta_date, shipment.id]);
+
+        // --- 3. Process File Uploads (existing logic) ---
+        const files = req.files || [];
+        const docMeta = JSON.parse(documents_meta || '{}');
+
+        for (const file of files) {
+            // fieldname will be like 'draft_123' or 'original_123'
+            const [uploadType, docTypeId] = file.fieldname.split('_');
+            if (!['draft', 'original'].includes(uploadType) || !docTypeId) continue;
+
+            const isDraft = uploadType === 'draft' ? 1 : 0;
+            const meta = docMeta[docTypeId] || {}; // Metadata is not used here but kept for future use
+
+            const relPath = path.posix.join("uploads", "shipment", path.basename(file.path));
+            await conn.query(
+                `INSERT INTO shipment_file (shipment_id, document_type_id, is_draft, file_name, file_path, mime_type, size_bytes, ref_no, ref_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [shipment.id, docTypeId, isDraft, file.originalname, relPath, file.mimetype, file.size, meta.ref_no || null, meta.ref_date || null]
+            );
+        }
+
+        // --- 4. Move Stage and Log History ---
+        if (shipment.shipment_stage_id === 3) {
+            await conn.query(`UPDATE shipment SET shipment_stage_id = 4 WHERE id = ?`, [shipment.id]);
+            await addHistory(conn, { module: 'shipment', moduleId: shipment.id, userId, action: 'STAGE_CHANGED', details: { from: 'Underloading', to: 'Sailed', user: userName } });
+        }
+
+        // Add history for confirmed details changes if any
+        if (Object.keys(changes).length > 0) {
+            await addHistory(conn, { module: 'shipment', moduleId: shipment.id, userId, action: 'SAILED_DETAILS_CONFIRMED', details: { changes, user: userName } });
+        }
+
+        await conn.commit();
+        res.json({ ok: true, shipUniqid, toStageId: 4, updated: { from_stage_id: 3 } });
+
+    } catch (e) {
+        await conn.rollback();
+        res.status(500).json(errPayload("Failed to move shipment to Sailed", "DB_ERROR", e.message));
+    } finally {
+        conn.release();
+    }
+});
+
+/* ---------- Internal function to recalculate lot numbers for a shipment family ---------- */
+async function recalculateLotNumbersInternal(conn, shipmentId, userId, userName) {
+    // 1. Find the ultimate root of the family
+    let rootShipmentId = shipmentId;
+    let current = { id: shipmentId, parent_shipment_id: null }; // Start with the provided shipment
+    // If the provided shipment has a parent, traverse up to find the ultimate root
+    const [[initialShipment]] = await conn.query(`SELECT id, parent_shipment_id FROM shipment WHERE id = ?`, [shipmentId]);
+    if (initialShipment) {
+        current = initialShipment;
+        while (current.parent_shipment_id) {
+            const [[parent]] = await conn.query(`SELECT id, parent_shipment_id FROM shipment WHERE id = ?`, [current.parent_shipment_id]);
+            if (!parent) break;
+            rootShipmentId = parent.id;
+            current = parent;
+        }
+    }
+
+    // 2. Get all shipments in the family (all descendants of the ultimate root)
+    // For MySQL < 8.0 (no recursive CTEs), we fetch all shipments and build the family tree in JS.
+    const [allShipmentsRaw] = await conn.query(`SELECT id, parent_shipment_id, shipment_stage_id, created_date FROM shipment`);
+    const childrenMap = new Map(); // parentId -> [childId, ...]
+    allShipmentsRaw.forEach(s => {
+        if (s.parent_shipment_id) {
+            if (!childrenMap.has(s.parent_shipment_id)) childrenMap.set(s.parent_shipment_id, []);
+            childrenMap.get(s.parent_shipment_id).push(s.id);
+        }
+    });
+
+    const familyMemberIds = new Set();
+    const findDescendants = (currentId) => {
+        familyMemberIds.add(currentId);
+        if (childrenMap.has(currentId)) {
+            for (const childId of childrenMap.get(currentId)) {
+                findDescendants(childId);
+            }
+        }
+    };
+    findDescendants(rootShipmentId);
+
+    // Filter `allShipmentsRaw` to get only members of this family and sort them
+    const family = allShipmentsRaw
+        .filter(s => familyMemberIds.has(s.id))
+        .sort((a, b) => {
+            // Sort by stage (>=3 first), then by creation date
+            const stageOrderA = a.shipment_stage_id >= 3 ? 0 : 1;
+            const stageOrderB = b.shipment_stage_id >= 3 ? 0 : 1;
+            if (stageOrderA !== stageOrderB) return stageOrderA - stageOrderB;
+            return new Date(a.created_date).getTime() - new Date(b.created_date).getTime();
+        });
+
+    // 3. Re-assign lot numbers and total_lots sequentially
+    const totalLotsInFamily = family.length;
+    let lotCounter = 1;
+    for (const member of family) {
+        await conn.query(`UPDATE shipment SET lot_number = ?, total_lots = ? WHERE id = ?`, [lotCounter, totalLotsInFamily, member.id]);
+        lotCounter++;
+    }
+
+    await addHistory(conn, { module: 'shipment', moduleId: shipmentId, userId, action: 'LOT_NUMBERS_RECALCULATED', details: { user: userName } });
+}
+
+/* ---------- fix/recalculate lot numbers for a shipment family ---------- */
+router.post("/:shipUniqid/recalculate-lots", async (req, res) => {
+    const { shipUniqid } = req.params;
+    const userId = req.session?.user?.id;
+    const conn = await db.promise().getConnection();
+
+    try {
+        await conn.beginTransaction();
+
+        // 1. Find the shipment and its root
+        const [[shipment]] = await conn.query(`SELECT id, parent_shipment_id FROM shipment WHERE ship_uniqid = ?`, [shipUniqid]);
+        if (!shipment) throw new Error("Shipment not found.");
+
+        await recalculateLotNumbersInternal(conn, shipment.id, userId, req.session?.user?.name || 'System');
+
+        await conn.commit();
+        res.json({ ok: true, message: `Lot numbers for this shipment family have been recalculated successfully.` });
+
+    } catch (e) {
+        await conn.rollback();
+        res.status(500).json(errPayload("Failed to recalculate lot numbers.", "DB_ERROR", e.message));
     } finally {
         conn.release();
     }
