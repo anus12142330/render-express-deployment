@@ -1269,8 +1269,7 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
 /* ---------- save underloading details (AIR) and move to stage 3 ---------- */
 router.post("/:shipUniqid/underloading-air", upload.any(), async (req, res) => {
     const { shipUniqid } = req.params;
-   //  const { airway_bill_no, flight_no } = req.body;
-    const { airway_bill_no, flight_no, keptCommonImages: keptCommonImagesJson, items: itemsJson } = req.body;
+    const { airway_bill_no, flight_no, arrival_date, arrival_time, keptCommonImages: keptCommonImagesJson, items: itemsJson } = req.body;
     const items = JSON.parse(itemsJson || '[]');
     const files = req.files || [];
     const userId = req.session?.user?.id;
@@ -1280,15 +1279,15 @@ router.post("/:shipUniqid/underloading-air", upload.any(), async (req, res) => {
     try {
         await conn.beginTransaction();
 
-        const [[shipment]] = await conn.query(`SELECT id, po_id, airway_bill_no, flight_no, shipment_stage_id FROM shipment WHERE ship_uniqid = ?`, [shipUniqid]);
+        const [[shipment]] = await conn.query(`SELECT id, po_id, airway_bill_no, flight_no, arrival_date, arrival_time, shipment_stage_id FROM shipment WHERE ship_uniqid = ?`, [shipUniqid]);
         if (!shipment) throw new Error("Shipment not found.");
 
         const isEditing = shipment.shipment_stage_id === 3;
 
         // Update shipment with Airway Bill and Flight No
         await conn.query(
-            `UPDATE shipment SET airway_bill_no = ?, flight_no = ? WHERE id = ?`,
-            [airway_bill_no, flight_no, shipment.id]
+            `UPDATE shipment SET airway_bill_no = ?, flight_no = ?, arrival_date = ?, arrival_time = ? WHERE id = ?`,
+            [airway_bill_no, flight_no, arrival_date || null, arrival_time || null, shipment.id]
         );
 
         // For Air, we create/update a single "dummy" container to hold the items, reusing the sea-freight tables.
@@ -1345,6 +1344,8 @@ router.post("/:shipUniqid/underloading-air", upload.any(), async (req, res) => {
             const changes = [];
             if (shipment.airway_bill_no !== airway_bill_no) changes.push(`Airway Bill changed from '${shipment.airway_bill_no || ''}' to '${airway_bill_no}'`);
             if (shipment.flight_no !== flight_no) changes.push(`Flight No changed from '${shipment.flight_no || ''}' to '${flight_no}'`);
+            if (dayjs(shipment.arrival_date).format('YYYY-MM-DD') !== arrival_date) changes.push(`Arrival Date changed`);
+            if (shipment.arrival_time !== arrival_time) changes.push(`Arrival Time changed`);
             // You could add item change detection here if needed in the future.
 
             await addHistory(conn, {
