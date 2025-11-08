@@ -93,8 +93,17 @@ router.get("/board", async (req, res) => {
             ELSE po.containers_back_to_back
         END AS containers_back_to_back,
         COALESCE(s.confirm_vessel_name, s.vessel_name) as vessel_name,
-        DATE_FORMAT(s.etd_date, '%d-%b-%Y') as etd_date,
-        DATE_FORMAT(s.eta_date, '%d-%b-%Y') as eta_date,        
+        -- For Underloading (3) and before, show ETD. For Sailed (4) and after, show the confirmed sailing date.
+        CASE 
+            WHEN s.shipment_stage_id >= 4 THEN DATE_FORMAT(s.sailing_date, '%d-%b-%Y')
+            ELSE DATE_FORMAT(s.etd_date, '%d-%b-%Y') 
+        END AS etd_date,
+        -- For Underloading (3) and before, show ETA. For Sailed (4) and after, show the confirmed arrival/ETA date.
+        CASE
+            WHEN s.shipment_stage_id >= 4 AND po.mode_shipment_id = 2 THEN DATE_FORMAT(s.confirm_arrival_date, '%d-%b-%Y') -- Air has confirm_arrival_date
+            WHEN s.shipment_stage_id >= 4 AND po.mode_shipment_id = 1 THEN DATE_FORMAT(s.eta_date, '%d-%b-%Y') -- Sea uses eta_date
+            ELSE DATE_FORMAT(s.eta_date, '%d-%b-%Y')
+        END as eta_date,
         COALESCE(s.confirm_airway_bill_no, s.airway_bill_no) as airway_bill_no,
         s.bl_no,
         COALESCE(s.confirm_airline, s.airline) as airline,
@@ -102,6 +111,14 @@ router.get("/board", async (req, res) => {
         s.confirm_airway_bill_no,
         s.confirm_flight_no,
         s.confirm_airline,
+        s.is_mofa_required,
+        s.shipping_line_name,
+        s.original_doc_receipt_mode,
+        s.doc_receipt_person_name,
+        s.doc_receipt_person_contact,
+        s.doc_receipt_courier_no,
+        s.doc_receipt_courier_company,
+        s.doc_receipt_tracking_link,
         DATE_FORMAT(s.confirm_arrival_date, '%d-%b-%Y') as confirm_arrival_date,
         s.confirm_arrival_time,
         s.total_lots, -- Fetch total_lots directly from the DB
@@ -116,7 +133,12 @@ router.get("/board", async (req, res) => {
         c.display_name as customer_name,
         po.po_uniqid AS po_uniqid,
         dpl.name as loading_name,
-        dpd.name as discharge_name,        
+        dpd.name as discharge_name,
+        -- For Underloading (3) and before, show Port of Loading. For Sailed (4) and after, show Port of Discharge.
+        CASE
+            WHEN s.shipment_stage_id >= 4 THEN dpd.name
+            ELSE dpl.name
+        END as relevant_port_name,
         GROUP_CONCAT(DISTINCT poi.item_name SEPARATOR ' • ') as products,
         (
             SELECT COUNT(*) 
@@ -181,6 +203,13 @@ router.get("/:shipUniqid", async (req, res) => {
            s.confirm_airway_bill_no,
            s.confirm_arrival_date,
            s.confirm_arrival_time,
+           s.is_mofa_required,
+           s.original_doc_receipt_mode,
+           s.doc_receipt_person_name,
+           s.doc_receipt_person_contact,
+           s.doc_receipt_courier_no,
+           s.doc_receipt_courier_company,
+           s.doc_receipt_tracking_link,
            s.confirm_flight_no,
            s.confirm_airline,
            s.confirm_shipping_line,
@@ -614,6 +643,7 @@ router.put("/:shipUniqid/move", async (req, res) => {
         const shipUniqid = req.params.shipUniqid;
         const toStageId = Number(req.body?.to_stage_id);
         const fields = req.body?.fields || {};
+        const isDryRun = req.body?.dry_run === true; // Check for dry run flag
         const userId = req.session?.user?.id ?? null;
         const userName = req.session?.user?.name ?? 'System';
 
@@ -630,13 +660,14 @@ router.put("/:shipUniqid/move", async (req, res) => {
         if (!row) return res.status(404).json({ error: { message: "Shipment not found" } });
 
         const fromStageId = Number(row.shipment_stage_id || 0);
+        if (toStageId === fromStageId) {
+          // If the user is trying to "move" to the same stage, it's an edit.
+          // We just process field updates without changing the stage or logging a stage change.
+          // The frontend will close the modal, so we just return success.
+          return res.json({ ok: true, updated: { from_stage_id: fromStageId, message: "Details updated for the current stage." } });
+        }
          // Disallow backwards
-             if (toStageId < fromStageId) {
-               return res.status(400).json({ error: { message: "Cannot move backwards" } });
-             }
-             if (toStageId === fromStageId) {
-               return res.json({ ok: true, updated: { from_stage_id: fromStageId } });
-             }
+        if (toStageId < fromStageId) { return res.status(400).json({ error: { message: "Cannot move backwards" } }); }
          // Enforce one-at-a-time forward
              if (toStageId > fromStageId + 1) {
                return res.status(400).json({ error: { message: "Only forward one stage is allowed" } });
@@ -719,7 +750,7 @@ router.put("/:shipUniqid/move", async (req, res) => {
 
         } else if (toStageId === 5) { // Cleared
             const { cleared_date } = fields;
-            if (!cleared_date) {
+            if (!isDryRun && !cleared_date) {
                 return res.status(400).json(errPayload("Cleared Date is required"));
             }
 
@@ -728,8 +759,48 @@ router.put("/:shipUniqid/move", async (req, res) => {
                 `SELECT discharge_date FROM shipment WHERE id=? LIMIT 1`,
                 [row.shipment_id]
             );
-            if (!prev?.discharge_date) {
-                return res.status(400).json(errPayload("Set Discharge Date (Stage 4) before Clearance"));
+            // Only check for discharge date if it's not a dry run.
+            if (!isDryRun) {
+                if (!prev?.discharge_date) {
+                    return res.status(400).json(errPayload("Set Discharge Date (Stage 4) before Clearance"));
+                }
+            }
+
+            // --- New Validation for Sailed Documents ---
+            // Get all required document types from the PO and any added in the "Planned" stage.
+            const [[po]] = await db.promise().query(
+                `SELECT documents_payment_ids FROM purchase_orders WHERE id = ?`,
+                [row.po_id]
+            );
+            const requiredDocIds = new Set(JSON.parse(po.documents_payment_ids || '[]').map(String));
+
+            const [plannedDocs] = await db.promise().query(
+                `SELECT document_type_id FROM shipment_po_document WHERE shipment_id = ?`,
+                [row.shipment_id]
+            );
+            plannedDocs.forEach(doc => requiredDocIds.add(String(doc.document_type_id)));
+
+            const [requiredDocTypes] = await db.promise().query(
+                `SELECT id, name FROM document_type WHERE id IN (?)`,
+                [[...requiredDocIds]]
+            );
+
+            // For each required document, check if at least one non-draft (original) version exists.
+            const missingOriginals = [];
+            for (const doc of requiredDocTypes) {
+                const [[{ count }]] = await db.promise().query(
+                    `SELECT COUNT(*) as count FROM shipment_file WHERE shipment_id = ? AND document_type_id = ? AND is_draft = 0`,
+                    [row.shipment_id, doc.id]
+                );
+                if (count === 0) {
+                    missingOriginals.push(doc.name);
+                }
+            }
+            if (missingOriginals.length > 0) return res.status(400).json(errPayload(`Cannot clear shipment. Please upload the 'Original' version for the following documents: ${missingOriginals.join(', ')}`));
+
+            // If this is a dry run, we've passed validation, so we can return success.
+            if (isDryRun) {
+                return res.json({ ok: true, message: "Dry run validation successful." });
             }
 
             // For Stage-5, be stricter: require ref_no + ref_date
@@ -1092,10 +1163,11 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
     const { etd_date, vessel_name, eta_date } = req.body;
     const keptCommonImagesJson = req.body.keptCommonImages || '[]'; // Safely get kept images
     const containers = JSON.parse(req.body.containers || '[]');
+    const isEditing = req.body.is_editing === 'true';
     const files = req.files || [];
     const userId = req.session?.user?.id;
     const userName = req.session?.user?.name || 'System';
-
+    
     const conn = await db.promise().getConnection();
     try {
         await conn.beginTransaction();
@@ -1109,7 +1181,6 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
             [etd_date || null, vessel_name || null, eta_date || null, shipment.id]
         );
 
-        const isEditing = shipment.shipment_stage_id === 3;
         const [[commonDocType]] = await conn.query(`SELECT id FROM document_type WHERE code = 'underloading_common_photo' LIMIT 1`);
 
          const keptCommonImages = JSON.parse(keptCommonImagesJson || '[]');
@@ -1175,8 +1246,8 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
                 containerId = container.id;
                 // UPDATE existing container
                 await conn.query(
-                    `UPDATE shipment_container SET container_no = ?, seal_no = ?, pickup_date = ? WHERE id = ?`,
-                    [container.container_no, container.seal_no || null, container.pickup_date || null, containerId]
+                    `UPDATE shipment_container SET container_no = ?, seal_no = ?, pickup_date = ? WHERE id = ?`, //
+                    [container.container_no, container.seal_no || null, (container.pickup_date && container.pickup_date.trim() !== '') ? container.pickup_date : null, containerId] //
                 );
                 // Log changes for history
                 const old = oldContainers[containerId];
@@ -1191,8 +1262,8 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
             } else {
                 // INSERT new container
                 const [containerResult] = await conn.query(
-                    `INSERT INTO shipment_container (shipment_id, container_no, seal_no, pickup_date) VALUES (?, ?, ?, ?)`,
-                    [shipment.id, container.container_no, container.seal_no || null, container.pickup_date || null]
+                    `INSERT INTO shipment_container (shipment_id, container_no, seal_no, pickup_date) VALUES (?, ?, ?, ?)`, //
+                    [shipment.id, container.container_no, container.seal_no || null, (container.pickup_date && container.pickup_date.trim() !== '') ? container.pickup_date : null] //
                 );
                 containerId = containerResult.insertId;
             }
@@ -1290,6 +1361,7 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
 router.post("/:shipUniqid/underloading-air", upload.any(), async (req, res) => {
     const { shipUniqid } = req.params;
     const { airway_bill_no, flight_no, airline, arrival_date, arrival_time, pickup_date, keptCommonImages: keptCommonImagesJson, items: itemsJson } = req.body;
+    const isEditing = req.body.is_editing === 'true';
     const items = JSON.parse(itemsJson || '[]');
     const files = req.files || [];
     const userId = req.session?.user?.id;
@@ -1302,20 +1374,18 @@ router.post("/:shipUniqid/underloading-air", upload.any(), async (req, res) => {
         const [[shipment]] = await conn.query(`SELECT id, po_id, airway_bill_no, flight_no, airline, arrival_date, arrival_time, shipment_stage_id FROM shipment WHERE ship_uniqid = ?`, [shipUniqid]);
         if (!shipment) throw new Error("Shipment not found.");
 
-        const isEditing = shipment.shipment_stage_id === 3;
-
         // Update shipment with Airway Bill and Flight No
         await conn.query(
             `UPDATE shipment SET airway_bill_no = ?, flight_no = ?, airline = ?, arrival_date = ?, arrival_time = ? WHERE id = ?`,
-            [airway_bill_no, flight_no, airline || null, arrival_date || null, arrival_time || null, shipment.id]
-        );
+            [airway_bill_no, flight_no, airline || null, arrival_date || null, (arrival_time && arrival_time.trim() !== '') ? arrival_time : null, shipment.id] //
+        ); //
 
         // For Air, we create/update a single "dummy" container to hold the items, reusing the sea-freight tables.
         const [[existingContainer]] = await conn.query(`SELECT id FROM shipment_container WHERE shipment_id = ? LIMIT 1`, [shipment.id]);
         let containerId;
         if (existingContainer) {
             containerId = existingContainer.id;
-            await conn.query(`UPDATE shipment_container SET container_no = ?, seal_no = ?, pickup_date = ? WHERE id = ?`, [airway_bill_no, flight_no, pickup_date || null, containerId]);
+            await conn.query(`UPDATE shipment_container SET container_no = ?, seal_no = ?, pickup_date = ? WHERE id = ?`, [airway_bill_no, flight_no, (pickup_date && pickup_date.trim() !== '') ? pickup_date : null, containerId]);
             await conn.query(`DELETE FROM shipment_container_item WHERE container_id = ?`, [containerId]); // Clear old items
         } else {
             const [cResult] = await conn.query(`INSERT INTO shipment_container (shipment_id, container_no, seal_no) VALUES (?, ?, ?)`, [shipment.id, airway_bill_no, flight_no]);
@@ -1432,8 +1502,11 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
 
         const {
             confirm_sailing_date, confirm_vessel_name, confirm_eta_date, bl_no, confirm_shipping_line, confirm_discharge_port_agent,
-            confirm_airway_bill_no, confirm_flight_no, confirm_airline, confirm_arrival_date, confirm_arrival_time,
-            documents_meta 
+            confirm_airway_bill_no, confirm_flight_no, confirm_airline, confirm_arrival_date, confirm_arrival_time, 
+            is_mofa_required, original_doc_receipt_mode, doc_receipt_person_name, doc_receipt_person_contact,
+            doc_receipt_courier_no, doc_receipt_courier_company, doc_receipt_tracking_link,
+            documents_meta,
+            is_editing // New flag from the frontend
         } = req.body;
 
 
@@ -1444,6 +1517,11 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
 
         const [[po]] = await conn.query(`SELECT mode_shipment_id FROM purchase_orders WHERE id = (SELECT po_id FROM shipment WHERE id = ?)`, [shipment.id]);
         const isAir = String(po.mode_shipment_id) === '2';
+
+        // If we are NOT editing, the shipment must be in stage 3 to proceed.
+        if (!is_editing && shipment.shipment_stage_id !== 3) {
+            return res.status(400).json(errPayload("Shipment must be in the 'Underloading' stage to confirm sailed details."));
+        }
 
         // --- 1. Validate Input ---
         if (isAir) {
@@ -1456,15 +1534,18 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
             }
         }
 
-        if (shipment.shipment_stage_id < 3) {
-            return res.status(400).json(errPayload("Shipment must be in or past the 'Underloading' stage to confirm sailed details."));
+        // Validate courier details if mode is 'courier'
+        if (original_doc_receipt_mode === 'courier' && (!doc_receipt_courier_no || !doc_receipt_courier_company)) {
+            return res.status(400).json(errPayload("Courier No. and Courier Company are required when receipt mode is 'Courier'."));
         }
 
         // --- 2. Fetch old values for history comparison ---
         const [[oldShipmentDetails]] = await conn.query(
-            `SELECT etd_date, vessel_name, eta_date, bl_no, confirm_shipping_line, confirm_discharge_port_agent,
+            `SELECT etd_date, vessel_name, eta_date, bl_no,shipping_line_name, confirm_shipping_line, confirm_discharge_port_agent,
                     airway_bill_no, flight_no, airline, confirm_airway_bill_no, confirm_flight_no, confirm_airline,
-                    arrival_date, arrival_time, confirm_arrival_date, confirm_arrival_time FROM shipment WHERE id = ?`,
+                    arrival_date, arrival_time, confirm_arrival_date, confirm_arrival_time,
+                    is_mofa_required, original_doc_receipt_mode, doc_receipt_person_name, doc_receipt_person_contact,
+                    doc_receipt_courier_no, doc_receipt_courier_company, doc_receipt_tracking_link FROM shipment WHERE id = ?`,
             [shipment.id]
         );
 
@@ -1511,19 +1592,26 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
                 changes['Confirm POD Agent'] = { from: oldShipmentDetails.confirm_discharge_port_agent || 'empty', to: confirm_discharge_port_agent };
             }
         }
+
+        if (String(oldShipmentDetails.is_mofa_required) !== String(is_mofa_required)) {
+            changes['MOFA Required'] = { from: oldShipmentDetails.is_mofa_required ? 'Yes' : 'No', to: is_mofa_required ? 'Yes' : 'No' };
+        }
+
         // --- 2. Update Shipment with Confirmed Details ---
         if (isAir) {
             await conn.query(
                 `UPDATE shipment SET 
-                    sailing_date = ?, 
-                    confirm_airway_bill_no = ?,
-                    confirm_flight_no = ?,
-                    confirm_airline = ?,
-                    confirm_arrival_date = ?,
-                    confirm_arrival_time = ?
+                    sailing_date = ?,
+                    confirm_airway_bill_no = ?, confirm_flight_no = ?, confirm_airline = ?,
+                    confirm_arrival_date = ?, confirm_arrival_time = ?, is_mofa_required = ?,
+                    original_doc_receipt_mode = ?, doc_receipt_person_name = ?, doc_receipt_person_contact = ?,
+                    doc_receipt_courier_no = ?, doc_receipt_courier_company = ?, doc_receipt_tracking_link = ?
                  WHERE id = ?`, 
                 [
-                    confirm_sailing_date, confirm_airway_bill_no, confirm_flight_no, confirm_airline, confirm_arrival_date, confirm_arrival_time,
+                    confirm_sailing_date, confirm_airway_bill_no, confirm_flight_no, confirm_airline, 
+                    confirm_arrival_date, (confirm_arrival_time && confirm_arrival_time.trim() !== '') ? confirm_arrival_time : null, is_mofa_required,
+                    original_doc_receipt_mode || null, doc_receipt_person_name || null, doc_receipt_person_contact || null,
+                    doc_receipt_courier_no || null, doc_receipt_courier_company || null, doc_receipt_tracking_link || null,
                     shipment.id
                 ]
             );
@@ -1532,14 +1620,17 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
                 `UPDATE shipment SET 
                     sailing_date = ?,
                     confirm_vessel_name = ?,
-                    eta_date = ?,
-                    bl_no = ?,
-                    confirm_shipping_line = ?,
-                    confirm_discharge_port_agent = ?
+                    eta_date = ?, bl_no = ?,
+                    confirm_shipping_line = ?, confirm_discharge_port_agent = ?, is_mofa_required = ?,
+                    original_doc_receipt_mode = ?, doc_receipt_person_name = ?, doc_receipt_person_contact = ?,
+                    doc_receipt_courier_no = ?, doc_receipt_courier_company = ?, doc_receipt_tracking_link = ?
                  WHERE id = ?`, 
                 [
                     confirm_sailing_date, confirm_vessel_name, confirm_eta_date,
                     bl_no, confirm_shipping_line, confirm_discharge_port_agent, 
+                    is_mofa_required,
+                    original_doc_receipt_mode || null, doc_receipt_person_name || null, doc_receipt_person_contact || null,
+                    doc_receipt_courier_no || null, doc_receipt_courier_company || null, doc_receipt_tracking_link || null,
                     shipment.id
                 ]
             );
@@ -1565,7 +1656,7 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
         }
 
         // --- 4. Move Stage and Log History ---
-        if (shipment.shipment_stage_id === 3) {
+        if (!is_editing && shipment.shipment_stage_id === 3) { // Only change stage if NOT editing
             await conn.query(`UPDATE shipment SET shipment_stage_id = 4 WHERE id = ?`, [shipment.id]);
             await addHistory(conn, { module: 'shipment', moduleId: shipment.id, userId, action: 'STAGE_CHANGED', details: { from: 'Underloading', to: 'Sailed', user: userName } });
         }
