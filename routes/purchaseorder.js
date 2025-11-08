@@ -748,8 +748,7 @@ router.post("/", uploadFields, async (req, res) => {
                 cleanStr(payload.portLoading),
                 cleanStr(payload.portDischarge),
                 cleanStr(payload.incoterm),
-                // Only save containers when mode_shipment_id === 1 (Sea), else NULL
-                Number(payload.mode_shipment_id) === 1 ? toIntOrNull(payload.containerCount) : null,
+                toIntOrNull(payload.containerCount), // Save containerCount regardless of mode
 
                 // Shipment fields
                 payload.mode_shipment_id || null,
@@ -1172,10 +1171,7 @@ router.put("/:uniqid", uploadFields, async (req, res) => {
                 cleanStr(payload.portLoading),
                 cleanStr(payload.portDischarge),
                 cleanStr(payload.incoterm),
-               // cleanStr(payload.containerCount),
-                (Number(payload.mode_shipment_id) === 1
-                    ? toIntOrNull(payload.containerCount)
-                        : null),
+                toIntOrNull(payload.containerCount), // Save containerCount regardless of mode
 
                 // NEW shipment fields
                 payload.mode_shipment_id || null,
@@ -1732,7 +1728,7 @@ router.post("/create-from-po/:uniqid", upload.single('confirmation_attachment'),
 
         // --- 1. Fetch PO Details & Validate Container Counts ---
         const [[po]] = await conn.query(
-            `SELECT id, vendor_id, po_number, no_containers FROM purchase_orders WHERE po_uniqid = ? LIMIT 1`,
+            `SELECT id, vendor_id, po_number, no_containers, mode_shipment_id FROM purchase_orders WHERE po_uniqid = ? LIMIT 1`,
             [uniqid]
         );
         if (!po) {
@@ -1763,8 +1759,8 @@ router.post("/create-from-po/:uniqid", upload.single('confirmation_attachment'),
         // --- 3. Create a SINGLE Shipment Record ---
         const shipUniqid = `ship_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
         const [shipmentResult] = await conn.query(
-            `INSERT INTO shipment (ship_uniqid, po_id, vendor_id, created_by, created_date) VALUES (?, ?, ?, ?, NOW())`,
-            [shipUniqid, po.id, po.vendor_id, userId]
+            `INSERT INTO shipment (ship_uniqid, po_id, vendor_id, created_by, created_date, no_containers, containers_stock_sales, containers_back_to_back) VALUES (?, ?, ?, ?, NOW(), ?, ?, ?)`,
+            [shipUniqid, po.id, po.vendor_id, userId, po.no_containers, stockContainers, b2bContainers]
         );
         const newShipmentId = shipmentResult.insertId;
 
