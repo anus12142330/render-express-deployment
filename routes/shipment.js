@@ -7,6 +7,12 @@ import sharp from 'sharp';
 import crypto from 'crypto';
 import db from "../db.js";
 import dayjs from "dayjs";
+import axios from 'axios';
+import utc from 'dayjs/plugin/utc.js'; // Import UTC plugin
+import timezone from 'dayjs/plugin/timezone.js'; // Import timezone plugin
+dayjs.extend(utc);
+dayjs.extend(timezone);
+import { fetchContainerDataFromDubaiTrade, saveOrUpdateContainerData } from '../../src/views/shipment/container-tracking.js';
 
 const router = express.Router();
 const errPayload = (message, type = "APP_ERROR", hint) => ({ error: { message, type, hint } });
@@ -104,6 +110,12 @@ router.get("/board", async (req, res) => {
             WHEN s.shipment_stage_id >= 4 AND po.mode_shipment_id = 1 THEN DATE_FORMAT(s.eta_date, '%d-%b-%Y') -- Sea uses eta_date
             ELSE DATE_FORMAT(s.eta_date, '%d-%b-%Y')
         END as eta_date,
+        -- Add scraped discharge date for comparison on the board, aliased correctly
+        (
+            SELECT MIN(dtcs.discharge_date) 
+            FROM dubai_trade_container_status dtcs 
+            WHERE dtcs.shipment_id = s.id
+        ) as scraped_discharge_date,
         COALESCE(s.confirm_airway_bill_no, s.airway_bill_no) as airway_bill_no,
         s.bl_no,
         COALESCE(s.confirm_airline, s.airline) as airline,
@@ -143,7 +155,7 @@ router.get("/board", async (req, res) => {
         (
             SELECT COUNT(*) 
             FROM shipment_log sl 
-            WHERE sl.shipment_id = s.id 
+            WHERE sl.shipment_id = s.id
               AND sl.user_id != ? 
               AND sl.id > COALESCE((SELECT last_read_log_id FROM shipment_log_read_status WHERE shipment_id = s.id AND user_id = ?), 0)
         ) as unread_log_count
@@ -154,7 +166,7 @@ router.get("/board", async (req, res) => {
       LEFT JOIN delivery_place dpl ON dpl.id=po.port_loading
       LEFT JOIN delivery_place dpd ON dpd.id=po.port_discharge
       LEFT JOIN purchase_order_items poi ON poi.purchase_order_id = po.id
-      WHERE s.shipment_stage_id > 0 AND s.is_inactive = 0
+      WHERE s.shipment_stage_id > 0 AND s.is_inactive = 0 
       GROUP BY s.id
       ORDER BY s.shipment_stage_id, s.id DESC
       `, [req.session?.user?.id || 0, req.session?.user?.id || 0]
@@ -262,7 +274,12 @@ router.get("/:shipUniqid", async (req, res) => {
     `, [row.id, row.id, row.po_id]);
     
     // Also fetch container details if they exist
-    const [containers] = await db.promise().query(`SELECT * FROM shipment_container WHERE shipment_id = ?`, [row.id]);
+    const [containers] = await db.promise().query(`
+        SELECT sc.*, dtcs.last_fetched_at, dtcs.discharge_date AS scraped_discharge_date, dtcs.location AS scraped_discharge_port
+        FROM shipment_container sc
+        LEFT JOIN dubai_trade_container_status dtcs ON sc.container_no = dtcs.container_no AND sc.shipment_id = dtcs.shipment_id
+        WHERE sc.shipment_id = ?
+    `, [row.id]);
     
     if (containers.length > 0) {
         const containerIds = containers.map(c => c.id);
@@ -375,7 +392,7 @@ router.put("/:shipUniqid/planned-details", upload.none(), async (req, res) => {
         const poDocumentsParsed = typeof po_documents === 'string' ? JSON.parse(po_documents) : po_documents;
         if (poDocumentsParsed && Array.isArray(poDocumentsParsed) && poDocumentsParsed.length > 0) {
             const poDocValues = poDocumentsParsed
-                .filter(doc => doc.document_type_id) // Ensure document type is selected
+                .filter(doc => doc.document_type_id && !isNaN(Number(doc.document_type_id)) && Number(doc.document_type_id) > 0)
                 .map(doc => [oldShipment.id, doc.document_type_id, null]);
             
             if (poDocValues.length > 0) {
@@ -986,7 +1003,7 @@ router.post("/create-from-po", upload.none(), async (req, res) => {
         const poDocumentsParsed = typeof po_documents === 'string' ? JSON.parse(po_documents) : po_documents;
         if (poDocumentsParsed && Array.isArray(poDocumentsParsed) && poDocumentsParsed.length > 0) {
             const poDocValues = poDocumentsParsed
-                .filter(doc => doc.document_type_id)
+                .filter(doc => doc.document_type_id && !isNaN(Number(doc.document_type_id)) && Number(doc.document_type_id) > 0)
                 .map(doc => [shipmentId, doc.document_type_id, null]);
             
             if (poDocValues.length > 0) {
@@ -1762,6 +1779,63 @@ router.post("/:shipUniqid/recalculate-lots", async (req, res) => {
     } finally {
         conn.release();
     }
+});
+
+/* ---------- Get Dubai Trade Container Status (Scraping) ---------- */
+router.get("/dubai-trade-status/:containerNo", async (req, res) => {
+     const pool = db.promise();
+  const containerNo = (req.params.containerNo || '').trim().toUpperCase();
+  const shipmentContainerId = Number(req.query.scId || 0) || null;     // REQUIRED for cache key
+  const shipmentId = Number(req.query.shipmentId || 0) || null;        // for bookkeeping
+
+  if (!containerNo) return res.status(400).json({ ok: false, error: 'Container number is required.' });
+  if (!shipmentContainerId) return res.status(400).json({ ok: false, error: 'scId (shipment_container_id) is required.' });
+
+  try {
+    // 1) Try cache (within last 3 hours)
+    const [[cached]] = await pool.query(
+      `SELECT raw_data, last_fetched_at
+         FROM dubai_trade_container_status
+        WHERE container_no = ? AND shipment_container_id = ?
+        ORDER BY last_fetched_at DESC
+        LIMIT 1`,
+      [containerNo, shipmentContainerId]
+    );
+
+    // Use minutes for a more precise time comparison to avoid timezone-related issues.
+    const minutesSinceLastFetch = cached ? dayjs().diff(dayjs(cached.last_fetched_at), 'minute') : Infinity;
+
+    if (cached && minutesSinceLastFetch < 180) { // 180 minutes = 3 hours
+      console.log(`[API] Serving cached Dubai Trade data for container: ${containerNo}`);
+      const payload = JSON.parse(cached.raw_data || '{}');
+      return res.json({
+        ok: true,
+        source: 'cache',
+        lastFetchedAt: cached.last_fetched_at,
+        data: payload,
+      });
+    }
+
+    // 2) Cache miss -> fetch live
+    const live = await fetchContainerDataFromDubaiTrade(containerNo);
+    if (!live || !live.containerNumber) {
+      return res.status(502).json({ ok: false, error: 'Failed to fetch from Dubai Trade.' });
+    }
+
+    // 3) Upsert
+    // Use the centralized save function to ensure consistency with the cron job
+    await saveOrUpdateContainerData(pool, containerNo, live, shipmentId, shipmentContainerId);
+
+    return res.json({
+      ok: true,
+      source: 'live',
+      lastFetchedAt: new Date().toISOString(),
+      data: live,
+    });
+  } catch (err) {
+    console.error('DubaiTrade status error:', err);
+    return res.status(500).json({ ok: false, error: 'Internal error' });
+  }
 });
 
 export default router;
