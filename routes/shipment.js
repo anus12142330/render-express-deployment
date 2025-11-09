@@ -12,7 +12,7 @@ import utc from 'dayjs/plugin/utc.js'; // Import UTC plugin
 import timezone from 'dayjs/plugin/timezone.js'; // Import timezone plugin
 dayjs.extend(utc);
 dayjs.extend(timezone);
-import { fetchContainerDataFromDubaiTrade, saveOrUpdateContainerData } from '../../src/views/shipment/container-tracking.js';
+import { fetchContainerDataFromDubaiTrade, saveOrUpdateContainerData } from '../jobs/container-tracking.js';
 
 const router = express.Router();
 const errPayload = (message, type = "APP_ERROR", hint) => ({ error: { message, type, hint } });
