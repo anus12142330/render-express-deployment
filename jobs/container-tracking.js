@@ -1,6 +1,11 @@
 // /server/jobs/container-tracking.js
 import cron from 'node-cron';
 import * as cheerio from 'cheerio';
+import dayjs from 'dayjs';
+import utc from 'dayjs/plugin/utc.js';
+import timezone from 'dayjs/plugin/timezone.js';
+dayjs.extend(utc);
+dayjs.extend(timezone);
 import db from '../db.js';
 
 const DUBAI_TRADE_URL = 'https://dpwdtjb2.dubaitrade.ae/pmisc1/containerenqaction.do';
@@ -177,6 +182,9 @@ export async function saveOrUpdateContainerData(
     throw new Error('Invalid data provided to saveOrUpdateContainerData');
   }
 
+  // Generate the current timestamp in the correct timezone.
+  const nowInDubai = dayjs().tz(process.env.TZ || 'Asia/Dubai').format('YYYY-MM-DD HH:mm:ss');
+
   const [statusResult] = await dbConnection.query(
     `
     INSERT INTO dubai_trade_container_status (
@@ -187,7 +195,7 @@ export async function saveOrUpdateContainerData(
       discharge_designation, load_designation, discharge_docs, load_docs,
       raw_data, last_fetched_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       shipment_id = COALESCE(VALUES(shipment_id), shipment_id),
       shipment_container_id = COALESCE(VALUES(shipment_container_id), shipment_container_id),
@@ -198,7 +206,7 @@ export async function saveOrUpdateContainerData(
       eta = VALUES(eta), discharge_date = VALUES(discharge_date), load_date = VALUES(load_date),
       discharge_designation = VALUES(discharge_designation), load_designation = VALUES(load_designation),
       discharge_docs = VALUES(discharge_docs), load_docs = VALUES(load_docs),
-      raw_data = VALUES(raw_data), last_fetched_at = NOW()
+      raw_data = VALUES(raw_data), last_fetched_at = ?
     `,
     [
       containerNo, shipmentId, shipmentContainerId,
@@ -207,7 +215,7 @@ export async function saveOrUpdateContainerData(
       data.dischargeVessel, data.loadVessel, data.dischargeVoyage, data.loadVoyage,
       data.dischargeDate, data.dischargeDate, data.loadDate,
       data.dischargeDesignation, data.loadDesignation, data.dischargeDocs, data.loadDocs,
-      JSON.stringify(data),
+      JSON.stringify(data), nowInDubai, nowInDubai // Pass the timestamp for both INSERT and UPDATE
     ]
   );
 
