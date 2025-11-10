@@ -1829,7 +1829,7 @@ router.get("/dubai-trade-status/:containerNo", async (req, res) => {
     return res.json({
       ok: true,
       source: 'live',
-      lastFetchedAt: new Date().toISOString(),
+      lastFetchedAt: dayjs().tz(process.env.TZ || 'Asia/Dubai').format('YYYY-MM-DD HH:mm:ss'),
       data: live,
     });
   } catch (err) {

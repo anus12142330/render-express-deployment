@@ -282,5 +282,5 @@ export const runContainerTrackingJob = async () => {
 
 cron.schedule('0 22 * * *', runContainerTrackingJob, {
   scheduled: true,
-  timezone: 'Asia/Dubai',
+  timezone: process.env.TZ || 'Asia/Dubai',
 });
