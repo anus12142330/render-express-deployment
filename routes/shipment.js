@@ -73,10 +73,28 @@ router.get("/stages", async (_req, res) => {
 // --- board: all shipments with their current stage (from purchase_orders.shipment_stage_id)
 router.get("/board", async (req, res) => {
     try {
-        const limit = Number(req.query.limit) || 0;
-        const limitClause = limit > 0
-            ? `AND s.id IN (SELECT id FROM shipment WHERE shipment_stage_id = 1 ORDER BY id DESC LIMIT ${limit})`
-            : '';
+        const {
+            po_number,
+            vendor_id,
+            product_id
+        } = req.query;
+
+        let whereClauses = ['s.shipment_stage_id > 0', 's.is_inactive = 0'];
+        const params = [req.session?.user?.id || 0, req.session?.user?.id || 0];
+
+        if (po_number) {
+            whereClauses.push('po.po_number LIKE ?');
+            params.push(`%${po_number}%`);
+        }
+        if (vendor_id) {
+            whereClauses.push('s.vendor_id = ?');
+            params.push(vendor_id);
+        }
+        if (product_id) {
+            whereClauses.push('EXISTS (SELECT 1 FROM purchase_order_items poi_filter WHERE poi_filter.purchase_order_id = po.id AND poi_filter.item_id = ?)');
+            params.push(product_id);
+        }
+
         const [rows] = await db.promise().query(
             `
       SELECT
@@ -124,6 +142,19 @@ router.get("/board", async (req, res) => {
         s.confirm_flight_no,
         s.confirm_airline,
         s.is_mofa_required,
+        DATE_FORMAT(s.firs_due_date, '%d-%b-%Y') as firs_due_date,
+        DATE_FORMAT(s.mofa_due_date, '%d-%b-%Y') as mofa_due_date,
+        DATE_FORMAT(s.custom_submission_due_date, '%d-%b-%Y') as custom_submission_due_date,
+        -- Check if documents are attached (match ShipmentDetailsModal behavior - no is_draft filter)
+        (SELECT COUNT(*) > 0 FROM shipment_file sf 
+         INNER JOIN document_type dt ON dt.id = sf.document_type_id 
+         WHERE sf.shipment_id = s.id AND dt.code = 'firs_attachment') as has_firs_attachment,
+        (SELECT COUNT(*) > 0 FROM shipment_file sf 
+         INNER JOIN document_type dt ON dt.id = sf.document_type_id 
+         WHERE sf.shipment_id = s.id AND dt.code = 'mofa_attachment') as has_mofa_attachment,
+        (SELECT COUNT(*) > 0 FROM shipment_file sf 
+         INNER JOIN document_type dt ON dt.id = sf.document_type_id 
+         WHERE sf.shipment_id = s.id AND dt.code = 'original_document_cleared') as has_custom_attachment,
         s.shipping_line_name,
         s.original_doc_receipt_mode,
         s.doc_receipt_person_name,
@@ -159,17 +190,17 @@ router.get("/board", async (req, res) => {
               AND sl.user_id != ? 
               AND sl.id > COALESCE((SELECT last_read_log_id FROM shipment_log_read_status WHERE shipment_id = s.id AND user_id = ?), 0)
         ) as unread_log_count
-      FROM shipment s
+      FROM shipment s 
       LEFT JOIN purchase_orders po ON po.id = s.po_id
       LEFT JOIN vendor v ON v.id = s.vendor_id -- Vendor from shipment table
       LEFT JOIN vendor c ON c.id = po.confirmation_customer_id
       LEFT JOIN delivery_place dpl ON dpl.id=po.port_loading
       LEFT JOIN delivery_place dpd ON dpd.id=po.port_discharge
       LEFT JOIN purchase_order_items poi ON poi.purchase_order_id = po.id
-      WHERE s.shipment_stage_id > 0 AND s.is_inactive = 0 
+      WHERE ${whereClauses.join(' AND ')}
       GROUP BY s.id
       ORDER BY s.shipment_stage_id, s.id DESC
-      `, [req.session?.user?.id || 0, req.session?.user?.id || 0]
+      `, params
         );
 
         res.json(rows || []);
@@ -1520,6 +1551,7 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
         const {
             confirm_sailing_date, confirm_vessel_name, confirm_eta_date, bl_no, confirm_shipping_line, confirm_discharge_port_agent,
             confirm_airway_bill_no, confirm_flight_no, confirm_airline, confirm_arrival_date, confirm_arrival_time, 
+            confirm_free_time,
             is_mofa_required, original_doc_receipt_mode, doc_receipt_person_name, doc_receipt_person_contact,
             doc_receipt_courier_no, doc_receipt_courier_company, doc_receipt_tracking_link,
             documents_meta,
@@ -1535,7 +1567,7 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
         const [[po]] = await conn.query(`SELECT mode_shipment_id FROM purchase_orders WHERE id = (SELECT po_id FROM shipment WHERE id = ?)`, [shipment.id]);
         const isAir = String(po.mode_shipment_id) === '2';
 
-        // If we are NOT editing, the shipment must be in stage 3 to proceed.
+        // If we are NOT editing, the shipment must be in stage 3 (Underloading) to proceed.
         if (!is_editing && shipment.shipment_stage_id !== 3) {
             return res.status(400).json(errPayload("Shipment must be in the 'Underloading' stage to confirm sailed details."));
         }
@@ -1558,9 +1590,10 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
 
         // --- 2. Fetch old values for history comparison ---
         const [[oldShipmentDetails]] = await conn.query(
-            `SELECT etd_date, vessel_name, eta_date, bl_no,shipping_line_name, confirm_shipping_line, confirm_discharge_port_agent,
+            `SELECT sailing_date, etd_date, vessel_name, confirm_vessel_name, eta_date, bl_no,shipping_line_name, confirm_shipping_line, confirm_discharge_port_agent,
                     airway_bill_no, flight_no, airline, confirm_airway_bill_no, confirm_flight_no, confirm_airline,
                     arrival_date, arrival_time, confirm_arrival_date, confirm_arrival_time,
+                    free_time, confirm_free_time,
                     is_mofa_required, original_doc_receipt_mode, doc_receipt_person_name, doc_receipt_person_contact,
                     doc_receipt_courier_no, doc_receipt_courier_company, doc_receipt_tracking_link FROM shipment WHERE id = ?`,
             [shipment.id]
@@ -1571,8 +1604,8 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
 
         // Compare Sailing Date (ETD)
         if (isAir) {
-            if (formatDateForHistory(oldShipmentDetails.etd_date) !== formatDateForHistory(confirm_sailing_date)) {
-                changes['Departure Date'] = { from: formatDateForHistory(oldShipmentDetails.etd_date), to: formatDateForHistory(confirm_sailing_date) };
+            if (formatDateForHistory(oldShipmentDetails.sailing_date) !== formatDateForHistory(confirm_sailing_date)) {
+                changes['Departure Date'] = { from: formatDateForHistory(oldShipmentDetails.sailing_date), to: formatDateForHistory(confirm_sailing_date) };
             }
             if (oldShipmentDetails.confirm_airway_bill_no !== confirm_airway_bill_no) {
                 changes['AWB No.'] = { from: oldShipmentDetails.confirm_airway_bill_no || 'empty', to: confirm_airway_bill_no };
@@ -1583,15 +1616,15 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
             if (oldShipmentDetails.confirm_airline !== confirm_airline) {
                 changes['Airline'] = { from: oldShipmentDetails.confirm_airline || 'empty', to: confirm_airline };
             }
-            if (formatDateForHistory(oldShipmentDetails.arrival_date) !== formatDateForHistory(confirm_arrival_date)) {
-                changes['Arrival Date'] = { from: formatDateForHistory(oldShipmentDetails.arrival_date), to: formatDateForHistory(confirm_arrival_date) };
+            if (formatDateForHistory(oldShipmentDetails.confirm_arrival_date) !== formatDateForHistory(confirm_arrival_date)) {
+                changes['Arrival Date'] = { from: formatDateForHistory(oldShipmentDetails.confirm_arrival_date), to: formatDateForHistory(confirm_arrival_date) };
             }
-            if (oldShipmentDetails.arrival_time !== confirm_arrival_time) {
-                changes['Arrival Time'] = { from: oldShipmentDetails.arrival_time || 'empty', to: confirm_arrival_time };
+            if (oldShipmentDetails.confirm_arrival_time !== confirm_arrival_time) {
+                changes['Arrival Time'] = { from: oldShipmentDetails.confirm_arrival_time || 'empty', to: confirm_arrival_time };
             }
         } else {
-            if (formatDateForHistory(oldShipmentDetails.etd_date) !== formatDateForHistory(confirm_sailing_date)) {
-                changes['Sailing Date (ETD)'] = { from: formatDateForHistory(oldShipmentDetails.etd_date), to: formatDateForHistory(confirm_sailing_date) };
+            if (formatDateForHistory(oldShipmentDetails.sailing_date) !== formatDateForHistory(confirm_sailing_date)) {
+                changes['Sailing Date'] = { from: formatDateForHistory(oldShipmentDetails.sailing_date), to: formatDateForHistory(confirm_sailing_date) };
             }
             if (oldShipmentDetails.vessel_name !== confirm_vessel_name) {
                 changes['Confirmed Vessel Name'] = { from: oldShipmentDetails.vessel_name || 'empty', to: confirm_vessel_name || 'empty' };
@@ -1608,9 +1641,12 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
             if (oldShipmentDetails.confirm_discharge_port_agent !== confirm_discharge_port_agent) {
                 changes['Confirm POD Agent'] = { from: oldShipmentDetails.confirm_discharge_port_agent || 'empty', to: confirm_discharge_port_agent };
             }
+            if (oldShipmentDetails.confirm_free_time !== confirm_free_time) {
+                changes['Confirm Free Time'] = { from: oldShipmentDetails.confirm_free_time || oldShipmentDetails.free_time || 'empty', to: confirm_free_time || 'empty' };
+            }
         }
 
-        if (String(oldShipmentDetails.is_mofa_required) !== String(is_mofa_required)) {
+        if (String(oldShipmentDetails.is_mofa_required || '0') !== String(is_mofa_required || '0')) {
             changes['MOFA Required'] = { from: oldShipmentDetails.is_mofa_required ? 'Yes' : 'No', to: is_mofa_required ? 'Yes' : 'No' };
         }
 
@@ -1626,7 +1662,7 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
                  WHERE id = ?`, 
                 [
                     confirm_sailing_date, confirm_airway_bill_no, confirm_flight_no, confirm_airline, 
-                    confirm_arrival_date, (confirm_arrival_time && confirm_arrival_time.trim() !== '') ? confirm_arrival_time : null, is_mofa_required,
+                    confirm_arrival_date, (confirm_arrival_time && confirm_arrival_time.trim() !== '') ? confirm_arrival_time : null, is_mofa_required === '1' ? 1 : 0,
                     original_doc_receipt_mode || null, doc_receipt_person_name || null, doc_receipt_person_contact || null,
                     doc_receipt_courier_no || null, doc_receipt_courier_company || null, doc_receipt_tracking_link || null,
                     shipment.id
@@ -1638,14 +1674,16 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
                     sailing_date = ?,
                     confirm_vessel_name = ?,
                     eta_date = ?, bl_no = ?,
-                    confirm_shipping_line = ?, confirm_discharge_port_agent = ?, is_mofa_required = ?,
+                    confirm_shipping_line = ?, confirm_discharge_port_agent = ?, confirm_free_time = ?,
+                    is_mofa_required = ?,
                     original_doc_receipt_mode = ?, doc_receipt_person_name = ?, doc_receipt_person_contact = ?,
                     doc_receipt_courier_no = ?, doc_receipt_courier_company = ?, doc_receipt_tracking_link = ?
                  WHERE id = ?`, 
                 [
                     confirm_sailing_date, confirm_vessel_name, confirm_eta_date,
                     bl_no, confirm_shipping_line, confirm_discharge_port_agent, 
-                    is_mofa_required,
+                    confirm_free_time ? parseInt(confirm_free_time) : null,
+                    is_mofa_required === '1' ? 1 : 0,
                     original_doc_receipt_mode || null, doc_receipt_person_name || null, doc_receipt_person_contact || null,
                     doc_receipt_courier_no || null, doc_receipt_courier_company || null, doc_receipt_tracking_link || null,
                     shipment.id
@@ -1689,6 +1727,185 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
     } catch (e) {
         await conn.rollback();
         res.status(500).json(errPayload("Failed to move shipment to Sailed", "DB_ERROR", e.message));
+    } finally {
+        conn.release();
+    }
+});
+
+/* ---------- move to cleared (5) with all details and docs ---------- */
+const clearedUploads = upload.fields([
+    { name: 'do_copy' },
+    { name: 'boe_copy' },
+    { name: 'firs_attachment' },
+    { name: 'mofa_attachment' },
+    { name: 'original_document' }
+]);
+router.post("/:shipUniqid/transition/cleared", clearedUploads, async (req, res) => {
+    const { shipUniqid } = req.params;
+    const userId = req.session?.user?.id;
+    const userName = req.session?.user?.name || 'System';
+    const conn = await db.promise().getConnection();
+
+    try {
+        await conn.beginTransaction();
+
+        const [[shipment]] = await conn.query(`SELECT id, shipment_stage_id FROM shipment WHERE ship_uniqid = ?`, [shipUniqid]);
+        if (!shipment) {
+            throw new Error("Shipment not found.");
+        }
+
+        // --- 1. Update text fields in the shipment table ---
+        const {
+            do_no, do_validity_date, boe_no, boe_date,
+            firs_no, firs_date, firs_due_date, mofa_due_date,
+            custom_submission_due_date,
+            is_mofa_required,
+            is_transport_required,
+            transporter_name,
+            hauler_code,
+            transport_from_place,
+            transport_to_place
+        } = req.body;
+
+        // Check if MOFA is required
+        const mofaRequired = String(is_mofa_required || shipment.is_mofa_required || '0') === '1';
+
+        await conn.query(
+            `UPDATE shipment SET
+                do_no = ?, do_validity_date = ?, boe_no = ?, boe_date = ?,
+                firs_no = ?, firs_date = ?, firs_due_date = ?, mofa_due_date = ?,
+                custom_submission_due_date = ?,
+                is_transport_required = ?, transporter_name = ?, hauler_code = ?,
+                transport_from_place = ?, transport_to_place = ?
+             WHERE id = ?`,
+            [
+                do_no || null, do_validity_date || null, boe_no || null, boe_date || null,
+                firs_no || null, firs_date || null, firs_due_date || null, mofa_due_date || null,
+                custom_submission_due_date || null,
+                is_transport_required === '1' ? 1 : 0,
+                transporter_name || null,
+                hauler_code || null,
+                transport_from_place || null,
+                transport_to_place || null,
+                shipment.id
+            ]
+        );
+
+        // --- 2. Process and save file uploads ---
+        const docTypeMap = {
+            'do_copy': 'do_copy',
+            'boe_copy': 'boe_copy',
+            'firs_attachment': 'firs_attachment',
+            'mofa_attachment': 'mofa_attachment',
+            'original_document': 'original_document_cleared' // Use a specific code
+        };
+
+        const [docTypes] = await conn.query(
+            `SELECT id, code FROM document_type WHERE code IN (?)`,
+            [Object.values(docTypeMap)]
+        );
+        const docTypeIdLookup = docTypes.reduce((acc, dt) => {
+            acc[dt.code] = dt.id;
+            return acc;
+        }, {});
+
+        for (const fieldName in req.files) {
+            const files = req.files[fieldName];
+            const docTypeCode = docTypeMap[fieldName];
+            const docTypeId = docTypeIdLookup[docTypeCode];
+
+            if (docTypeId && files) {
+                for (const file of files) {
+                    const relPath = path.posix.join("uploads", "shipment", path.basename(file.path));
+                    await conn.query(
+                        `INSERT INTO shipment_file (shipment_id, document_type_id, file_name, file_path, mime_type, size_bytes, uploaded_at) VALUES (?, ?, ?, ?, ?, ?, NOW())`,
+                        [shipment.id, docTypeId, file.originalname, relPath, file.mimetype, file.size]
+                    );
+                }
+            }
+        }
+
+        // --- 3. Check if required files are present for transition ---
+        // Required files: FIRS, MOFA (if required), Original Document
+        const hasFirsNew = req.files && req.files['firs_attachment'] && req.files['firs_attachment'].length > 0;
+        const hasMofaNew = !mofaRequired || (req.files && req.files['mofa_attachment'] && req.files['mofa_attachment'].length > 0);
+        const hasOriginalDocNew = req.files && req.files['original_document'] && req.files['original_document'].length > 0;
+
+        // Also check existing files in database
+        let hasFirsTotal = hasFirsNew;
+        let hasMofaTotal = hasMofaNew;
+        let hasOriginalDocTotal = hasOriginalDocNew;
+
+        if (docTypeIdLookup['firs_attachment']) {
+            const [existingFirs] = await conn.query(
+                `SELECT COUNT(*) as count FROM shipment_file WHERE shipment_id = ? AND document_type_id = ?`,
+                [shipment.id, docTypeIdLookup['firs_attachment']]
+            );
+            hasFirsTotal = hasFirsNew || (existingFirs[0]?.count || 0) > 0;
+        }
+
+        if (mofaRequired && docTypeIdLookup['mofa_attachment']) {
+            const [existingMofa] = await conn.query(
+                `SELECT COUNT(*) as count FROM shipment_file WHERE shipment_id = ? AND document_type_id = ?`,
+                [shipment.id, docTypeIdLookup['mofa_attachment']]
+            );
+            hasMofaTotal = hasMofaNew || (existingMofa[0]?.count || 0) > 0;
+        }
+
+        if (docTypeIdLookup['original_document_cleared']) {
+            const [existingOriginal] = await conn.query(
+                `SELECT COUNT(*) as count FROM shipment_file WHERE shipment_id = ? AND document_type_id = ?`,
+                [shipment.id, docTypeIdLookup['original_document_cleared']]
+            );
+            hasOriginalDocTotal = hasOriginalDocNew || (existingOriginal[0]?.count || 0) > 0;
+        }
+
+        // Check if required dates are present for transition
+        const hasFirsDate = !!firs_date;
+        const hasFirsDueDate = !!firs_due_date;
+        const hasMofaDueDate = !mofaRequired || !!mofa_due_date;
+        const hasCustomSubmissionDueDate = !!custom_submission_due_date;
+
+        const canTransition = hasFirsTotal && hasMofaTotal && hasOriginalDocTotal && 
+                              hasFirsDate && hasFirsDueDate && hasMofaDueDate && hasCustomSubmissionDueDate;
+
+        // --- 4. Update stage and log history only if all required files and dates are present ---
+        const fromStageId = shipment.shipment_stage_id;
+        let toStageId = fromStageId; // Default: stay in current stage
+
+        if (canTransition && fromStageId === 4) {
+            // Only transition if currently in Sailed stage (4) and all files are present
+            await conn.query(`UPDATE shipment SET shipment_stage_id = 5, cleared_date = NOW() WHERE id = ?`, [shipment.id]);
+            await addHistory(conn, {
+                module: 'shipment',
+                moduleId: shipment.id,
+                userId,
+                action: 'STAGE_CHANGED',
+                details: { from: 'Sailed', to: 'Cleared', user: userName }
+            });
+            toStageId = 5;
+        } else if (fromStageId === 4) {
+            // Save without transitioning - add history log for data update
+            await addHistory(conn, {
+                module: 'shipment',
+                moduleId: shipment.id,
+                userId,
+                action: 'UPDATED',
+                details: { section: 'Cleared Details', user: userName, note: 'Saved cleared details. Waiting for required documents to transition.' }
+            });
+        }
+
+        await conn.commit();
+        res.json({ 
+            ok: true, 
+            shipUniqid, 
+            toStageId: toStageId, 
+            transitioned: canTransition && fromStageId === 4,
+            updated: { from_stage_id: fromStageId } 
+        });
+    } catch (e) {
+        await conn.rollback();
+        res.status(500).json(errPayload("Failed to move shipment to Cleared", "DB_ERROR", e.message));
     } finally {
         conn.release();
     }
@@ -1787,36 +2004,44 @@ router.get("/dubai-trade-status/:containerNo", async (req, res) => {
   const containerNo = (req.params.containerNo || '').trim().toUpperCase();
   const shipmentContainerId = Number(req.query.scId || 0) || null;     // REQUIRED for cache key
   const shipmentId = Number(req.query.shipmentId || 0) || null;        // for bookkeeping
+  const forceLive = req.query.forceLive === 'true';                    // Force live fetch, skip cache
 
   if (!containerNo) return res.status(400).json({ ok: false, error: 'Container number is required.' });
   if (!shipmentContainerId) return res.status(400).json({ ok: false, error: 'scId (shipment_container_id) is required.' });
 
   try {
-    // 1) Try cache (within last 3 hours)
-    const [[cached]] = await pool.query(
-      `SELECT raw_data, last_fetched_at
-         FROM dubai_trade_container_status
-        WHERE container_no = ? AND shipment_container_id = ?
-        ORDER BY last_fetched_at DESC
-        LIMIT 1`,
-      [containerNo, shipmentContainerId]
-    );
+    // 1) Try cache (within last 3 hours) - skip if forceLive is true
+    if (!forceLive) {
+      const [[cached]] = await pool.query(
+        `SELECT raw_data, last_fetched_at
+           FROM dubai_trade_container_status
+          WHERE container_no = ? AND shipment_container_id = ?
+          ORDER BY last_fetched_at DESC
+          LIMIT 1`,
+        [containerNo, shipmentContainerId]
+      );
 
-    // Use minutes for a more precise time comparison to avoid timezone-related issues.
-    const minutesSinceLastFetch = cached ? dayjs().diff(dayjs(cached.last_fetched_at), 'minute') : Infinity;
+      // Use minutes for a more precise time comparison to avoid timezone-related issues.
+      const minutesSinceLastFetch = cached ? dayjs().diff(dayjs(cached.last_fetched_at), 'minute') : Infinity;
 
-    if (cached && minutesSinceLastFetch < 180) { // 180 minutes = 3 hours
-      console.log(`[API] Serving cached Dubai Trade data for container: ${containerNo}`);
-      const payload = JSON.parse(cached.raw_data || '{}');
-      return res.json({
-        ok: true,
-        source: 'cache',
-        lastFetchedAt: cached.last_fetched_at,
-        data: payload,
-      });
+      if (cached && minutesSinceLastFetch < 180) { // 180 minutes = 3 hours
+        console.log(`[API] Serving cached Dubai Trade data for container: ${containerNo}`);
+        const payload = JSON.parse(cached.raw_data || '{}');
+        return res.json({
+          ok: true,
+          source: 'cache',
+          lastFetchedAt: cached.last_fetched_at,
+          data: payload,
+        });
+      }
     }
 
-    // 2) Cache miss -> fetch live
+    // 2) Cache miss or forceLive -> fetch live
+    if (forceLive) {
+      console.log(`[API] Force live fetch requested for container: ${containerNo}`);
+    } else {
+      console.log(`[API] Cache miss, fetching live data for container: ${containerNo}`);
+    }
     const live = await fetchContainerDataFromDubaiTrade(containerNo);
     if (!live || !live.containerNumber) {
       return res.status(502).json({ ok: false, error: 'Failed to fetch from Dubai Trade.' });
@@ -1826,6 +2051,7 @@ router.get("/dubai-trade-status/:containerNo", async (req, res) => {
     // Use the centralized save function to ensure consistency with the cron job
     await saveOrUpdateContainerData(pool, containerNo, live, shipmentId, shipmentContainerId);
 
+    console.log(`[API] Successfully fetched live data for container: ${containerNo}`);
     return res.json({
       ok: true,
       source: 'live',
