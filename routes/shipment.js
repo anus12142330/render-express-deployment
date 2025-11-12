@@ -38,6 +38,114 @@ const addHistory = async (conn, { module, moduleId, userId, action, details }) =
     );
 };
 
+const ensureAllocationTable = async (conn) => {
+    await conn.query(`
+        CREATE TABLE IF NOT EXISTS shipment_po_item_allocation (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            shipment_id INT NOT NULL,
+            po_item_id INT NOT NULL,
+            product_id INT NULL,
+            allocated_quantity DECIMAL(18,4) NOT NULL DEFAULT 0,
+            remaining_quantity DECIMAL(18,4) NOT NULL DEFAULT 0,
+            allocation_mode ENUM('partial','full') DEFAULT 'partial',
+            created_by INT NULL,
+            updated_by INT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uniq_shipment_po_item (shipment_id, po_item_id),
+            KEY idx_po_item_allocation (po_item_id),
+            KEY idx_shipment_allocation (shipment_id)
+        ) ENGINE=InnoDB;
+    `);
+};
+
+const toFiniteNumber = (value, fallback = 0) => {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : fallback;
+};
+
+const upsertShipmentPoAllocations = async (conn, { shipmentId, poId, allocations, allocationMode = 'partial', userId }) => {
+    if (!allocations || allocations.length === 0) return;
+
+    await ensureAllocationTable(conn);
+
+    const poItemIds = [...new Set(allocations.map(a => Number(a.po_item_id)).filter(Boolean))];
+    if (poItemIds.length === 0) return;
+
+    const [poItems] = await conn.query(
+        `SELECT id, item_id AS product_id, quantity FROM purchase_order_items WHERE purchase_order_id = ? AND id IN (?)`,
+        [poId, poItemIds]
+    );
+    const itemMap = new Map(poItems.map(item => [Number(item.id), item]));
+
+    const missing = poItemIds.filter(id => !itemMap.has(id));
+    if (missing.length > 0) {
+        throw new Error(`PO item(s) not found: ${missing.join(', ')}`);
+    }
+
+    const [existingRows] = await conn.query(
+        `SELECT po_item_id, allocated_quantity FROM shipment_po_item_allocation WHERE shipment_id = ? AND po_item_id IN (?)`,
+        [shipmentId, poItemIds]
+    );
+    const existingMap = new Map(existingRows.map(row => [Number(row.po_item_id), toFiniteNumber(row.allocated_quantity)]));
+
+    const [totalRows] = await conn.query(
+        `SELECT po_item_id, SUM(allocated_quantity) AS allocated FROM shipment_po_item_allocation WHERE po_item_id IN (?) GROUP BY po_item_id`,
+        [poItemIds]
+    );
+    const totalsMap = new Map(totalRows.map(row => [Number(row.po_item_id), toFiniteNumber(row.allocated)]));
+
+    for (const allocation of allocations) {
+        const poItemId = Number(allocation.po_item_id);
+        if (!poItemId) continue;
+        const poItem = itemMap.get(poItemId);
+        if (!poItem) {
+            throw new Error(`PO item ${poItemId} not found.`);
+        }
+
+        const requestedQty = toFiniteNumber(allocation.quantity);
+        if (requestedQty <= 0) continue;
+
+        const totalAllocated = totalsMap.get(poItemId) || 0;
+        const existingForShipment = existingMap.get(poItemId) || 0;
+        const allocatedByOthers = totalAllocated - existingForShipment;
+        const orderedQty = toFiniteNumber(poItem.quantity);
+        const availableQty = Math.max(orderedQty - allocatedByOthers, 0);
+
+        if (requestedQty > availableQty + 1e-6) {
+            throw new Error(`Allocation for PO item ${poItemId} exceeds the available quantity.`);
+        }
+
+        const remainingGlobal = Math.max(orderedQty - (allocatedByOthers + requestedQty), 0);
+        const productId = allocation.product_id ? Number(allocation.product_id) : (poItem.product_id ? Number(poItem.product_id) : null);
+
+        await conn.query(
+            `INSERT INTO shipment_po_item_allocation
+                (shipment_id, po_item_id, product_id, allocated_quantity, remaining_quantity, allocation_mode, created_by, updated_by, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+             ON DUPLICATE KEY UPDATE
+                allocated_quantity = VALUES(allocated_quantity),
+                remaining_quantity = VALUES(remaining_quantity),
+                allocation_mode = VALUES(allocation_mode),
+                updated_by = VALUES(updated_by),
+                updated_at = NOW()`,
+            [
+                shipmentId,
+                poItemId,
+                productId,
+                requestedQty,
+                remainingGlobal,
+                allocationMode === 'full' ? 'full' : 'partial',
+                userId || null,
+                userId || null
+            ]
+        );
+
+        totalsMap.set(poItemId, allocatedByOthers + requestedQty);
+        existingMap.set(poItemId, requestedQty);
+    }
+};
+
 
 /* ---------- 1) Get configured docs for a stage (e.g., 1 = To Do List) ---------- */
 router.get("/stages/:stageId/documents", async (req, res) => {
@@ -522,6 +630,123 @@ router.post("/:shipUniqid/logs/mark-as-read", async (req, res) => {
     );
     res.json({ ok: true });
       
+});
+
+/* ---------- fetch purchase order allocations for a shipment ---------- */
+router.get("/:shipUniqid/po-allocations", async (req, res) => {
+    const { shipUniqid } = req.params;
+    try {
+        const [[shipment]] = await db.promise().query(
+            `SELECT id, po_id FROM shipment WHERE ship_uniqid = ? LIMIT 1`,
+            [shipUniqid]
+        );
+        if (!shipment) return res.status(404).json(errPayload("Shipment not found."));
+
+        const [rows] = await db.promise().query(
+            `SELECT
+                a.id,
+                a.po_item_id,
+                a.product_id,
+                a.allocated_quantity,
+                a.remaining_quantity,
+                a.allocation_mode,
+                i.item_name,
+                i.quantity AS po_quantity
+             FROM shipment_po_item_allocation a
+             LEFT JOIN purchase_order_items i ON i.id = a.po_item_id
+             WHERE a.shipment_id = ?`,
+            [shipment.id]
+        );
+
+        res.json(rows || []);
+    } catch (error) {
+        res.status(500).json(errPayload("Failed to fetch product allocations.", "DB_ERROR", error.message));
+    }
+});
+
+/* ---------- save purchase order allocations for an existing shipment ---------- */
+router.post("/:shipUniqid/po-allocations", async (req, res) => {
+    const { shipUniqid } = req.params;
+    const { allocations: rawAllocations, allocation_mode } = req.body || {};
+    const userId = req.session?.user?.id || null;
+
+    const conn = await db.promise().getConnection();
+    try {
+        await conn.beginTransaction();
+
+        const [[shipment]] = await conn.query(
+            `SELECT id, po_id FROM shipment WHERE ship_uniqid = ? LIMIT 1`,
+            [shipUniqid]
+        );
+
+        if (!shipment) {
+            await conn.rollback();
+            return res.status(404).json(errPayload("Shipment not found."));
+        }
+
+        let allocations = [];
+        if (Array.isArray(rawAllocations)) {
+            allocations = rawAllocations;
+        } else if (typeof rawAllocations === 'string') {
+            try {
+                const parsed = JSON.parse(rawAllocations);
+                if (Array.isArray(parsed)) allocations = parsed;
+            } catch {
+                allocations = [];
+            }
+        }
+
+        const mode = allocation_mode === 'full' ? 'full' : 'partial';
+
+        if (mode === 'full' && allocations.length === 0) {
+            const [poItems] = await conn.query(
+                `SELECT id, item_id AS product_id, quantity
+                 FROM purchase_order_items
+                 WHERE purchase_order_id = ?`,
+                [shipment.po_id]
+            );
+            if (poItems.length) {
+                const ids = poItems.map(item => item.id);
+                await ensureAllocationTable(conn);
+                const [totals] = await conn.query(
+                    `SELECT po_item_id, SUM(allocated_quantity) AS allocated
+                     FROM shipment_po_item_allocation
+                     WHERE po_item_id IN (?)
+                     GROUP BY po_item_id`,
+                    [ids]
+                );
+                const totalsMap = new Map(totals.map(row => [Number(row.po_item_id), toFiniteNumber(row.allocated)]));
+                allocations = poItems
+                    .map(item => {
+                        const already = totalsMap.get(Number(item.id)) || 0;
+                        const remaining = Math.max(toFiniteNumber(item.quantity) - already, 0);
+                        if (remaining <= 0) return null;
+                        return {
+                            po_item_id: item.id,
+                            product_id: item.product_id,
+                            quantity: remaining
+                        };
+                    })
+                    .filter(Boolean);
+            }
+        }
+
+        await upsertShipmentPoAllocations(conn, {
+            shipmentId: shipment.id,
+            poId: shipment.po_id,
+            allocations,
+            allocationMode: mode,
+            userId
+        });
+
+        await conn.commit();
+        res.json({ ok: true, allocation_count: allocations.length });
+    } catch (error) {
+        await conn.rollback();
+        res.status(500).json(errPayload("Failed to save product allocations.", "DB_ERROR", error.message));
+    } finally {
+        conn.release();
+    }
 });
 
 // GET /api/shipment/:shipUniqid/files
@@ -1075,7 +1300,7 @@ router.post("/create-from-po", upload.none(), async (req, res) => {
 /* ---------- split a shipment (for partial shipment) and move to underloading ---------- */
 router.post("/:shipUniqid/split-shipment", async (req, res) => {
     const { shipUniqid } = req.params;
-    const { b2b_containers, ss_containers } = req.body;
+    const { b2b_containers, ss_containers, product_allocations } = req.body;
     const userId = req.session?.user?.id;
     const userName = req.session?.user?.name || 'System';
 
@@ -1169,6 +1394,22 @@ router.post("/:shipUniqid/split-shipment", async (req, res) => {
             `UPDATE shipment SET containers_back_to_back = containers_back_to_back - ?, containers_stock_sales = containers_stock_sales - ?, no_containers = no_containers - ? WHERE id = ?`,
             [b2bCount, ssCount, totalMoving, originalShipment.id]
         );
+
+        const normalizedAllocations = Array.isArray(product_allocations)
+            ? product_allocations
+            : (typeof product_allocations === 'string'
+                ? (() => { try { const parsed = JSON.parse(product_allocations); return Array.isArray(parsed) ? parsed : []; } catch { return []; } })()
+                : []);
+
+        if (normalizedAllocations.length > 0) {
+            await upsertShipmentPoAllocations(conn, {
+                shipmentId: newShipmentId,
+                poId: originalShipment.po_id,
+                allocations: normalizedAllocations,
+                allocationMode: 'partial',
+                userId
+            });
+        }
 
         // 5. Add history log for the split action
         await addHistory(conn, {

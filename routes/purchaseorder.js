@@ -1684,28 +1684,30 @@ router.get("/items/:poId", async (req, res) => {
                  i.id,
                  i.purchase_order_id,
                  i.item_name,
-                 i.item_id as product_id, -- Alias to product_id for consistency
+                 i.item_id AS product_id,
                  i.hscode,
                  i.quantity,
                  i.rate,
                  i.amount,
                  i.uom_id,
-                 um.name as uom_label,
-                 -- Fetch primary product image
-                 (SELECT pi.thumbnail_path 
-                  FROM product_images pi 
-                  WHERE pi.product_id = i.item_id 
-                  ORDER BY pi.is_primary DESC, pi.id ASC 
-                  LIMIT 1) as thumbnail_path,
+                 um.name AS uom_label,
+                 COALESCE(SUM(spia.allocated_quantity), 0) AS allocated_quantity,
+                 GREATEST(i.quantity - COALESCE(SUM(spia.allocated_quantity), 0), 0) AS open_quantity,
+                 (SELECT pi.thumbnail_path
+                  FROM product_images pi
+                  WHERE pi.product_id = i.item_id
+                  ORDER BY pi.is_primary DESC, pi.id ASC
+                  LIMIT 1) AS thumbnail_path,
                  (SELECT pi.file_path
-                  FROM product_images pi 
-                  WHERE pi.product_id = i.item_id 
-                  ORDER BY pi.is_primary DESC, pi.id ASC 
-                  LIMIT 1) as image_url
+                  FROM product_images pi
+                  WHERE pi.product_id = i.item_id
+                  ORDER BY pi.is_primary DESC, pi.id ASC
+                  LIMIT 1) AS image_url
              FROM purchase_order_items AS i
              LEFT JOIN uom_master um ON um.id = i.uom_id
+             LEFT JOIN shipment_po_item_allocation spia ON spia.po_item_id = i.id
              WHERE i.purchase_order_id = ?
-             ORDER BY i.id ASC`,
+             GROUP BY i.id, i.purchase_order_id, i.item_name, i.item_id, i.hscode, i.quantity, i.rate, i.amount, i.uom_id, um.name`,
             [poId]
         );
         res.json(items || []);
