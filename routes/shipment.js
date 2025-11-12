@@ -45,6 +45,7 @@ const ensureAllocationTable = async (conn) => {
             shipment_id INT NOT NULL,
             po_item_id INT NOT NULL,
             product_id INT NULL,
+            planned_quantity DECIMAL(18,4) NOT NULL DEFAULT 0,
             allocated_quantity DECIMAL(18,4) NOT NULL DEFAULT 0,
             remaining_quantity DECIMAL(18,4) NOT NULL DEFAULT 0,
             allocation_mode ENUM('partial','full') DEFAULT 'partial',
@@ -57,6 +58,15 @@ const ensureAllocationTable = async (conn) => {
             KEY idx_shipment_allocation (shipment_id)
         ) ENGINE=InnoDB;
     `);
+
+    // Ensure planned_quantity column exists for legacy tables
+    try {
+        await conn.query(`ALTER TABLE shipment_po_item_allocation ADD COLUMN planned_quantity DECIMAL(18,4) NOT NULL DEFAULT 0 AFTER product_id`);
+    } catch (error) {
+        if (error.code !== 'ER_DUP_FIELDNAME') {
+            throw error;
+        }
+    }
 };
 
 const toFiniteNumber = (value, fallback = 0) => {
@@ -64,7 +74,16 @@ const toFiniteNumber = (value, fallback = 0) => {
     return Number.isFinite(num) ? num : fallback;
 };
 
-const upsertShipmentPoAllocations = async (conn, { shipmentId, poId, allocations, allocationMode = 'partial', userId }) => {
+const upsertShipmentPoAllocations = async (conn, {
+    shipmentId,
+    poId,
+    allocations,
+    allocationMode = 'partial',
+    userId,
+    skipAvailabilityCheck = false,
+    updatePlannedQuantity = false,
+    updateAllocatedQuantity = true
+}) => {
     if (!allocations || allocations.length === 0) return;
 
     await ensureAllocationTable(conn);
@@ -84,10 +103,12 @@ const upsertShipmentPoAllocations = async (conn, { shipmentId, poId, allocations
     }
 
     const [existingRows] = await conn.query(
-        `SELECT po_item_id, allocated_quantity FROM shipment_po_item_allocation WHERE shipment_id = ? AND po_item_id IN (?)`,
+        `SELECT po_item_id, planned_quantity, allocated_quantity, remaining_quantity FROM shipment_po_item_allocation WHERE shipment_id = ? AND po_item_id IN (?)`,
         [shipmentId, poItemIds]
     );
-    const existingMap = new Map(existingRows.map(row => [Number(row.po_item_id), toFiniteNumber(row.allocated_quantity)]));
+    const existingAllocatedMap = new Map(existingRows.map(row => [Number(row.po_item_id), toFiniteNumber(row.allocated_quantity)]));
+    const existingPlannedMap = new Map(existingRows.map(row => [Number(row.po_item_id), toFiniteNumber(row.planned_quantity)]));
+    const existingRemainingMap = new Map(existingRows.map(row => [Number(row.po_item_id), toFiniteNumber(row.remaining_quantity)]));
 
     const [totalRows] = await conn.query(
         `SELECT po_item_id, SUM(allocated_quantity) AS allocated FROM shipment_po_item_allocation WHERE po_item_id IN (?) GROUP BY po_item_id`,
@@ -103,46 +124,69 @@ const upsertShipmentPoAllocations = async (conn, { shipmentId, poId, allocations
             throw new Error(`PO item ${poItemId} not found.`);
         }
 
-        const requestedQty = toFiniteNumber(allocation.quantity);
-        if (requestedQty <= 0) continue;
+        const requestedQtyRaw = toFiniteNumber(allocation.quantity);
+        const requestedQty = Math.max(requestedQtyRaw, 0);
 
         const totalAllocated = totalsMap.get(poItemId) || 0;
-        const existingForShipment = existingMap.get(poItemId) || 0;
-        const allocatedByOthers = totalAllocated - existingForShipment;
+        const existingAllocated = existingAllocatedMap.get(poItemId) || 0;
+        const existingPlanned = existingPlannedMap.get(poItemId) || 0;
+        const allocatedByOthers = totalAllocated - existingAllocated;
         const orderedQty = toFiniteNumber(poItem.quantity);
         const availableQty = Math.max(orderedQty - allocatedByOthers, 0);
 
-        if (requestedQty > availableQty + 1e-6) {
+        const nextPlanned = updatePlannedQuantity ? requestedQty : existingPlanned;
+        const nextAllocated = updateAllocatedQuantity ? requestedQty : existingAllocated;
+
+        if (!skipAvailabilityCheck && nextAllocated > availableQty + 1e-6) {
             throw new Error(`Allocation for PO item ${poItemId} exceeds the available quantity.`);
         }
 
-        const remainingGlobal = Math.max(orderedQty - (allocatedByOthers + requestedQty), 0);
+        const remainingCalcBase = orderedQty - (allocatedByOthers + nextAllocated);
+        const remainingGlobal = updateAllocatedQuantity
+            ? Math.max(Number(remainingCalcBase.toFixed(4)), 0)
+            : (existingRemainingMap.get(poItemId) ?? Math.max(Number(remainingCalcBase.toFixed(4)), 0));
         const productId = allocation.product_id ? Number(allocation.product_id) : (poItem.product_id ? Number(poItem.product_id) : null);
+
+        const insertValues = [
+            shipmentId,
+            poItemId,
+            productId,
+            nextPlanned,
+            nextAllocated,
+            remainingGlobal,
+            allocationMode === 'full' ? 'full' : 'partial',
+            userId || null,
+            userId || null
+        ];
+
+        const updateClauses = [];
+        if (updatePlannedQuantity) {
+            updateClauses.push('planned_quantity = VALUES(planned_quantity)');
+        }
+        if (updateAllocatedQuantity) {
+            updateClauses.push('allocated_quantity = VALUES(allocated_quantity)');
+            updateClauses.push('remaining_quantity = GREATEST(VALUES(remaining_quantity), 0)');
+        }
+        updateClauses.push('allocation_mode = VALUES(allocation_mode)');
+        updateClauses.push('updated_by = VALUES(updated_by)');
+        updateClauses.push('updated_at = NOW()');
 
         await conn.query(
             `INSERT INTO shipment_po_item_allocation
-                (shipment_id, po_item_id, product_id, allocated_quantity, remaining_quantity, allocation_mode, created_by, updated_by, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
-             ON DUPLICATE KEY UPDATE
-                allocated_quantity = VALUES(allocated_quantity),
-                remaining_quantity = VALUES(remaining_quantity),
-                allocation_mode = VALUES(allocation_mode),
-                updated_by = VALUES(updated_by),
-                updated_at = NOW()`,
-            [
-                shipmentId,
-                poItemId,
-                productId,
-                requestedQty,
-                remainingGlobal,
-                allocationMode === 'full' ? 'full' : 'partial',
-                userId || null,
-                userId || null
-            ]
+                (shipment_id, po_item_id, product_id, planned_quantity, allocated_quantity, remaining_quantity, allocation_mode, created_by, updated_by, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+             ON DUPLICATE KEY UPDATE ${updateClauses.join(', ')}`,
+            insertValues
         );
 
-        totalsMap.set(poItemId, allocatedByOthers + requestedQty);
-        existingMap.set(poItemId, requestedQty);
+        if (updateAllocatedQuantity) {
+            totalsMap.set(poItemId, allocatedByOthers + nextAllocated);
+            existingAllocatedMap.set(poItemId, nextAllocated);
+            existingRemainingMap.set(poItemId, remainingGlobal);
+        }
+        if (updatePlannedQuantity) {
+            existingPlannedMap.set(poItemId, nextPlanned);
+        }
     }
 };
 
@@ -249,6 +293,8 @@ router.get("/board", async (req, res) => {
         s.confirm_airway_bill_no,
         s.confirm_flight_no,
         s.confirm_airline,
+        s.free_time,
+        s.confirm_free_time,
         s.is_mofa_required,
         DATE_FORMAT(s.firs_due_date, '%d-%b-%Y') as firs_due_date,
         DATE_FORMAT(s.mofa_due_date, '%d-%b-%Y') as mofa_due_date,
@@ -397,7 +443,7 @@ router.get("/:shipUniqid", async (req, res) => {
     
     // Also fetch PO items
     const [poItems] = await db.promise().query(`
-        SELECT i.item_name, i.description, i.quantity, i.hscode,
+        SELECT i.id AS po_item_id, i.item_id AS product_id, i.item_name, i.description, i.quantity, i.hscode,
                (SELECT SUM(sc.net_weight) FROM shipment_container_item sc WHERE sc.product_id = i.item_id AND sc.container_id IN (SELECT id FROM shipment_container WHERE shipment_id = ?)) as net_weight,
                (SELECT SUM(sc.gross_weight) FROM shipment_container_item sc WHERE sc.product_id = i.item_id AND sc.container_id IN (SELECT id FROM shipment_container WHERE shipment_id = ?)) as gross_weight,
                um.name as uom_name,
@@ -647,6 +693,7 @@ router.get("/:shipUniqid/po-allocations", async (req, res) => {
                 a.id,
                 a.po_item_id,
                 a.product_id,
+                a.planned_quantity,
                 a.allocated_quantity,
                 a.remaining_quantity,
                 a.allocation_mode,
@@ -667,7 +714,7 @@ router.get("/:shipUniqid/po-allocations", async (req, res) => {
 /* ---------- save purchase order allocations for an existing shipment ---------- */
 router.post("/:shipUniqid/po-allocations", async (req, res) => {
     const { shipUniqid } = req.params;
-    const { allocations: rawAllocations, allocation_mode } = req.body || {};
+    const { allocations: rawAllocations, allocation_mode, update_planned, update_allocated } = req.body || {};
     const userId = req.session?.user?.id || null;
 
     const conn = await db.promise().getConnection();
@@ -697,6 +744,14 @@ router.post("/:shipUniqid/po-allocations", async (req, res) => {
         }
 
         const mode = allocation_mode === 'full' ? 'full' : 'partial';
+
+        let shouldUpdatePlanned = Boolean(update_planned);
+        let shouldUpdateAllocated = update_allocated === false || update_allocated === 'false' ? false : true;
+
+        if (mode === 'full') {
+            shouldUpdatePlanned = true;
+            shouldUpdateAllocated = true;
+        }
 
         if (mode === 'full' && allocations.length === 0) {
             const [poItems] = await conn.query(
@@ -736,7 +791,9 @@ router.post("/:shipUniqid/po-allocations", async (req, res) => {
             poId: shipment.po_id,
             allocations,
             allocationMode: mode,
-            userId
+            userId,
+            updatePlannedQuantity: shouldUpdatePlanned,
+            updateAllocatedQuantity: shouldUpdateAllocated
         });
 
         await conn.commit();
@@ -1407,7 +1464,9 @@ router.post("/:shipUniqid/split-shipment", async (req, res) => {
                 poId: originalShipment.po_id,
                 allocations: normalizedAllocations,
                 allocationMode: 'partial',
-                userId
+                userId,
+                updatePlannedQuantity: true,
+                updateAllocatedQuantity: true
             });
         }
 
@@ -1452,6 +1511,15 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
     const { etd_date, vessel_name, eta_date } = req.body;
     const keptCommonImagesJson = req.body.keptCommonImages || '[]'; // Safely get kept images
     const containers = JSON.parse(req.body.containers || '[]');
+    const rawAllocations = req.body.po_allocations;
+    let incomingAllocations = [];
+    if (rawAllocations) {
+        try {
+            incomingAllocations = Array.isArray(rawAllocations) ? rawAllocations : JSON.parse(rawAllocations);
+        } catch {
+            incomingAllocations = [];
+        }
+    }
     const isEditing = req.body.is_editing === 'true';
     const files = req.files || [];
     const userId = req.session?.user?.id;
@@ -1578,7 +1646,8 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
             const itemValues = (container.items || []).map(it => {
                 // Destructure to include product_id and exclude product_option
                 const { product_id, product_name, package_type, package_count, net_weight, gross_weight, hscode } = it;
-                return [containerId, product_id || null, product_name, package_type, package_count, net_weight, gross_weight, hscode];
+                const normalizedProductId = (product_id === undefined || product_id === null || product_id === '') ? null : Number(product_id);
+                return [containerId, normalizedProductId, product_name, package_type, package_count, net_weight, gross_weight, hscode];
             });
 
             if (itemValues.length > 0) {
@@ -1586,6 +1655,28 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
                     `INSERT INTO shipment_container_item (container_id, product_id, product_name, package_type, package_count, net_weight, gross_weight, hscode) VALUES ?`,
                     [itemValues]
                 );
+            }
+        }
+
+        if (incomingAllocations.length > 0 && shipment.po_id) {
+            const sanitizedAllocations = incomingAllocations
+                .map(a => ({
+                    po_item_id: Number(a.po_item_id) || 0,
+                    product_id: (a.product_id === undefined || a.product_id === null || a.product_id === '') ? null : Number(a.product_id),
+                    quantity: toFiniteNumber(a.quantity)
+                }))
+                .filter(a => a.po_item_id);
+            if (sanitizedAllocations.length > 0) {
+                await upsertShipmentPoAllocations(conn, {
+                    shipmentId: shipment.id,
+                    poId: shipment.po_id,
+                    allocations: sanitizedAllocations,
+                    allocationMode: 'partial',
+                    userId,
+                    skipAvailabilityCheck: true,
+                    updatePlannedQuantity: false,
+                    updateAllocatedQuantity: true
+                });
             }
         }
 
@@ -1652,6 +1743,15 @@ router.post("/:shipUniqid/underloading-air", upload.any(), async (req, res) => {
     const { airway_bill_no, flight_no, airline, arrival_date, arrival_time, pickup_date, keptCommonImages: keptCommonImagesJson, items: itemsJson } = req.body;
     const isEditing = req.body.is_editing === 'true';
     const items = JSON.parse(itemsJson || '[]');
+    const rawAllocations = req.body.po_allocations;
+    let incomingAllocations = [];
+    if (rawAllocations) {
+        try {
+            incomingAllocations = Array.isArray(rawAllocations) ? rawAllocations : JSON.parse(rawAllocations);
+        } catch {
+            incomingAllocations = [];
+        }
+    }
     const files = req.files || [];
     const userId = req.session?.user?.id;
     const userName = req.session?.user?.name || 'System';
@@ -1683,8 +1783,33 @@ router.post("/:shipUniqid/underloading-air", upload.any(), async (req, res) => {
 
         // Insert items for the air shipment's container
         if (items.length > 0) {
-            const itemValues = items.map(it => [containerId, it.product_id || null, it.product_name, it.package_type, it.package_count, it.net_weight, it.gross_weight, it.hscode]);
+            const itemValues = items.map(it => {
+                const normalizedProductId = (it.product_id === undefined || it.product_id === null || it.product_id === '') ? null : Number(it.product_id);
+                return [containerId, normalizedProductId, it.product_name, it.package_type, it.package_count, it.net_weight, it.gross_weight, it.hscode];
+            });
             await conn.query(`INSERT INTO shipment_container_item (container_id, product_id, product_name, package_type, package_count, net_weight, gross_weight, hscode) VALUES ?`, [itemValues]);
+        }
+
+        if (incomingAllocations.length > 0 && shipment.po_id) {
+            const sanitizedAllocations = incomingAllocations
+                .map(a => ({
+                    po_item_id: Number(a.po_item_id) || 0,
+                    product_id: (a.product_id === undefined || a.product_id === null || a.product_id === '') ? null : Number(a.product_id),
+                    quantity: toFiniteNumber(a.quantity)
+                }))
+                .filter(a => a.po_item_id);
+            if (sanitizedAllocations.length > 0) {
+                await upsertShipmentPoAllocations(conn, {
+                    shipmentId: shipment.id,
+                    poId: shipment.po_id,
+                    allocations: sanitizedAllocations,
+                    allocationMode: 'partial',
+                    userId,
+                    skipAvailabilityCheck: true,
+                    updatePlannedQuantity: false,
+                    updateAllocatedQuantity: true
+                });
+            }
         }
 
         // Get document type for common images
