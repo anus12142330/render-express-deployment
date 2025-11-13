@@ -316,6 +316,47 @@ router.get("/board", async (req, res) => {
         s.doc_receipt_courier_no,
         s.doc_receipt_courier_company,
         s.doc_receipt_tracking_link,
+        s.closed_comment,
+        DATE_FORMAT(s.closed_date, '%Y-%m-%d') as closed_date,
+        s.archive_comment,
+        DATE_FORMAT(s.archive_date, '%Y-%m-%d') as archive_date,
+        DATE_FORMAT(s.do_validity_date, '%d-%b-%Y') as do_validity_date,
+        DATE_FORMAT(s.do_validity_date, '%Y-%m-%d') as do_validity_date_raw,
+        (
+            SELECT GROUP_CONCAT(sc.container_no ORDER BY sc.id SEPARATOR '||')
+            FROM shipment_container sc
+            WHERE sc.shipment_id = s.id
+        ) AS container_numbers,
+        (
+            SELECT COUNT(*) 
+            FROM shipment_po_document spd
+            WHERE spd.shipment_id = s.id
+        ) AS required_document_count,
+        (
+            SELECT COUNT(*)
+            FROM shipment_po_document spd
+            WHERE spd.shipment_id = s.id
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM shipment_file sf
+                    WHERE sf.shipment_id = s.id
+                      AND sf.document_type_id = spd.document_type_id
+                      AND (sf.is_draft IS NULL OR sf.is_draft = 0)
+                )
+        ) AS missing_original_document_count,
+        (
+            SELECT GROUP_CONCAT(DISTINCT dt.name SEPARATOR '||')
+            FROM shipment_po_document spd
+            JOIN document_type dt ON dt.id = spd.document_type_id
+            WHERE spd.shipment_id = s.id
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM shipment_file sf
+                    WHERE sf.shipment_id = s.id
+                      AND sf.document_type_id = spd.document_type_id
+                      AND (sf.is_draft IS NULL OR sf.is_draft = 0)
+                )
+        ) AS missing_original_document_names,
         DATE_FORMAT(s.confirm_arrival_date, '%d-%b-%Y') as confirm_arrival_date,
         s.confirm_arrival_time,
         s.total_lots, -- Fetch total_lots directly from the DB
@@ -356,6 +397,92 @@ router.get("/board", async (req, res) => {
       ORDER BY s.shipment_stage_id, s.id DESC
       `, params
         );
+
+        rows.forEach(r => {
+            if (r.container_numbers) {
+                const list = r.container_numbers.split('||').filter(Boolean);
+                r.containers = list.map((containerNo, index) => ({
+                    id: `${r.shipment_id}_${index}`,
+                    container_no: containerNo
+                }));
+            } else {
+                r.containers = [];
+            }
+            delete r.container_numbers;
+
+            if (typeof r.missing_original_document_names === 'string' && r.missing_original_document_names.length > 0) {
+                r.missing_original_document_names = r.missing_original_document_names.split('||').filter(Boolean);
+            } else {
+                r.missing_original_document_names = [];
+            }
+            if (typeof r.container_return_pending_names === 'string' && r.container_return_pending_names.length > 0) {
+                r.container_return_pending_names = r.container_return_pending_names.split('||').filter(Boolean);
+            }
+            r.closed_comment = r.closed_comment || null;
+            r.closed_date = r.closed_date || null;
+            r.archive_comment = r.archive_comment || null;
+            r.archive_date = r.archive_date || null;
+        });
+
+        const shipmentsNeedingReturns = rows.filter(r => Number(r.stage_id) >= 5 && String(r.mode_shipment_id) === '1');
+
+        if (shipmentsNeedingReturns.length > 0) {
+            const shipmentIds = shipmentsNeedingReturns.map(r => r.shipment_id);
+            const [returnRows] = await db.promise().query(
+                `
+                SELECT 
+                    sc.shipment_id,
+                    sc.id AS container_id,
+                    sc.container_no,
+                    DATE_FORMAT(scr.return_date, '%Y-%m-%d') AS return_date_raw,
+                    DATE_FORMAT(scr.return_date, '%d-%b-%Y') AS return_date_formatted,
+                    COUNT(DISTINCT scrf.id) AS attachment_count
+                FROM shipment_container sc
+                LEFT JOIN shipment_container_return scr ON scr.container_id = sc.id
+                LEFT JOIN shipment_container_return_file scrf ON scrf.return_id = scr.id
+                WHERE sc.shipment_id IN (?)
+                GROUP BY sc.id, sc.shipment_id, sc.container_no, scr.return_date
+                `,
+                [shipmentIds]
+            );
+
+            const returnsByShipment = {};
+            for (const row of returnRows) {
+                const key = row.shipment_id;
+                if (!returnsByShipment[key]) returnsByShipment[key] = [];
+                returnsByShipment[key].push({
+                    container_id: row.container_id,
+                    container_no: row.container_no,
+                    return_date_raw: row.return_date_raw,
+                    return_date_formatted: row.return_date_formatted,
+                    attachment_count: Number(row.attachment_count || 0)
+                });
+            }
+
+            rows.forEach(r => {
+                if (Number(r.stage_id) >= 5) {
+                    const list = returnsByShipment[r.shipment_id] || [];
+                    list.sort((a, b) => {
+                        if (a.container_no && b.container_no) {
+                            return String(a.container_no).localeCompare(String(b.container_no));
+                        }
+                        return Number(a.container_id) - Number(b.container_id);
+                    });
+                    r.container_returns = list;
+                    r.container_return_pending_names = list
+                        .filter(item => Number(item.attachment_count || 0) === 0)
+                        .map(item => item.container_no || `Container ${item.container_id}`);
+                } else {
+                    r.container_returns = [];
+                    r.container_return_pending_names = [];
+                }
+            });
+        }
+        rows.forEach(r => {
+            r.required_document_count = Number(r.required_document_count || 0);
+            r.missing_original_document_count = Number(r.missing_original_document_count || 0);
+            if (!Array.isArray(r.container_return_pending_names)) r.container_return_pending_names = [];
+        });
 
         res.json(rows || []);
     } catch (e) {
@@ -407,10 +534,14 @@ router.get("/:shipUniqid", async (req, res) => {
            s.doc_receipt_courier_no,
            s.doc_receipt_courier_company,
            s.doc_receipt_tracking_link,
-           s.confirm_flight_no,
-           s.confirm_airline,
-           s.confirm_shipping_line,
-           s.confirm_discharge_port_agent,
+          s.confirm_flight_no,
+         s.confirm_airline,
+         s.confirm_shipping_line,
+         s.confirm_discharge_port_agent,
+         DATE_FORMAT(s.closed_date, '%Y-%m-%d') as closed_date,
+         s.closed_comment,
+         DATE_FORMAT(s.archive_date, '%Y-%m-%d') as archive_date,
+         s.archive_comment,
            cs.country AS company_country,
            ct.name AS container_type_name, 
            cl.name AS container_load_name
@@ -491,9 +622,47 @@ router.get("/:shipUniqid", async (req, res) => {
             return acc;
         }, {});
 
+        const [containerReturns] = await db.promise().query(`
+            SELECT scr.id, scr.container_id, scr.return_date
+            FROM shipment_container_return scr
+            WHERE scr.container_id IN (?)
+        `, [containerIds]);
+
+        let returnFilesRows = [];
+        if (containerReturns.length > 0) {
+            const returnIds = containerReturns.map((row) => row.id);
+            const [files] = await db.promise().query(`
+                SELECT scrf.*
+                FROM shipment_container_return_file scrf
+                WHERE scrf.return_id IN (?)
+            `, [returnIds]);
+            returnFilesRows = files || [];
+        }
+
+        const returnByContainerId = containerReturns.reduce((acc, row) => {
+            acc[row.container_id] = row;
+            return acc;
+        }, {});
+
+        const returnFilesByReturnId = returnFilesRows.reduce((acc, file) => {
+            if (!acc[file.return_id]) acc[file.return_id] = [];
+            acc[file.return_id].push(file);
+            return acc;
+        }, {});
+
         containers.forEach(c => {
             c.items = itemsByContainer[c.id] || [];
             c.images = imagesByContainer[c.id] || [];
+            const returnInfo = returnByContainerId[c.id];
+            if (returnInfo) {
+                c.return_details = {
+                    id: returnInfo.id,
+                    return_date: returnInfo.return_date,
+                    files: returnFilesByReturnId[returnInfo.id] || []
+                };
+            } else {
+                c.return_details = null;
+            }
         });
     }
     
@@ -2099,13 +2268,7 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
 });
 
 /* ---------- move to cleared (5) with all details and docs ---------- */
-const clearedUploads = upload.fields([
-    { name: 'do_copy' },
-    { name: 'boe_copy' },
-    { name: 'firs_attachment' },
-    { name: 'mofa_attachment' },
-    { name: 'original_document' }
-]);
+const clearedUploads = upload.any();
 router.post("/:shipUniqid/transition/cleared", clearedUploads, async (req, res) => {
     const { shipUniqid } = req.params;
     const userId = req.session?.user?.id;
@@ -2115,10 +2278,35 @@ router.post("/:shipUniqid/transition/cleared", clearedUploads, async (req, res) 
     try {
         await conn.beginTransaction();
 
+        const uploadedFilesArray = Array.isArray(req.files) ? req.files : [];
+        const filesByField = Array.isArray(req.files)
+            ? uploadedFilesArray.reduce((acc, file) => {
+                if (!acc[file.fieldname]) acc[file.fieldname] = [];
+                acc[file.fieldname].push(file);
+                return acc;
+            }, {})
+            : (req.files || {});
+
         const [[shipment]] = await conn.query(`SELECT id, shipment_stage_id FROM shipment WHERE ship_uniqid = ?`, [shipUniqid]);
         if (!shipment) {
             throw new Error("Shipment not found.");
         }
+
+        const [shipmentContainers] = await conn.query(`SELECT id FROM shipment_container WHERE shipment_id = ?`, [shipment.id]);
+        const validContainerIdList = shipmentContainers.map((row) => row.id);
+        const validContainerIds = new Set(validContainerIdList);
+        let existingContainerReturns = [];
+        if (validContainerIdList.length > 0) {
+            const [rows] = await conn.query(
+                `SELECT id, container_id, return_date FROM shipment_container_return WHERE container_id IN (?)`,
+                [validContainerIdList]
+            );
+            existingContainerReturns = rows;
+        }
+        const returnByContainerId = existingContainerReturns.reduce((acc, row) => {
+            acc[row.container_id] = row;
+            return acc;
+        }, {});
 
         // --- 1. Update text fields in the shipment table ---
         const {
@@ -2132,6 +2320,16 @@ router.post("/:shipUniqid/transition/cleared", clearedUploads, async (req, res) 
             transport_from_place,
             transport_to_place
         } = req.body;
+
+        let containerReturnsPayload = [];
+        try {
+            containerReturnsPayload = JSON.parse(req.body.container_returns || '[]');
+        } catch {
+            containerReturnsPayload = [];
+        }
+        if (!Array.isArray(containerReturnsPayload)) {
+            containerReturnsPayload = [];
+        }
 
         // Check if MOFA is required
         const mofaRequired = String(is_mofa_required || shipment.is_mofa_required || '0') === '1';
@@ -2175,12 +2373,12 @@ router.post("/:shipUniqid/transition/cleared", clearedUploads, async (req, res) 
             return acc;
         }, {});
 
-        for (const fieldName in req.files) {
-            const files = req.files[fieldName];
+        for (const [fieldName, files] of Object.entries(filesByField)) {
             const docTypeCode = docTypeMap[fieldName];
+            if (!docTypeCode || !files) continue;
             const docTypeId = docTypeIdLookup[docTypeCode];
 
-            if (docTypeId && files) {
+            if (docTypeId) {
                 for (const file of files) {
                     const relPath = path.posix.join("uploads", "shipment", path.basename(file.path));
                     await conn.query(
@@ -2191,11 +2389,82 @@ router.post("/:shipUniqid/transition/cleared", clearedUploads, async (req, res) 
             }
         }
 
-        // --- 3. Check if required files are present for transition ---
+        // --- 3. Handle container return information (dates + documents) ---
+        // Required DB tables (define separately):
+        //   shipment_container_return (id, shipment_id, container_id, return_date, created_at, updated_at)
+        //   shipment_container_return_file (id, return_id, file_name, file_path, mime_type, size_bytes, uploaded_at)
+        const containerEntryById = new Map();
+        for (const entry of containerReturnsPayload) {
+            const entryContainerId = Number(entry?.container_id);
+            if (entryContainerId) {
+                containerEntryById.set(entryContainerId, entry);
+            }
+        }
+        const fileContainerIds = Object.keys(filesByField)
+            .filter((name) => name.startsWith('container_return_files_'))
+            .map((name) => Number(name.replace('container_return_files_', '')))
+            .filter(Boolean);
+        const containerIdsToProcess = new Set([...containerEntryById.keys(), ...fileContainerIds]);
+
+        if (containerIdsToProcess.size > 0) {
+            for (const containerId of containerIdsToProcess) {
+                if (!containerId || !validContainerIds.has(containerId)) continue;
+
+                const entry = containerEntryById.get(containerId) || {};
+                const returnDateNormalized = entry?.return_date ? entry.return_date : null;
+                const keptFileIds = Array.isArray(entry?.kept_file_ids)
+                    ? entry.kept_file_ids.map((id) => Number(id)).filter(Boolean)
+                    : [];
+
+                const existingReturn = returnByContainerId[containerId];
+                let returnRecordId;
+
+                if (existingReturn) {
+                    await conn.query(
+                        `UPDATE shipment_container_return SET return_date = ?, updated_at = NOW() WHERE id = ?`,
+                        [returnDateNormalized || null, existingReturn.id]
+                    );
+                    returnRecordId = existingReturn.id;
+                } else {
+                    const [result] = await conn.query(
+                        `INSERT INTO shipment_container_return (shipment_id, container_id, return_date, created_at, updated_at) VALUES (?, ?, ?, NOW(), NOW())`,
+                        [shipment.id, containerId, returnDateNormalized || null]
+                    );
+                    returnRecordId = result.insertId;
+                    returnByContainerId[containerId] = { id: returnRecordId, container_id: containerId, return_date: returnDateNormalized };
+                }
+
+                if (returnRecordId) {
+                    if (keptFileIds.length > 0) {
+                        await conn.query(
+                            `DELETE FROM shipment_container_return_file WHERE return_id = ? AND id NOT IN (?)`,
+                            [returnRecordId, keptFileIds]
+                        );
+                    } else {
+                        await conn.query(
+                            `DELETE FROM shipment_container_return_file WHERE return_id = ?`,
+                            [returnRecordId]
+                        );
+                    }
+
+                    const uploadFieldKey = `container_return_files_${containerId}`;
+                    const newFiles = filesByField[uploadFieldKey] || [];
+                    for (const file of newFiles) {
+                        const relPath = path.posix.join("uploads", "shipment", path.basename(file.path));
+                        await conn.query(
+                            `INSERT INTO shipment_container_return_file (return_id, file_name, file_path, mime_type, size_bytes, uploaded_at) VALUES (?, ?, ?, ?, ?, NOW())`,
+                            [returnRecordId, file.originalname, relPath, file.mimetype, file.size]
+                        );
+                    }
+                }
+            }
+        }
+
+        // --- 4. Check if required files are present for transition ---
         // Required files: FIRS, MOFA (if required), Original Document
-        const hasFirsNew = req.files && req.files['firs_attachment'] && req.files['firs_attachment'].length > 0;
-        const hasMofaNew = !mofaRequired || (req.files && req.files['mofa_attachment'] && req.files['mofa_attachment'].length > 0);
-        const hasOriginalDocNew = req.files && req.files['original_document'] && req.files['original_document'].length > 0;
+        const hasFirsNew = (filesByField['firs_attachment'] || []).length > 0;
+        const hasMofaNew = !mofaRequired || (filesByField['mofa_attachment'] || []).length > 0;
+        const hasOriginalDocNew = (filesByField['original_document'] || []).length > 0;
 
         // Also check existing files in database
         let hasFirsTotal = hasFirsNew;
@@ -2272,6 +2541,283 @@ router.post("/:shipUniqid/transition/cleared", clearedUploads, async (req, res) 
     } catch (e) {
         await conn.rollback();
         res.status(500).json(errPayload("Failed to move shipment to Cleared", "DB_ERROR", e.message));
+    } finally {
+        conn.release();
+    }
+});
+
+const closedUploads = upload.any();
+router.post("/:shipUniqid/transition/closed", closedUploads, async (req, res) => {
+    const { shipUniqid } = req.params;
+    const userId = req.session?.user?.id;
+    const userName = req.session?.user?.name || 'System';
+    const conn = await db.promise().getConnection();
+
+    try {
+        await conn.beginTransaction();
+
+        const [[shipment]] = await conn.query(
+            `SELECT s.id, s.shipment_stage_id, po.mode_shipment_id, s.is_mofa_required
+             FROM shipment s
+             LEFT JOIN purchase_orders po ON po.id = s.po_id
+             WHERE s.ship_uniqid = ?`,
+            [shipUniqid]
+        );
+        if (!shipment) {
+            await conn.rollback();
+            return res.status(404).json(errPayload("Shipment not found."));
+        }
+        if (Number(shipment.shipment_stage_id) !== 5) {
+            await conn.rollback();
+            return res.status(400).json(errPayload("Shipment must be in Cleared stage before closing."));
+        }
+
+        const comment = (req.body?.comment || "").trim();
+        if (!comment) {
+            await conn.rollback();
+            return res.status(400).json(errPayload("Closing comments are required."));
+        }
+
+        const [requiredDocs] = await conn.query(
+            `SELECT spd.document_type_id, dt.name
+             FROM shipment_po_document spd
+             JOIN document_type dt ON dt.id = spd.document_type_id
+             WHERE spd.shipment_id = ?`,
+            [shipment.id]
+        );
+        if (!requiredDocs.length) {
+            await conn.rollback();
+            return res.status(400).json(errPayload("Configure required documents in Planned stage before closing."));
+        }
+
+        const missingOriginals = [];
+        for (const doc of requiredDocs) {
+            const [rows] = await conn.query(
+                `SELECT COUNT(*) AS cnt
+                 FROM shipment_file sf
+                 WHERE sf.shipment_id = ?
+                   AND sf.document_type_id = ?
+                   AND (sf.is_draft IS NULL OR sf.is_draft = 0)`,
+                [shipment.id, doc.document_type_id]
+            );
+            if (!rows[0].cnt) {
+                missingOriginals.push(doc.name || `Document ID ${doc.document_type_id}`);
+            }
+        }
+
+        const hasDocByCode = async (code) => {
+            const [rows] = await conn.query(
+                `SELECT COUNT(*) AS cnt
+                 FROM shipment_file sf
+                 INNER JOIN document_type dt ON dt.id = sf.document_type_id
+                 WHERE sf.shipment_id = ?
+                   AND dt.code = ?`,
+                [shipment.id, code]
+            );
+            return rows[0].cnt > 0;
+        };
+
+        const issues = [];
+        const hasFirs = await hasDocByCode('firs_attachment');
+        if (!hasFirs) issues.push("FIRS");
+        if (Number(shipment.is_mofa_required) === 1) {
+            const hasMofa = await hasDocByCode('mofa_attachment');
+            if (!hasMofa) issues.push("MOFA");
+        }
+        const hasCustom = await hasDocByCode('original_document_cleared');
+        if (!hasCustom) issues.push("Custom documents");
+
+        const containerIssues = [];
+        if (Number(shipment.mode_shipment_id) === 1) {
+            const [containerRows] = await conn.query(
+                `SELECT sc.container_no,
+                        (SELECT COUNT(*) FROM shipment_container_return scr WHERE scr.container_id = sc.id) AS has_return,
+                        (SELECT COUNT(*) FROM shipment_container_return_file scrf
+                          JOIN shipment_container_return scr ON scr.id = scrf.return_id
+                         WHERE scr.container_id = sc.id) AS attachment_count
+                 FROM shipment_container sc
+                 WHERE sc.shipment_id = ?`,
+                [shipment.id]
+            );
+            for (const row of containerRows) {
+                if (!row.has_return || !row.attachment_count) {
+                    containerIssues.push(row.container_no || 'Container');
+                }
+            }
+        }
+
+        if (missingOriginals.length) {
+            issues.push(`Originals: ${missingOriginals.join(', ')}`);
+        }
+        if (containerIssues.length) {
+            issues.push(`Container returns: ${containerIssues.join(', ')}`);
+        }
+
+        if (issues.length) {
+            await conn.rollback();
+            return res.status(400).json(errPayload(`Cannot close shipment. Pending: ${issues.join('; ')}`));
+        }
+
+        if (req.files && req.files.length > 0) {
+            const [docTypeRows] = await conn.query(
+                `SELECT id FROM document_type WHERE code = 'closed_stage_attachment' LIMIT 1`
+            );
+            let docTypeId;
+            if (docTypeRows.length) {
+                docTypeId = docTypeRows[0].id;
+            } else {
+                const [insertDocType] = await conn.query(
+                    `INSERT INTO document_type (code, name, is_active) VALUES ('closed_stage_attachment', 'Closed Stage Attachment', 1)`
+                );
+                docTypeId = insertDocType.insertId;
+            }
+
+            for (const file of req.files) {
+                const relPath = path.posix.join("uploads", "shipment", path.basename(file.path));
+                await conn.query(
+                    `INSERT INTO shipment_file
+                        (shipment_id, document_type_id, file_name, file_path, mime_type, size_bytes, uploaded_at)
+                     VALUES (?, ?, ?, ?, ?, ?, NOW())`,
+                    [shipment.id, docTypeId, file.originalname, relPath, file.mimetype, file.size]
+                );
+            }
+        }
+
+        await conn.query(
+            `UPDATE shipment 
+             SET shipment_stage_id = 6,
+                 closed_comment = ?,
+                 closed_date = CURDATE()
+             WHERE id = ?`,
+            [comment, shipment.id]
+        );
+
+        const [[closedInfo]] = await conn.query(
+            `SELECT DATE_FORMAT(closed_date, '%Y-%m-%d') AS closed_date
+             FROM shipment
+             WHERE id = ?`,
+            [shipment.id]
+        );
+        const closedDate = closedInfo?.closed_date || null;
+
+        await addHistory(conn, {
+            module: 'shipment',
+            moduleId: shipment.id,
+            userId,
+            action: 'STAGE_CHANGED',
+            details: { from: 'Cleared', to: 'Closed', user: userName, comment }
+        });
+
+        await conn.commit();
+        res.json({
+            ok: true,
+            transitioned: true,
+            shipUniqid,
+            toStageId: 6,
+            updated: { from_stage_id: 5, closed_comment: comment, closed_date: closedDate }
+        });
+    } catch (e) {
+        await conn.rollback();
+        res.status(500).json(errPayload("Failed to close shipment.", "DB_ERROR", e.message));
+    } finally {
+        conn.release();
+    }
+});
+
+const archiveUploads = upload.any();
+router.post("/:shipUniqid/transition/archive", archiveUploads, async (req, res) => {
+    const { shipUniqid } = req.params;
+    const userId = req.session?.user?.id;
+    const userName = req.session?.user?.name || 'System';
+    const conn = await db.promise().getConnection();
+
+    try {
+        await conn.beginTransaction();
+
+        const [[shipment]] = await conn.query(
+            `SELECT id, shipment_stage_id
+             FROM shipment
+             WHERE ship_uniqid = ?`,
+            [shipUniqid]
+        );
+
+        if (!shipment) {
+            await conn.rollback();
+            return res.status(404).json(errPayload("Shipment not found."));
+        }
+
+        if (Number(shipment.shipment_stage_id) !== 6) {
+            await conn.rollback();
+            return res.status(400).json(errPayload("Shipment must be in Closed stage before archiving."));
+        }
+
+        const comment = (req.body?.comment || "").trim();
+        if (!comment) {
+            await conn.rollback();
+            return res.status(400).json(errPayload("Manager review comment is required."));
+        }
+
+        if (req.files && req.files.length > 0) {
+            const [docTypeRows] = await conn.query(
+                `SELECT id FROM document_type WHERE code = 'archive_stage_attachment' LIMIT 1`
+            );
+            let docTypeId;
+            if (docTypeRows.length) {
+                docTypeId = docTypeRows[0].id;
+            } else {
+                const [insertDocType] = await conn.query(
+                    `INSERT INTO document_type (code, name, is_active) VALUES ('archive_stage_attachment', 'Archive Stage Attachment', 1)`
+                );
+                docTypeId = insertDocType.insertId;
+            }
+
+            for (const file of req.files) {
+                const relPath = path.posix.join("uploads", "shipment", path.basename(file.path));
+                await conn.query(
+                    `INSERT INTO shipment_file
+                        (shipment_id, document_type_id, file_name, file_path, mime_type, size_bytes, uploaded_at)
+                     VALUES (?, ?, ?, ?, ?, ?, NOW())`,
+                    [shipment.id, docTypeId, file.originalname, relPath, file.mimetype, file.size]
+                );
+            }
+        }
+
+        await conn.query(
+            `UPDATE shipment
+             SET shipment_stage_id = 7,
+                 archive_comment = ?,
+                 archive_date = CURDATE()
+             WHERE id = ?`,
+            [comment, shipment.id]
+        );
+
+        const [[archiveInfo]] = await conn.query(
+            `SELECT DATE_FORMAT(archive_date, '%Y-%m-%d') AS archive_date
+             FROM shipment
+             WHERE id = ?`,
+            [shipment.id]
+        );
+        const archiveDate = archiveInfo?.archive_date || null;
+
+        await addHistory(conn, {
+            module: 'shipment',
+            moduleId: shipment.id,
+            userId,
+            action: 'STAGE_CHANGED',
+            details: { from: 'Closed', to: 'Archive', user: userName, comment }
+        });
+
+        await conn.commit();
+        res.json({
+            ok: true,
+            transitioned: true,
+            shipUniqid,
+            toStageId: 7,
+            updated: { from_stage_id: 6, archive_comment: comment, archive_date: archiveDate }
+        });
+    } catch (e) {
+        await conn.rollback();
+        res.status(500).json(errPayload("Failed to archive shipment.", "DB_ERROR", e.message));
     } finally {
         conn.release();
     }
