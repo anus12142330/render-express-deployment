@@ -287,6 +287,7 @@ router.get("/board", async (req, res) => {
             WHERE dtcs.shipment_id = s.id
         ) as scraped_discharge_date,
         COALESCE(s.confirm_airway_bill_no, s.airway_bill_no) as airway_bill_no,
+        s.departure_time,
         s.bl_no,
         COALESCE(s.confirm_airline, s.airline) as airline,
         COALESCE(s.confirm_flight_no, s.flight_no) as flight_no,
@@ -436,12 +437,23 @@ router.get("/board", async (req, res) => {
                     sc.container_no,
                     DATE_FORMAT(scr.return_date, '%Y-%m-%d') AS return_date_raw,
                     DATE_FORMAT(scr.return_date, '%d-%b-%Y') AS return_date_formatted,
+                    DATE_FORMAT(dtcm.to_town_date, '%Y-%m-%d') AS to_town_date_raw,
+                    DATE_FORMAT(dtcm.to_town_date, '%d-%b-%Y') AS to_town_date_formatted,
                     COUNT(DISTINCT scrf.id) AS attachment_count
                 FROM shipment_container sc
+                LEFT JOIN dubai_trade_container_status dtcs ON dtcs.shipment_container_id = sc.id
+                LEFT JOIN (
+                    SELECT 
+                        dubai_trade_status_id, 
+                        MAX(date) AS to_town_date
+                    FROM dubai_trade_container_moves
+                    WHERE move = 'TO TOWN'
+                    GROUP BY dubai_trade_status_id
+                ) AS dtcm ON dtcm.dubai_trade_status_id = dtcs.id
                 LEFT JOIN shipment_container_return scr ON scr.container_id = sc.id
                 LEFT JOIN shipment_container_return_file scrf ON scrf.return_id = scr.id
                 WHERE sc.shipment_id IN (?)
-                GROUP BY sc.id, sc.shipment_id, sc.container_no, scr.return_date
+                GROUP BY sc.id, sc.shipment_id, sc.container_no, scr.return_date, dtcm.to_town_date
                 `,
                 [shipmentIds]
             );
@@ -455,6 +467,8 @@ router.get("/board", async (req, res) => {
                     container_no: row.container_no,
                     return_date_raw: row.return_date_raw,
                     return_date_formatted: row.return_date_formatted,
+                    to_town_date_raw: row.to_town_date_raw,
+                    to_town_date_formatted: row.to_town_date_formatted,
                     attachment_count: Number(row.attachment_count || 0)
                 });
             }
@@ -743,7 +757,7 @@ router.put("/:shipUniqid/planned-details", upload.none(), async (req, res) => {
         const {
             bl_description, free_time,
             discharge_port_local_charges, discharge_port_agent, freight_charges, freight_payment_terms, freight_amount_if_payable, freight_amount_currency_id, bl_type, po_documents,
-            etd_date, vessel_name, shipping_line_name, shipper, consignee, notify_party
+            etd_date, vessel_name, shipping_line_name, departure_time, airline, flight_no, arrival_date, arrival_time, airway_bill_no, shipper, consignee, notify_party
         } = req.body;
 
         // Find the shipment
@@ -757,7 +771,9 @@ router.put("/:shipUniqid/planned-details", upload.none(), async (req, res) => {
             discharge_port_local_charges: 'POD Local Charges', discharge_port_agent: 'POD Agent', freight_charges: 'Freight Charges',
             freight_payment_terms: 'Freight Terms', bl_type: 'BL Type', freight_amount_currency_id: 'Freight Currency',
             freight_amount_if_payable: 'Freight Amount', etd_date: 'ETD', vessel_name: 'Vessel Name',
-            shipping_line_name: 'Shipping Line', shipper: 'Shipper', consignee: 'Consignee', notify_party: 'Notify Party'
+            shipping_line_name: 'Shipping Line', departure_time: 'Departure Time', airline: 'Airline', flight_no: 'Flight No.',
+            arrival_date: 'Arrival Date', arrival_time: 'Arrival Time', airway_bill_no: 'Airway Bill No.',
+            shipper: 'Shipper', consignee: 'Consignee', notify_party: 'Notify Party'
         };
 
         const formatDateForHistory = (dateValue) => {
@@ -765,13 +781,15 @@ router.put("/:shipUniqid/planned-details", upload.none(), async (req, res) => {
             return dayjs(dateValue).format('DD-MMM-YYYY');
         };
 
+        const dateFields = new Set(['etd_date', 'arrival_date']);
+
         for (const key in fieldsToCompare) {
             const oldValue = oldShipment[key] || '';
             const newValue = req.body[key] || ''; // The date from the form is already YYYY-MM-DD
             if (String(oldValue) !== String(newValue)) {
                 changes[fieldsToCompare[key]] = {
-                    from: key === 'etd_date' ? formatDateForHistory(oldValue) : (oldValue || 'empty'),
-                    to: key === 'etd_date' ? formatDateForHistory(newValue) : (newValue || 'empty')
+                    from: dateFields.has(key) ? formatDateForHistory(oldValue) : (oldValue || 'empty'),
+                    to: dateFields.has(key) ? formatDateForHistory(newValue) : (newValue || 'empty')
                 };
             }
         }
@@ -780,10 +798,33 @@ router.put("/:shipUniqid/planned-details", upload.none(), async (req, res) => {
             `UPDATE shipment SET
                 bl_description = ?, free_time = ?, discharge_port_local_charges = ?,
                 discharge_port_agent = ?, freight_charges = ?, freight_payment_terms = ?, freight_amount_if_payable = ?, freight_amount_currency_id = ?, bl_type = ?,
-                etd_date = ?, vessel_name = ?, shipping_line_name = ?, shipper = ?, consignee = ?, notify_party = ?,
+                etd_date = ?, vessel_name = ?, shipping_line_name = ?, departure_time = ?, airline = ?, flight_no = ?, arrival_date = ?, arrival_time = ?, airway_bill_no = ?, shipper = ?, consignee = ?, notify_party = ?,
                 updated_date = NOW()
             WHERE id = ?`,
-            [bl_description || null, free_time || null, discharge_port_local_charges || null, discharge_port_agent || null, freight_charges || null, freight_payment_terms || null, freight_amount_if_payable || null, freight_amount_currency_id || null, bl_type || null, etd_date || null, vessel_name || null, shipping_line_name || null, shipper || null, consignee || null, notify_party || null, oldShipment.id]
+            [
+                bl_description || null,
+                free_time || null,
+                discharge_port_local_charges || null,
+                discharge_port_agent || null,
+                freight_charges || null,
+                freight_payment_terms || null,
+                freight_amount_if_payable || null,
+                freight_amount_currency_id || null,
+                bl_type || null,
+                etd_date || null,
+                vessel_name || null,
+                shipping_line_name || null,
+                (departure_time && departure_time.trim() !== '') ? departure_time : null,
+                airline || null,
+                flight_no || null,
+                arrival_date || null,
+                (arrival_time && arrival_time.trim() !== '') ? arrival_time : null,
+                airway_bill_no || null,
+                shipper || null,
+                consignee || null,
+                notify_party || null,
+                oldShipment.id
+            ]
         );
 
         // Handle PO Documents
@@ -1479,7 +1520,8 @@ router.post("/create-from-po", upload.none(), async (req, res) => {
             po_id, // This is the purchase_order.id
             bl_description, free_time, discharge_port_local_charges, discharge_port_agent, freight_charges,
             freight_payment_terms, freight_amount_if_payable, freight_amount_currency_id, bl_type, po_documents,
-            etd_date, vessel_name, shipping_line_name, shipper, consignee, notify_party
+            etd_date, vessel_name, shipping_line_name, departure_time, airline, flight_no, arrival_date, arrival_time, airway_bill_no,
+            shipper, consignee, notify_party
         } = req.body;
 
         // Find the existing shipment record linked to the Purchase Order
@@ -1513,13 +1555,20 @@ router.post("/create-from-po", upload.none(), async (req, res) => {
             `UPDATE shipment SET
                 bl_description = ?, free_time = ?, discharge_port_local_charges = ?, discharge_port_agent = ?,
                 freight_charges = ?, freight_payment_terms = ?, freight_amount_if_payable = ?, freight_amount_currency_id = ?, bl_type = ?,
-                etd_date = ?, vessel_name = ?, shipping_line_name = ?, shipper = ?, consignee = ?, notify_party = ?,
+                etd_date = ?, vessel_name = ?, shipping_line_name = ?, departure_time = ?, airline = ?, flight_no = ?, arrival_date = ?, arrival_time = ?, airway_bill_no = ?, shipper = ?, consignee = ?, notify_party = ?,
                 containers_back_to_back = ?, containers_stock_sales = ?, no_containers = ?
             WHERE id = ?`,
             [
                 bl_description || null, free_time || null, discharge_port_local_charges || null,
                 discharge_port_agent || null, freight_charges || null, freight_payment_terms || null, freight_amount_if_payable || null, freight_amount_currency_id || null, bl_type || null,
-                etd_date || null, vessel_name || null, shipping_line_name || null, shipper || null, consignee || null, notify_party || null,
+                etd_date || null, vessel_name || null, shipping_line_name || null,
+                (departure_time && departure_time.trim() !== '') ? departure_time : null,
+                airline || null,
+                flight_no || null,
+                arrival_date || null,
+                (arrival_time && arrival_time.trim() !== '') ? arrival_time : null,
+                airway_bill_no || null,
+                shipper || null, consignee || null, notify_party || null,
                 b2bCount, ssCount, totalContainers, shipment.id
             ]
         );
@@ -1639,8 +1688,27 @@ router.post("/:shipUniqid/split-shipment", async (req, res) => {
 
         // 3. Copy planned details from the original shipment
         await conn.query(
-            `UPDATE shipment SET shipper = ?, consignee = ?, notify_party = ?, bl_description = ?, free_time = ?, bl_type = ?, freight_payment_terms = ?, freight_amount_if_payable = ?, freight_amount_currency_id = ?, etd_date = ?, vessel_name = ?, shipping_line_name = ? WHERE id = ?`,
-            [originalShipment.shipper, originalShipment.consignee, originalShipment.notify_party, originalShipment.bl_description, originalShipment.free_time, originalShipment.bl_type, originalShipment.freight_payment_terms, originalShipment.freight_amount_if_payable, originalShipment.freight_amount_currency_id, originalShipment.etd_date, originalShipment.vessel_name, originalShipment.shipping_line_name, newShipmentId]
+            `UPDATE shipment SET shipper = ?, consignee = ?, notify_party = ?, bl_description = ?, free_time = ?, bl_type = ?, freight_payment_terms = ?, freight_amount_if_payable = ?, freight_amount_currency_id = ?, etd_date = ?, vessel_name = ?, shipping_line_name = ?, departure_time = ?, airline = ?, flight_no = ?, arrival_date = ?, arrival_time = ? WHERE id = ?`,
+            [
+                originalShipment.shipper,
+                originalShipment.consignee,
+                originalShipment.notify_party,
+                originalShipment.bl_description,
+                originalShipment.free_time,
+                originalShipment.bl_type,
+                originalShipment.freight_payment_terms,
+                originalShipment.freight_amount_if_payable,
+                originalShipment.freight_amount_currency_id,
+                originalShipment.etd_date,
+                originalShipment.vessel_name,
+                originalShipment.shipping_line_name,
+                originalShipment.departure_time,
+                originalShipment.airline,
+                originalShipment.flight_no,
+                originalShipment.arrival_date,
+                originalShipment.arrival_time,
+                newShipmentId
+            ]
         );
 
          // 4. Copy existing shipment_po_document entries to the new shipment
@@ -1942,7 +2010,27 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
         }
 
         await conn.commit();
-        res.json({ ok: true, shipUniqid, from_stage_id: 2 });
+
+        const movedFromStageId = Number(shipment.shipment_stage_id);
+        const toStageId = movedFromStageId === 2 ? 3 : movedFromStageId;
+
+        res.json({
+            ok: true,
+            shipUniqid,
+            toStageId,
+            transitioned: movedFromStageId === 2,
+            updated: {
+                from_stage_id: movedFromStageId,
+                airway_bill_no,
+                flight_no,
+                airline: airline || null,
+                arrival_date: arrival_date || null,
+                arrival_time: (arrival_time && arrival_time.trim() !== '') ? arrival_time : null,
+                etd_date: normalizedDepartureDate || null,
+                departure_time: normalizedDepartureTime,
+                mode_shipment_id: 2
+            }
+        });
     } catch (e) {
         await conn.rollback();
         res.status(500).json(errPayload("Failed to save underloading details", "DB_ERROR", e.message));
@@ -1954,7 +2042,18 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
 /* ---------- save underloading details (AIR) and move to stage 3 ---------- */
 router.post("/:shipUniqid/underloading-air", upload.any(), async (req, res) => {
     const { shipUniqid } = req.params;
-    const { airway_bill_no, flight_no, airline, arrival_date, arrival_time, pickup_date, keptCommonImages: keptCommonImagesJson, items: itemsJson } = req.body;
+    const {
+        airway_bill_no,
+        flight_no,
+        airline,
+        arrival_date,
+        arrival_time,
+        departure_date,
+        departure_time,
+        pickup_date,
+        keptCommonImages: keptCommonImagesJson,
+        items: itemsJson
+    } = req.body;
     const isEditing = req.body.is_editing === 'true';
     const items = JSON.parse(itemsJson || '[]');
     const rawAllocations = req.body.po_allocations;
@@ -1978,9 +2077,21 @@ router.post("/:shipUniqid/underloading-air", upload.any(), async (req, res) => {
         if (!shipment) throw new Error("Shipment not found.");
 
         // Update shipment with Airway Bill and Flight No
+        const normalizedDepartureDate = departure_date || req.body.etd_date || null;
+        const normalizedDepartureTime = (departure_time && departure_time.trim() !== '') ? departure_time : null;
+
         await conn.query(
-            `UPDATE shipment SET airway_bill_no = ?, flight_no = ?, airline = ?, arrival_date = ?, arrival_time = ? WHERE id = ?`,
-            [airway_bill_no, flight_no, airline || null, arrival_date || null, (arrival_time && arrival_time.trim() !== '') ? arrival_time : null, shipment.id] //
+            `UPDATE shipment SET airway_bill_no = ?, flight_no = ?, airline = ?, arrival_date = ?, arrival_time = ?, etd_date = ?, departure_time = ? WHERE id = ?`,
+            [
+                airway_bill_no,
+                flight_no,
+                airline || null,
+                arrival_date || null,
+                (arrival_time && arrival_time.trim() !== '') ? arrival_time : null,
+                normalizedDepartureDate || null,
+                normalizedDepartureTime,
+                shipment.id
+            ]
         ); //
 
         // For Air, we create/update a single "dummy" container to hold the items, reusing the sea-freight tables.
@@ -2057,21 +2168,57 @@ router.post("/:shipUniqid/underloading-air", upload.any(), async (req, res) => {
             }
         }
 
+        const normalizeDate = (value) => {
+            if (!value) return '';
+            const parsed = dayjs(value);
+            if (!parsed.isValid()) return String(value);
+            return parsed.format('YYYY-MM-DD');
+        };
+
+        const normalizeTime = (value) => {
+            if (!value) return '';
+            const raw = String(value).trim();
+            if (!raw) return '';
+            const formats = ['HH:mm:ss.SSSSSS', 'HH:mm:ss', 'HH:mm'];
+            for (const fmt of formats) {
+                const parsed = dayjs(raw, fmt, true);
+                if (parsed.isValid()) return parsed.format('HH:mm');
+            }
+            const fallback = dayjs(raw);
+            return fallback.isValid() ? fallback.format('HH:mm') : raw;
+        };
+
         if (isEditing) {
             // We are editing, so just log the specific changes.
             const changes = [];
             if (shipment.airway_bill_no !== airway_bill_no) changes.push(`Airway Bill changed from '${shipment.airway_bill_no || ''}' to '${airway_bill_no}'`);
             if (shipment.flight_no !== flight_no) changes.push(`Flight No changed from '${shipment.flight_no || ''}' to '${flight_no}'`);
             if (shipment.airline !== airline) changes.push(`Airline changed from '${shipment.airline || ''}' to '${airline}'`);
-            if (dayjs(shipment.arrival_date).format('YYYY-MM-DD') !== arrival_date) changes.push(`Arrival Date changed`);
-            if (shipment.arrival_time !== arrival_time) changes.push(`Arrival Time changed`);
+
+            const existingArrivalDate = normalizeDate(shipment.arrival_date);
+            const incomingArrivalDate = normalizeDate(arrival_date);
+            if (existingArrivalDate !== incomingArrivalDate) changes.push(`Arrival Date changed`);
+
+            const existingArrivalTime = normalizeTime(shipment.arrival_time);
+            const incomingArrivalTime = normalizeTime(arrival_time);
+            if (existingArrivalTime !== incomingArrivalTime) changes.push(`Arrival Time changed`);
+
+            const existingDepartureDate = normalizeDate(shipment.etd_date);
+            const incomingDepartureDate = normalizeDate(normalizedDepartureDate);
+            //if (existingDepartureDate !== incomingDepartureDate) changes.push(`Departure Date changed`);
+
+            const existingDepartureTime = normalizeTime(shipment.departure_time);
+            const incomingDepartureTime = normalizeTime(normalizedDepartureTime);
+            //if (existingDepartureTime !== incomingDepartureTime) changes.push(`Departure Time changed`);
             // You could add item change detection here if needed in the future.
 
-            await addHistory(conn, {
-                module: 'shipment', moduleId: shipment.id, userId: userId,
-                action: 'UNDERLOADING_DETAILS_UPDATED',
-                details: { changes: changes.join('; ') || 'Product details updated.' }
-            });
+            if (changes.length > 0) {
+                await addHistory(conn, {
+                    module: 'shipment', moduleId: shipment.id, userId: userId,
+                    action: 'UNDERLOADING_DETAILS_UPDATED',
+                    details: { changes: changes.join('; ') }
+                });
+            }
         } else {
             // This is a new entry, so move the stage and log the stage change.
 
@@ -2129,7 +2276,7 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
         await conn.beginTransaction();        
 
         const {
-            confirm_sailing_date, confirm_vessel_name, confirm_eta_date, bl_no, confirm_shipping_line, confirm_discharge_port_agent,
+            confirm_sailing_date, confirm_departure_time, confirm_vessel_name, confirm_eta_date, bl_no, confirm_shipping_line, confirm_discharge_port_agent,
             confirm_airway_bill_no, confirm_flight_no, confirm_airline, confirm_arrival_date, confirm_arrival_time, 
             confirm_free_time,
             is_mofa_required, original_doc_receipt_mode, doc_receipt_person_name, doc_receipt_person_contact,
@@ -2162,6 +2309,9 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
                 return res.status(400).json(errPayload("Sailing Date, Vessel Name, ETA, BL No, Shipping Line, and POD Agent are required for Sea shipments."));
             }
         }
+        if (!confirm_departure_time) {
+            return res.status(400).json(errPayload("Departure Time is required."));
+        }
 
         // Validate courier details if mode is 'courier'
         if (original_doc_receipt_mode === 'courier' && (!doc_receipt_courier_no || !doc_receipt_courier_company)) {
@@ -2173,6 +2323,7 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
             `SELECT sailing_date, etd_date, vessel_name, confirm_vessel_name, eta_date, bl_no,shipping_line_name, confirm_shipping_line, confirm_discharge_port_agent,
                     airway_bill_no, flight_no, airline, confirm_airway_bill_no, confirm_flight_no, confirm_airline,
                     arrival_date, arrival_time, confirm_arrival_date, confirm_arrival_time,
+                    departure_time, confirm_departure_time,
                     free_time, confirm_free_time,
                     is_mofa_required, original_doc_receipt_mode, doc_receipt_person_name, doc_receipt_person_contact,
                     doc_receipt_courier_no, doc_receipt_courier_company, doc_receipt_tracking_link FROM shipment WHERE id = ?`,
@@ -2186,6 +2337,9 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
         if (isAir) {
             if (formatDateForHistory(oldShipmentDetails.sailing_date) !== formatDateForHistory(confirm_sailing_date)) {
                 changes['Departure Date'] = { from: formatDateForHistory(oldShipmentDetails.sailing_date), to: formatDateForHistory(confirm_sailing_date) };
+            }
+            if ((oldShipmentDetails.confirm_departure_time || '').trim() !== (confirm_departure_time || '').trim()) {
+                changes['Departure Time'] = { from: oldShipmentDetails.confirm_departure_time || 'empty', to: confirm_departure_time || 'empty' };
             }
             if (oldShipmentDetails.confirm_airway_bill_no !== confirm_airway_bill_no) {
                 changes['AWB No.'] = { from: oldShipmentDetails.confirm_airway_bill_no || 'empty', to: confirm_airway_bill_no };
@@ -2206,6 +2360,9 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
             if (formatDateForHistory(oldShipmentDetails.sailing_date) !== formatDateForHistory(confirm_sailing_date)) {
                 changes['Sailing Date'] = { from: formatDateForHistory(oldShipmentDetails.sailing_date), to: formatDateForHistory(confirm_sailing_date) };
             }
+            if ((oldShipmentDetails.confirm_departure_time || '').trim() !== (confirm_departure_time || '').trim()) {
+                changes['Departure Time'] = { from: oldShipmentDetails.confirm_departure_time || 'empty', to: confirm_departure_time || 'empty' };
+            }
             if (oldShipmentDetails.vessel_name !== confirm_vessel_name) {
                 changes['Confirmed Vessel Name'] = { from: oldShipmentDetails.vessel_name || 'empty', to: confirm_vessel_name || 'empty' };
             }
@@ -2221,9 +2378,9 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
             if (oldShipmentDetails.confirm_discharge_port_agent !== confirm_discharge_port_agent) {
                 changes['Confirm POD Agent'] = { from: oldShipmentDetails.confirm_discharge_port_agent || 'empty', to: confirm_discharge_port_agent };
             }
-            if (oldShipmentDetails.confirm_free_time !== confirm_free_time) {
-                changes['Confirm Free Time'] = { from: oldShipmentDetails.confirm_free_time || oldShipmentDetails.free_time || 'empty', to: confirm_free_time || 'empty' };
-            }
+            // if (oldShipmentDetails.confirm_free_time !== confirm_free_time) {
+            //     changes['Confirm Free Time'] = { from: oldShipmentDetails.confirm_free_time  || 'empty', to: confirm_free_time || 'empty' };
+            // }
         }
 
         if (String(oldShipmentDetails.is_mofa_required || '0') !== String(is_mofa_required || '0')) {
@@ -2235,13 +2392,16 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
             await conn.query(
                 `UPDATE shipment SET 
                     sailing_date = ?,
+                    confirm_departure_time = ?,
                     confirm_airway_bill_no = ?, confirm_flight_no = ?, confirm_airline = ?,
                     confirm_arrival_date = ?, confirm_arrival_time = ?, is_mofa_required = ?,
                     original_doc_receipt_mode = ?, doc_receipt_person_name = ?, doc_receipt_person_contact = ?,
                     doc_receipt_courier_no = ?, doc_receipt_courier_company = ?, doc_receipt_tracking_link = ?
                  WHERE id = ?`, 
                 [
-                    confirm_sailing_date, confirm_airway_bill_no, confirm_flight_no, confirm_airline, 
+                    confirm_sailing_date,
+                    (confirm_departure_time && confirm_departure_time.trim() !== '') ? confirm_departure_time : null,
+                    confirm_airway_bill_no, confirm_flight_no, confirm_airline, 
                     confirm_arrival_date, (confirm_arrival_time && confirm_arrival_time.trim() !== '') ? confirm_arrival_time : null, is_mofa_required === '1' ? 1 : 0,
                     original_doc_receipt_mode || null, doc_receipt_person_name || null, doc_receipt_person_contact || null,
                     doc_receipt_courier_no || null, doc_receipt_courier_company || null, doc_receipt_tracking_link || null,
@@ -2252,6 +2412,7 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
             await conn.query(
                 `UPDATE shipment SET 
                     sailing_date = ?,
+                    confirm_departure_time = ?,
                     confirm_vessel_name = ?,
                     eta_date = ?, bl_no = ?,
                     confirm_shipping_line = ?, confirm_discharge_port_agent = ?, confirm_free_time = ?,
@@ -2260,7 +2421,9 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
                     doc_receipt_courier_no = ?, doc_receipt_courier_company = ?, doc_receipt_tracking_link = ?
                  WHERE id = ?`, 
                 [
-                    confirm_sailing_date, confirm_vessel_name, confirm_eta_date,
+                    confirm_sailing_date,
+                    (confirm_departure_time && confirm_departure_time.trim() !== '') ? confirm_departure_time : null,
+                    confirm_vessel_name, confirm_eta_date,
                     bl_no, confirm_shipping_line, confirm_discharge_port_agent, 
                     confirm_free_time ? parseInt(confirm_free_time) : null,
                     is_mofa_required === '1' ? 1 : 0,
@@ -2546,8 +2709,16 @@ router.post("/:shipUniqid/transition/cleared", clearedUploads, async (req, res) 
         const hasMofaDueDate = !mofaRequired || !!mofa_due_date;
         const hasCustomSubmissionDueDate = !!custom_submission_due_date;
 
-        const canTransition = hasFirsTotal && hasMofaTotal && hasOriginalDocTotal && 
-                              hasFirsDate && hasFirsDueDate && hasMofaDueDate && hasCustomSubmissionDueDate;
+        const missingRequirements = [];
+        if (!hasFirsTotal) missingRequirements.push("FIRS attachment");
+        if (!hasFirsDate) missingRequirements.push("FIRS date");
+        if (!hasFirsDueDate) missingRequirements.push("FIRS due date");
+        if (!hasMofaTotal) missingRequirements.push("MOFA attachment");
+        if (!hasMofaDueDate) missingRequirements.push("MOFA due date");
+        if (!hasOriginalDocTotal) missingRequirements.push("Original document");
+        if (!hasCustomSubmissionDueDate) missingRequirements.push("Customs submission due date");
+
+        const canTransition = missingRequirements.length === 0;
 
         // --- 4. Update stage and log history only if all required files and dates are present ---
         const fromStageId = shipment.shipment_stage_id;
@@ -2575,13 +2746,20 @@ router.post("/:shipUniqid/transition/cleared", clearedUploads, async (req, res) 
             });
         }
 
+        const message = canTransition && fromStageId === 4
+            ? "Shipment moved to Cleared successfully."
+            : "Cleared details saved. Upload pending items before moving to Cleared.";
+
         await conn.commit();
         res.json({ 
             ok: true, 
             shipUniqid, 
             toStageId: toStageId, 
             transitioned: canTransition && fromStageId === 4,
-            updated: { from_stage_id: fromStageId } 
+            updated: { from_stage_id: fromStageId },
+            missingRequirements,
+            message,
+            warning: !canTransition
         });
     } catch (e) {
         await conn.rollback();
@@ -2700,7 +2878,16 @@ router.post("/:shipUniqid/transition/closed", closedUploads, async (req, res) =>
 
         if (issues.length) {
             await conn.rollback();
-            return res.status(400).json(errPayload(`Cannot close shipment. Pending: ${issues.join('; ')}`));
+            return res.json({
+                ok: true,
+                shipUniqid,
+                toStageId: Number(shipment.shipment_stage_id) || 5,
+                transitioned: false,
+                updated: { from_stage_id: Number(shipment.shipment_stage_id) || 5 },
+                missingRequirements: issues,
+                warning: true,
+                message: `Cannot close shipment. Pending: ${issues.join('; ')}`
+            });
         }
 
         if (req.files && req.files.length > 0) {
@@ -2759,7 +2946,8 @@ router.post("/:shipUniqid/transition/closed", closedUploads, async (req, res) =>
             transitioned: true,
             shipUniqid,
             toStageId: 6,
-            updated: { from_stage_id: 5, closed_comment: comment, closed_date: closedDate }
+            updated: { from_stage_id: 5, closed_comment: comment, closed_date: closedDate },
+            message: "Shipment closed successfully."
         });
     } catch (e) {
         await conn.rollback();
@@ -2858,7 +3046,8 @@ router.post("/:shipUniqid/transition/archive", archiveUploads, async (req, res) 
             transitioned: true,
             shipUniqid,
             toStageId: 7,
-            updated: { from_stage_id: 6, archive_comment: comment, archive_date: archiveDate }
+            updated: { from_stage_id: 6, archive_comment: comment, archive_date: archiveDate },
+            message: "Shipment archived successfully."
         });
     } catch (e) {
         await conn.rollback();
