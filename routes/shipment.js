@@ -492,6 +492,51 @@ router.get("/board", async (req, res) => {
     }
 });
 
+router.get("/archive", async (req, res) => {
+    try {
+        const [rows] = await db.promise().query(
+            `
+            SELECT
+                s.id,
+                s.ship_uniqid,
+                s.po_id,
+                po.po_number,
+                v.display_name AS vendor_name,
+                s.lot_number,
+                s.total_lots,
+                DATE_FORMAT(s.closed_date, '%d-%b-%Y') AS closed_date,
+                DATE_FORMAT(s.archive_date, '%d-%b-%Y') AS archive_date,
+                s.archive_comment,
+                (
+                    SELECT GROUP_CONCAT(sc.container_no ORDER BY sc.id SEPARATOR ', ')
+                    FROM shipment_container sc
+                    WHERE sc.shipment_id = s.id
+                ) AS container_numbers
+            FROM shipment s
+            LEFT JOIN purchase_orders po ON po.id = s.po_id
+            LEFT JOIN vendor v ON v.id = s.vendor_id
+            WHERE s.shipment_stage_id = 7
+            ORDER BY s.archive_date DESC, s.id DESC
+            `
+        );
+
+        const formatted = rows.map((row) => ({
+            ...row,
+            lot_label:
+                Number(row.total_lots) > 1
+                    ? `Lot ${row.lot_number}/${row.total_lots}`
+                    : (row.lot_number ? `Lot ${row.lot_number}` : "-"),
+            container_numbers: row.container_numbers || "-",
+            closed_date: row.closed_date || "-",
+            archive_date: row.archive_date || "-",
+        }));
+
+        res.json(formatted);
+    } catch (e) {
+        res.status(500).json(errPayload("Failed to load archive shipments.", "DB_ERROR", e.message));
+    }
+});
+
 // PUT /api/shipment/:shipUniqid/update
 // routes/shipment.js
 // shipment.js
