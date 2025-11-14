@@ -1691,8 +1691,11 @@ router.get("/items/:poId", async (req, res) => {
                  i.amount,
                  i.uom_id,
                  um.name AS uom_label,
+                 COALESCE(SUM(spia.planned_quantity), 0) AS planned_quantity,
                  COALESCE(SUM(spia.allocated_quantity), 0) AS allocated_quantity,
+                 COALESCE(SUM(spia.loaded_quantity), 0) AS loaded_quantity,
                  GREATEST(i.quantity - COALESCE(SUM(spia.allocated_quantity), 0), 0) AS open_quantity,
+                 GREATEST(i.quantity - COALESCE(SUM(spia.allocated_quantity), 0), 0) AS remaining_quantity,
                  (SELECT pi.thumbnail_path
                   FROM product_images pi
                   WHERE pi.product_id = i.item_id
@@ -1705,7 +1708,7 @@ router.get("/items/:poId", async (req, res) => {
                   LIMIT 1) AS image_url
              FROM purchase_order_items AS i
              LEFT JOIN uom_master um ON um.id = i.uom_id
-             LEFT JOIN shipment_po_item_allocation spia ON spia.po_item_id = i.id
+             LEFT JOIN shipment_po_item_allocation spia ON spia.po_item_id = i.id AND spia.po_id = i.purchase_order_id
              WHERE i.purchase_order_id = ?
              GROUP BY i.id, i.purchase_order_id, i.item_name, i.item_id, i.hscode, i.quantity, i.rate, i.amount, i.uom_id, um.name`,
             [poId]

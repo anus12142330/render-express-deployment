@@ -39,34 +39,15 @@ const addHistory = async (conn, { module, moduleId, userId, action, details }) =
 };
 
 const ensureAllocationTable = async (conn) => {
+   
+    // Ensure legacy tables have new columns / indexes
+    
     await conn.query(`
-        CREATE TABLE IF NOT EXISTS shipment_po_item_allocation (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            shipment_id INT NOT NULL,
-            po_item_id INT NOT NULL,
-            product_id INT NULL,
-            planned_quantity DECIMAL(18,4) NOT NULL DEFAULT 0,
-            allocated_quantity DECIMAL(18,4) NOT NULL DEFAULT 0,
-            remaining_quantity DECIMAL(18,4) NOT NULL DEFAULT 0,
-            allocation_mode ENUM('partial','full') DEFAULT 'partial',
-            created_by INT NULL,
-            updated_by INT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            UNIQUE KEY uniq_shipment_po_item (shipment_id, po_item_id),
-            KEY idx_po_item_allocation (po_item_id),
-            KEY idx_shipment_allocation (shipment_id)
-        ) ENGINE=InnoDB;
+        UPDATE shipment_po_item_allocation spia
+        JOIN shipment s ON spia.shipment_id = s.id
+        SET spia.po_id = s.po_id
+        WHERE (spia.po_id IS NULL OR spia.po_id = 0) AND s.po_id IS NOT NULL
     `);
-
-    // Ensure planned_quantity column exists for legacy tables
-    try {
-        await conn.query(`ALTER TABLE shipment_po_item_allocation ADD COLUMN planned_quantity DECIMAL(18,4) NOT NULL DEFAULT 0 AFTER product_id`);
-    } catch (error) {
-        if (error.code !== 'ER_DUP_FIELDNAME') {
-            throw error;
-        }
-    }
 };
 
 const toFiniteNumber = (value, fallback = 0) => {
@@ -82,7 +63,8 @@ const upsertShipmentPoAllocations = async (conn, {
     userId,
     skipAvailabilityCheck = false,
     updatePlannedQuantity = false,
-    updateAllocatedQuantity = true
+    updateAllocatedQuantity = true,
+    updateLoadedQuantity = false
 }) => {
     if (!allocations || allocations.length === 0) return;
 
@@ -103,18 +85,25 @@ const upsertShipmentPoAllocations = async (conn, {
     }
 
     const [existingRows] = await conn.query(
-        `SELECT po_item_id, planned_quantity, allocated_quantity, remaining_quantity FROM shipment_po_item_allocation WHERE shipment_id = ? AND po_item_id IN (?)`,
+        `SELECT po_item_id, planned_quantity, allocated_quantity, loaded_quantity, remaining_quantity FROM shipment_po_item_allocation WHERE shipment_id = ? AND po_item_id IN (?)`,
         [shipmentId, poItemIds]
     );
     const existingAllocatedMap = new Map(existingRows.map(row => [Number(row.po_item_id), toFiniteNumber(row.allocated_quantity)]));
     const existingPlannedMap = new Map(existingRows.map(row => [Number(row.po_item_id), toFiniteNumber(row.planned_quantity)]));
+    const existingLoadedMap = new Map(existingRows.map(row => [Number(row.po_item_id), toFiniteNumber(row.loaded_quantity)]));
     const existingRemainingMap = new Map(existingRows.map(row => [Number(row.po_item_id), toFiniteNumber(row.remaining_quantity)]));
 
     const [totalRows] = await conn.query(
-        `SELECT po_item_id, SUM(allocated_quantity) AS allocated FROM shipment_po_item_allocation WHERE po_item_id IN (?) GROUP BY po_item_id`,
+        `SELECT po_item_id,
+                SUM(allocated_quantity) AS allocated,
+                SUM(loaded_quantity) AS loaded
+         FROM shipment_po_item_allocation
+         WHERE po_item_id IN (?)
+         GROUP BY po_item_id`,
         [poItemIds]
     );
-    const totalsMap = new Map(totalRows.map(row => [Number(row.po_item_id), toFiniteNumber(row.allocated)]));
+    const totalsAllocatedMap = new Map(totalRows.map(row => [Number(row.po_item_id), toFiniteNumber(row.allocated)]));
+    const totalsLoadedMap = new Map(totalRows.map(row => [Number(row.po_item_id), toFiniteNumber(row.loaded)]));
 
     for (const allocation of allocations) {
         const poItemId = Number(allocation.po_item_id);
@@ -127,15 +116,18 @@ const upsertShipmentPoAllocations = async (conn, {
         const requestedQtyRaw = toFiniteNumber(allocation.quantity);
         const requestedQty = Math.max(requestedQtyRaw, 0);
 
-        const totalAllocated = totalsMap.get(poItemId) || 0;
+        const totalAllocated = totalsAllocatedMap.get(poItemId) || 0;
+        const totalLoaded = totalsLoadedMap.get(poItemId) || 0;
         const existingAllocated = existingAllocatedMap.get(poItemId) || 0;
         const existingPlanned = existingPlannedMap.get(poItemId) || 0;
+        const existingLoaded = existingLoadedMap.get(poItemId) || 0;
         const allocatedByOthers = totalAllocated - existingAllocated;
         const orderedQty = toFiniteNumber(poItem.quantity);
         const availableQty = Math.max(orderedQty - allocatedByOthers, 0);
 
         const nextPlanned = updatePlannedQuantity ? requestedQty : existingPlanned;
         const nextAllocated = updateAllocatedQuantity ? requestedQty : existingAllocated;
+        const nextLoaded = updateLoadedQuantity ? requestedQty : existingLoaded;
 
         if (!skipAvailabilityCheck && nextAllocated > availableQty + 1e-6) {
             throw new Error(`Allocation for PO item ${poItemId} exceeds the available quantity.`);
@@ -147,25 +139,31 @@ const upsertShipmentPoAllocations = async (conn, {
             : (existingRemainingMap.get(poItemId) ?? Math.max(Number(remainingCalcBase.toFixed(4)), 0));
         const productId = allocation.product_id ? Number(allocation.product_id) : (poItem.product_id ? Number(poItem.product_id) : null);
 
-        const insertValues = [
-            shipmentId,
-            poItemId,
-            productId,
-            nextPlanned,
-            nextAllocated,
-            remainingGlobal,
-            allocationMode === 'full' ? 'full' : 'partial',
-            userId || null,
-            userId || null
-        ];
+    const insertValues = [
+        shipmentId,
+        poId,
+        poItemId,
+        productId,
+        nextPlanned,
+        nextAllocated,
+        nextLoaded,
+        remainingGlobal,
+        allocationMode === 'full' ? 'full' : 'partial',
+        userId || null,
+        userId || null
+    ];
 
         const updateClauses = [];
         if (updatePlannedQuantity) {
             updateClauses.push('planned_quantity = VALUES(planned_quantity)');
         }
-        if (updateAllocatedQuantity) {
+    updateClauses.push('po_id = VALUES(po_id)');
+    if (updateAllocatedQuantity) {
             updateClauses.push('allocated_quantity = VALUES(allocated_quantity)');
             updateClauses.push('remaining_quantity = GREATEST(VALUES(remaining_quantity), 0)');
+        }
+        if (updateLoadedQuantity) {
+            updateClauses.push('loaded_quantity = VALUES(loaded_quantity)');
         }
         updateClauses.push('allocation_mode = VALUES(allocation_mode)');
         updateClauses.push('updated_by = VALUES(updated_by)');
@@ -173,19 +171,23 @@ const upsertShipmentPoAllocations = async (conn, {
 
         await conn.query(
             `INSERT INTO shipment_po_item_allocation
-                (shipment_id, po_item_id, product_id, planned_quantity, allocated_quantity, remaining_quantity, allocation_mode, created_by, updated_by, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+                (shipment_id, po_id, po_item_id, product_id, planned_quantity, allocated_quantity, loaded_quantity, remaining_quantity, allocation_mode, created_by, updated_by, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
              ON DUPLICATE KEY UPDATE ${updateClauses.join(', ')}`,
             insertValues
         );
 
         if (updateAllocatedQuantity) {
-            totalsMap.set(poItemId, allocatedByOthers + nextAllocated);
+            totalsAllocatedMap.set(poItemId, allocatedByOthers + nextAllocated);
             existingAllocatedMap.set(poItemId, nextAllocated);
             existingRemainingMap.set(poItemId, remainingGlobal);
         }
         if (updatePlannedQuantity) {
             existingPlannedMap.set(poItemId, nextPlanned);
+        }
+        if (updateLoadedQuantity) {
+            totalsLoadedMap.set(poItemId, (totalLoaded - existingLoaded) + nextLoaded);
+            existingLoadedMap.set(poItemId, nextLoaded);
         }
     }
 };
@@ -633,20 +635,40 @@ router.get("/:shipUniqid", async (req, res) => {
     
     // Also fetch PO items
     const [poItems] = await db.promise().query(`
-        SELECT i.id AS po_item_id, i.item_id AS product_id, i.item_name, i.description, i.quantity, i.hscode,
-               (SELECT SUM(sc.net_weight) FROM shipment_container_item sc WHERE sc.product_id = i.item_id AND sc.container_id IN (SELECT id FROM shipment_container WHERE shipment_id = ?)) as net_weight,
-               (SELECT SUM(sc.gross_weight) FROM shipment_container_item sc WHERE sc.product_id = i.item_id AND sc.container_id IN (SELECT id FROM shipment_container WHERE shipment_id = ?)) as gross_weight,
-               um.name as uom_name,
-               (SELECT pi.file_path 
-                FROM product_images pi 
-                WHERE pi.product_id = i.item_id 
-                ORDER BY pi.is_primary DESC, pi.id ASC 
-                LIMIT 1) as image_url
+        SELECT 
+            i.id AS po_item_id,
+            i.item_id AS product_id,
+            i.item_name,
+            i.description,
+            i.quantity,
+            i.hscode,
+            COALESCE(spia.total_allocated_quantity, 0) AS total_allocated_quantity,
+            GREATEST(i.quantity - COALESCE(spia.total_allocated_quantity, 0), 0) AS open_quantity,
+            (SELECT SUM(sc.net_weight)
+             FROM shipment_container_item sc
+             WHERE sc.product_id = i.item_id
+               AND sc.container_id IN (SELECT id FROM shipment_container WHERE shipment_id = ?)) AS net_weight,
+            (SELECT SUM(sc.gross_weight)
+             FROM shipment_container_item sc
+             WHERE sc.product_id = i.item_id
+               AND sc.container_id IN (SELECT id FROM shipment_container WHERE shipment_id = ?)) AS gross_weight,
+            um.name AS uom_name,
+            (SELECT pi.file_path 
+             FROM product_images pi 
+             WHERE pi.product_id = i.item_id 
+             ORDER BY pi.is_primary DESC, pi.id ASC 
+             LIMIT 1) AS image_url
         FROM purchase_order_items i
         LEFT JOIN uom_master um ON um.id = i.uom_id
+        LEFT JOIN (
+            SELECT po_item_id, SUM(allocated_quantity) AS total_allocated_quantity
+            FROM shipment_po_item_allocation
+            WHERE po_id = ?
+            GROUP BY po_item_id
+        ) spia ON spia.po_item_id = i.id
         WHERE i.purchase_order_id = ?
         ORDER BY i.id ASC
-    `, [row.id, row.id, row.po_id]);
+    `, [row.id, row.id, row.po_id, row.po_id]);
     
     // Also fetch container details if they exist
     const [containers] = await db.promise().query(`
@@ -983,8 +1005,10 @@ router.get("/:shipUniqid/po-allocations", async (req, res) => {
                 a.id,
                 a.po_item_id,
                 a.product_id,
+                a.po_id,
                 a.planned_quantity,
                 a.allocated_quantity,
+                a.loaded_quantity,
                 a.remaining_quantity,
                 a.allocation_mode,
                 i.item_name,
@@ -1992,7 +2016,8 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
                     userId,
                     skipAvailabilityCheck: true,
                     updatePlannedQuantity: false,
-                    updateAllocatedQuantity: true
+                    updateAllocatedQuantity: false,
+                    updateLoadedQuantity: true
                 });
             }
         }
@@ -2161,7 +2186,8 @@ router.post("/:shipUniqid/underloading-air", upload.any(), async (req, res) => {
                     userId,
                     skipAvailabilityCheck: true,
                     updatePlannedQuantity: false,
-                    updateAllocatedQuantity: true
+                    updateAllocatedQuantity: false,
+                    updateLoadedQuantity: true
                 });
             }
         }
