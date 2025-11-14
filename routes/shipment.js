@@ -681,6 +681,40 @@ router.get("/:shipUniqid", async (req, res) => {
             return acc;
         }, {});
 
+        const [moveRows] = await db.promise().query(`
+            SELECT 
+                sc.id AS container_id,
+                dtcm.move,
+                dtcm.category,
+                dtcm.status,
+                dtcm.date,
+                dtcm.vehicle,
+                dtcm.eir_no,
+                dtcm.haulier,
+                dtcm.terminal
+            FROM dubai_trade_container_status dtcs
+            INNER JOIN dubai_trade_container_moves dtcm ON dtcm.dubai_trade_status_id = dtcs.id
+            INNER JOIN shipment_container sc ON sc.container_no = dtcs.container_no AND sc.shipment_id = dtcs.shipment_id
+            WHERE sc.shipment_id = ?
+            ORDER BY dtcm.date ASC
+        `, [row.id]);
+
+        const movesByContainer = moveRows.reduce((acc, move) => {
+            const cid = Number(move.container_id);
+            if (!acc[cid]) acc[cid] = [];
+            acc[cid].push({
+                move: move.move || null,
+                category: move.category || null,
+                status: move.status || null,
+                date: move.date ? dayjs(move.date).toISOString() : null,
+                vehicle: move.vehicle || null,
+                eir_no: move.eir_no || null,
+                haulier: move.haulier || null,
+                terminal: move.terminal || null
+            });
+            return acc;
+        }, {});
+
         const [containerReturns] = await db.promise().query(`
             SELECT scr.id, scr.container_id, scr.return_date
             FROM shipment_container_return scr
@@ -722,6 +756,7 @@ router.get("/:shipUniqid", async (req, res) => {
             } else {
                 c.return_details = null;
             }
+            c.dubai_trade_moves = movesByContainer[c.id] || [];
         });
     }
     
@@ -2021,19 +2056,15 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
             transitioned: movedFromStageId === 2,
             updated: {
                 from_stage_id: movedFromStageId,
-                airway_bill_no,
-                flight_no,
-                airline: airline || null,
-                arrival_date: arrival_date || null,
-                arrival_time: (arrival_time && arrival_time.trim() !== '') ? arrival_time : null,
-                etd_date: normalizedDepartureDate || null,
-                departure_time: normalizedDepartureTime,
-                mode_shipment_id: 2
+                etd_date: (etd_date && etd_date.trim() !== '') ? etd_date : null,
+                vessel_name: vessel_name || null,
+                eta_date: (eta_date && eta_date.trim() !== '') ? eta_date : null,
+                mode_shipment_id: 1
             }
         });
     } catch (e) {
         await conn.rollback();
-        res.status(500).json(errPayload("Failed to save underloading details", "DB_ERROR", e.message));
+        res.status(500).json(errPayload("Failed to save sea underloading details", "DB_ERROR", e.message));
     } finally {
         conn.release();
     }
@@ -2042,18 +2073,16 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
 /* ---------- save underloading details (AIR) and move to stage 3 ---------- */
 router.post("/:shipUniqid/underloading-air", upload.any(), async (req, res) => {
     const { shipUniqid } = req.params;
-    const {
-        airway_bill_no,
-        flight_no,
-        airline,
-        arrival_date,
-        arrival_time,
-        departure_date,
-        departure_time,
-        pickup_date,
-        keptCommonImages: keptCommonImagesJson,
-        items: itemsJson
-    } = req.body;
+    const airway_bill_no = req.body.airway_bill_no ?? req.body.airwayBillNo ?? req.body.airwayBill_no ?? null;
+    const flight_no = req.body.flight_no ?? req.body.flightNo ?? null;
+    const airline = req.body.airline ?? req.body.confirm_airline ?? req.body.confirmAirline ?? null;
+    const arrival_date = req.body.arrival_date ?? req.body.arrivalDate ?? null;
+    const arrival_time = req.body.arrival_time ?? req.body.arrivalTime ?? null;
+    const departure_date = req.body.departure_date ?? req.body.departureDate ?? req.body.etd_date ?? null;
+    const departure_time = req.body.departure_time ?? req.body.departureTime ?? req.body.confirm_departure_time ?? null;
+    const pickup_date = req.body.pickup_date ?? req.body.pickupDate ?? null;
+    const keptCommonImagesJson = req.body.keptCommonImages;
+    const itemsJson = req.body.items;
     const isEditing = req.body.is_editing === 'true';
     const items = JSON.parse(itemsJson || '[]');
     const rawAllocations = req.body.po_allocations;
@@ -2301,16 +2330,13 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
 
         // --- 1. Validate Input ---
         if (isAir) {
-            if (!confirm_sailing_date || !confirm_airway_bill_no || !confirm_flight_no || !confirm_airline || !confirm_arrival_date || !confirm_arrival_time) {
-                return res.status(400).json(errPayload("Departure Date, AWB No, Flight No, Airline, Arrival Date, and Arrival Time are required for Air shipments."));
+            if (!confirm_sailing_date || !confirm_departure_time || !confirm_airway_bill_no || !confirm_flight_no || !confirm_airline || !confirm_arrival_date || !confirm_arrival_time) {
+                return res.status(400).json(errPayload("Departure Date, Departure Time, AWB No, Flight No, Airline, Arrival Date, and Arrival Time are required for Air shipments."));
             }
         } else {
             if (!confirm_sailing_date || !confirm_vessel_name || !confirm_eta_date || !bl_no || !confirm_shipping_line || !confirm_discharge_port_agent) {
                 return res.status(400).json(errPayload("Sailing Date, Vessel Name, ETA, BL No, Shipping Line, and POD Agent are required for Sea shipments."));
             }
-        }
-        if (!confirm_departure_time) {
-            return res.status(400).json(errPayload("Departure Time is required."));
         }
 
         // Validate courier details if mode is 'courier'
@@ -2359,9 +2385,6 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
         } else {
             if (formatDateForHistory(oldShipmentDetails.sailing_date) !== formatDateForHistory(confirm_sailing_date)) {
                 changes['Sailing Date'] = { from: formatDateForHistory(oldShipmentDetails.sailing_date), to: formatDateForHistory(confirm_sailing_date) };
-            }
-            if ((oldShipmentDetails.confirm_departure_time || '').trim() !== (confirm_departure_time || '').trim()) {
-                changes['Departure Time'] = { from: oldShipmentDetails.confirm_departure_time || 'empty', to: confirm_departure_time || 'empty' };
             }
             if (oldShipmentDetails.vessel_name !== confirm_vessel_name) {
                 changes['Confirmed Vessel Name'] = { from: oldShipmentDetails.vessel_name || 'empty', to: confirm_vessel_name || 'empty' };
@@ -2412,7 +2435,6 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
             await conn.query(
                 `UPDATE shipment SET 
                     sailing_date = ?,
-                    confirm_departure_time = ?,
                     confirm_vessel_name = ?,
                     eta_date = ?, bl_no = ?,
                     confirm_shipping_line = ?, confirm_discharge_port_agent = ?, confirm_free_time = ?,
@@ -2422,7 +2444,6 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
                  WHERE id = ?`, 
                 [
                     confirm_sailing_date,
-                    (confirm_departure_time && confirm_departure_time.trim() !== '') ? confirm_departure_time : null,
                     confirm_vessel_name, confirm_eta_date,
                     bl_no, confirm_shipping_line, confirm_discharge_port_agent, 
                     confirm_free_time ? parseInt(confirm_free_time) : null,
