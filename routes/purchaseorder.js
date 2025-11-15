@@ -257,8 +257,8 @@ router.get("/", async (req, res) => {
         const params = [];
         let where = "WHERE 1=1";
         if (search) {
-            where += " AND (po.po_number LIKE ? OR po.reference_no LIKE ? OR s.name LIKE ? OR v.display_name LIKE ?)";
-            const token = `%${search}%`; params.push(token, token, token, token);
+            where += " AND (po.po_number LIKE ? OR po.reference_no LIKE ? OR s.name LIKE ? OR v.display_name LIKE ? OR tt.name LIKE ?)";
+            const token = `%${search}%`; params.push(token, token, token, token, token);
         }
         if (editRequestStatus) { where += " AND po.edit_request_status = ?"; params.push(editRequestStatus); }
         if (createdBy) { where += " AND po.created_by = ?"; params.push(createdBy); }
@@ -267,6 +267,7 @@ router.get("/", async (req, res) => {
         const [rows] = await db.promise().query(
             `SELECT
          po.id, po.po_number, po.po_uniqid, po.reference_no, po.vendor_id,
+         po.trade_type_id, tt.name AS trade_type_name,
          DATE(po.po_date) AS po_date, DATE(po.delivery_date) AS delivery_date, po.subtotal, po.discount_percent,
          po.total, po.status_id, s.name AS status_name, s.bg_colour, s.colour, po.created_at, po.updated_at,
          u_creator.name as created_by_name, u_approver.name as approved_by_name, po.approval_comment, po.edit_request_reason,
@@ -277,6 +278,7 @@ router.get("/", async (req, res) => {
        LEFT JOIN vendor v ON v.id = po.vendor_id
        LEFT JOIN status s ON s.id = po.status_id
        LEFT JOIN currency c ON c.id = po.currency_id
+       LEFT JOIN trade_type tt ON tt.id = po.trade_type_id
        LEFT JOIN user u_creator ON po.created_by = u_creator.id
        LEFT JOIN user u_approver ON po.approved_by_id = u_approver.id
        LEFT JOIN user edit_req_user ON po.edit_requested_by = edit_req_user.id
@@ -286,6 +288,46 @@ router.get("/", async (req, res) => {
             [...params, per_page, offset]
         );
 
+        let shipmentStatusMap = new Map();
+        if ((rows || []).length > 0) {
+            const poIds = rows
+                .map(r => r.id)
+                .filter((id) => Number.isFinite(Number(id)));
+            if (poIds.length > 0) {
+                const placeholders = poIds.map(() => '?').join(',');
+                const [shipmentRows] = await db.promise().query(
+                    `SELECT 
+                        s.po_id,
+                        s.lot_number,
+                        s.total_lots,
+                        ss.name AS stage_name,
+                        ss.chip_bg_color AS stage_bg_color,
+                        ss.chip_text_color AS stage_text_color
+                     FROM shipment s
+                     LEFT JOIN shipment_stage ss ON ss.id = s.shipment_stage_id
+                     WHERE s.po_id IN (${placeholders})
+                     ORDER BY s.po_id, s.lot_number`,
+                    poIds
+                );
+                shipmentRows.forEach((ship) => {
+                    const key = ship.po_id;
+                    if (!shipmentStatusMap.has(key)) shipmentStatusMap.set(key, []);
+                    shipmentStatusMap.get(key).push({
+                        lot_number: ship.lot_number,
+                        total_lots: ship.total_lots,
+                        status: ship.stage_name || '',
+                        bg_color: ship.stage_bg_color || null,
+                        text_color: ship.stage_text_color || null
+                    });
+                });
+            }
+        }
+
+        const enrichedRows = (rows || []).map((row) => ({
+            ...row,
+            lot_statuses: shipmentStatusMap.get(row.id) || []
+        }));
+
         const [count] = await db.promise().query(
             `SELECT COUNT(*) AS totalRows
        FROM purchase_orders po
@@ -294,11 +336,12 @@ router.get("/", async (req, res) => {
        LEFT JOIN user u_creator ON po.created_by = u_creator.id
        LEFT JOIN user edit_req_user ON po.edit_requested_by = edit_req_user.id
        LEFT JOIN user u_approver ON po.approved_by_id = u_approver.id
+      LEFT JOIN trade_type tt ON tt.id = po.trade_type_id
        ${where}`,
             params
         );
 
-        res.json({ data: rows || [], totalRows: count?.[0]?.totalRows || 0 });
+        res.json({ data: enrichedRows, totalRows: count?.[0]?.totalRows || 0 });
     } catch (err) {
         res.status(500).json(errPayload(err?.message || "Failed to fetch purchase orders"));
     }

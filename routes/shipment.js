@@ -288,10 +288,19 @@ router.get("/:shipUniqid/stage-history", async (req, res) => {
 });
 
 // --- list stages (from your shipment_stage table)
-router.get("/stages", async (_req, res) => {
+router.get("/stages", async (req, res) => {
     try {
+        const { is_import } = req.query;
+        const params = [];
+        let where = 'WHERE is_inactive = 0';
+        if (is_import === '0' || is_import === '1') {
+            where += ' AND (is_import = ? OR id = 1)';
+            params.push(parseInt(is_import, 10));
+        }
+
         const [rows] = await db.promise().query(
-            `SELECT id, name, sort_order FROM shipment_stage WHERE is_inactive = 0 ORDER BY sort_order, id`
+            `SELECT id, name, sort_order, is_import FROM shipment_stage ${where} ORDER BY sort_order, id`,
+            params
         );
         res.json(rows || []);
     } catch (e) {
@@ -305,11 +314,14 @@ router.get("/board", async (req, res) => {
         const {
             po_number,
             vendor_id,
-            product_id
+            product_id,
+            trade_type_id
         } = req.query;
 
         let whereClauses = ['s.shipment_stage_id > 0', 's.is_inactive = 0'];
         const params = [req.session?.user?.id || 0, req.session?.user?.id || 0];
+
+        const tradeTypeFilter = trade_type_id ? parseInt(trade_type_id, 10) : null;
 
         if (po_number) {
             whereClauses.push('po.po_number LIKE ?');
@@ -322,6 +334,10 @@ router.get("/board", async (req, res) => {
         if (product_id) {
             whereClauses.push('EXISTS (SELECT 1 FROM purchase_order_items poi_filter WHERE poi_filter.purchase_order_id = po.id AND poi_filter.item_id = ?)');
             params.push(product_id);
+        }
+        if (Number.isInteger(tradeTypeFilter)) {
+            whereClauses.push('po.trade_type_id = ?');
+            params.push(tradeTypeFilter);
         }
 
         const [rows] = await db.promise().query(
@@ -443,6 +459,7 @@ router.get("/board", async (req, res) => {
         s.lot_number,
         s.parent_shipment_id,
         po.po_number,
+        po.trade_type_id,
         po.mode_shipment_id,
         po.pdf_path,
         v.display_name as vendor_name,

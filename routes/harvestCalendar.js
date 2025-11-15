@@ -37,6 +37,9 @@ router.get('/', async (req, res, next) => {
                 hc.variety_name,
                 hc.start_week,
                 hc.end_week,
+                hc.harvest_field,
+                hc.start_month,
+                hc.end_month,
                 hc.category_id,
                 hc.country_id,
                 cat.name as category_name,
@@ -156,7 +159,17 @@ router.get('/:identifier', async (req, res, next) => {
  */
 router.post('/', async (req, res, next) => {
     try {
-        const { category_id, product_name, variety_name, country_id, start_week, end_week } = req.body;
+        const {
+            category_id,
+            product_name,
+            variety_name,
+            country_id,
+            start_week,
+            end_week,
+            harvest_field = 'week',
+            start_month = null,
+            end_month = null
+        } = req.body;
 
         if (!product_name || !country_id || !start_week || !end_week) {
             return res.status(400).json({ success: false, message: 'Please provide all required fields.' });
@@ -166,11 +179,22 @@ router.post('/', async (req, res, next) => {
 
         const query = `
             INSERT INTO harvest_calendar 
-                (uniq_id, category_id, product_name, variety_name, country_id, start_week, end_week) 
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (uniq_id, category_id, product_name, variety_name, country_id, start_week, end_week, harvest_field, start_month, end_month) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `;
         
-        const params = [uniq_id, category_id || null, product_name, variety_name || null, country_id, start_week, end_week];
+        const params = [
+            uniq_id,
+            category_id || null,
+            product_name,
+            variety_name || null,
+            country_id,
+            start_week,
+            end_week,
+            harvest_field,
+            start_month || null,
+            end_month || null
+        ];
 
         const [result] = await db.promise().query(query, params);
 
@@ -201,7 +225,17 @@ router.post('/', async (req, res, next) => {
 router.put('/:id', async (req, res, next) => {
     try {
         const { id } = req.params;
-        const { category_id, product_name, variety_name, country_id, start_week, end_week } = req.body;
+        const {
+            category_id,
+            product_name,
+            variety_name,
+            country_id,
+            start_week,
+            end_week,
+            harvest_field = 'week',
+            start_month = null,
+            end_month = null
+        } = req.body;
 
         if (!product_name || !country_id || !start_week || !end_week) {
             return res.status(400).json({ success: false, message: 'Please provide all required fields.' });
@@ -231,11 +265,25 @@ router.put('/:id', async (req, res, next) => {
                 variety_name = ?,
                 country_id = ?,
                 start_week = ?,
-                end_week = ?
+                end_week = ?,
+                harvest_field = ?,
+                start_month = ?,
+                end_month = ?
             WHERE id = ?
         `;
         
-        const params = [category_id || null, product_name, variety_name || null, country_id, start_week, end_week, id];
+        const params = [
+            category_id || null,
+            product_name,
+            variety_name || null,
+            country_id,
+            start_week,
+            end_week,
+            harvest_field,
+            start_month || null,
+            end_month || null,
+            id
+        ];
 
         const [result] = await db.promise().query(query, params);
 
@@ -261,7 +309,10 @@ router.put('/:id', async (req, res, next) => {
             'category_name': 'Category',
             'country_name': 'Country',
             'start_week': 'Start Week',
-            'end_week': 'End Week'
+            'end_week': 'End Week',
+            'harvest_field': 'Harvest Field',
+            'start_month': 'Start Month',
+            'end_month': 'End Month'
         };
 
         for (const key in compareFields) {
