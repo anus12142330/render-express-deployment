@@ -38,6 +38,45 @@ const addHistory = async (conn, { module, moduleId, userId, action, details }) =
     );
 };
 
+const recordStageHistory = async (connLike, {
+    poId = null,
+    shipmentId,
+    fromStageId = null,
+    toStageId,
+    payload = null
+} = {}) => {
+    const normalizedShipmentId = Number(shipmentId);
+    const normalizedToStageId = Number(toStageId);
+    const normalizedFromStageId = Number(fromStageId);
+    if (!Number.isFinite(normalizedShipmentId) || !Number.isFinite(normalizedToStageId)) {
+        return;
+    }
+
+    const shouldTrackHistory =
+        (Number.isFinite(normalizedFromStageId) && normalizedFromStageId >= 3) ||
+        normalizedToStageId >= 3;
+
+    if (!shouldTrackHistory) {
+        return;
+    }
+
+    const runner = connLike?.query ? connLike : db.promise();
+    const payloadJson = payload ? JSON.stringify(payload) : null;
+
+    await runner.query(
+        `INSERT INTO shipment_stage_history
+            (po_id, shipment_id, from_stage_id, to_stage_id, changed_at, payload_json)
+         VALUES (?, ?, ?, ?, NOW(), ?)`,
+        [
+            poId ?? null,
+            normalizedShipmentId,
+            Number.isFinite(normalizedFromStageId) ? normalizedFromStageId : null,
+            normalizedToStageId,
+            payloadJson
+        ]
+    );
+};
+
 const ensureAllocationTable = async (conn) => {
    
     // Ensure legacy tables have new columns / indexes
@@ -1513,6 +1552,14 @@ router.put("/:shipUniqid/move", async (req, res) => {
             }
         });
 
+        await recordStageHistory(db.promise(), {
+            poId: row.po_id,
+            shipmentId: row.shipment_id,
+            fromStageId,
+            toStageId,
+            payload: fields
+        });
+
         res.json({ ok: true, updated: { from_stage_id: fromStageId } });
     } catch (e) {
         res.status(500).json({ error: { message: "Failed to move stage", type: "DB_ERROR", hint: e.message } });
@@ -2067,6 +2114,20 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
                     user: userName // Add user name for the template
                 }
             });
+
+            await recordStageHistory(conn, {
+                poId: shipment.po_id,
+                shipmentId: shipment.id,
+                fromStageId: shipment.shipment_stage_id,
+                toStageId: 3,
+                payload: {
+                    source: 'underloading-sea',
+                    etd_date: etd_date || null,
+                    eta_date: eta_date || null,
+                    vessel_name: vessel_name || null,
+                    container_count: containers.length
+                }
+            });
         }
 
         await conn.commit();
@@ -2308,6 +2369,21 @@ router.post("/:shipUniqid/underloading-air", upload.any(), async (req, res) => {
                     user: userName
                 }
             });
+
+            await recordStageHistory(conn, {
+                poId: shipment.po_id,
+                shipmentId: shipment.id,
+                fromStageId: shipment.shipment_stage_id,
+                toStageId: 3,
+                payload: {
+                    source: 'underloading-air',
+                    airway_bill_no,
+                    flight_no,
+                    airline,
+                    arrival_date,
+                    arrival_time
+                }
+            });
         }
 
         await conn.commit();
@@ -2341,12 +2417,12 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
         } = req.body;
 
 
-        const [[shipment]] = await conn.query(`SELECT id, shipment_stage_id FROM shipment WHERE ship_uniqid = ?`, [shipUniqid]);
+        const [[shipment]] = await conn.query(`SELECT id, po_id, shipment_stage_id FROM shipment WHERE ship_uniqid = ?`, [shipUniqid]);
         if (!shipment) {
             throw new Error("Shipment not found.");
         }
 
-        const [[po]] = await conn.query(`SELECT mode_shipment_id FROM purchase_orders WHERE id = (SELECT po_id FROM shipment WHERE id = ?)`, [shipment.id]);
+        const [[po]] = await conn.query(`SELECT mode_shipment_id FROM purchase_orders WHERE id = ?`, [shipment.po_id]);
         const isAir = String(po.mode_shipment_id) === '2';
 
         // If we are NOT editing, the shipment must be in stage 3 (Underloading) to proceed.
@@ -2504,6 +2580,27 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
         if (!is_editing && shipment.shipment_stage_id === 3) { // Only change stage if NOT editing
             await conn.query(`UPDATE shipment SET shipment_stage_id = 4 WHERE id = ?`, [shipment.id]);
             await addHistory(conn, { module: 'shipment', moduleId: shipment.id, userId, action: 'STAGE_CHANGED', details: { from: 'Underloading', to: 'Sailed', user: userName } });
+            await recordStageHistory(conn, {
+                poId: shipment.po_id,
+                shipmentId: shipment.id,
+                fromStageId: shipment.shipment_stage_id,
+                toStageId: 4,
+                payload: {
+                    source: 'sail',
+                    confirm_sailing_date,
+                    confirm_departure_time,
+                    confirm_vessel_name,
+                    confirm_eta_date,
+                    bl_no,
+                    confirm_shipping_line,
+                    confirm_discharge_port_agent,
+                    confirm_airway_bill_no,
+                    confirm_flight_no,
+                    confirm_airline,
+                    confirm_arrival_date,
+                    confirm_arrival_time
+                }
+            });
         }
 
         // Add history for confirmed details changes if any
@@ -2542,7 +2639,7 @@ router.post("/:shipUniqid/transition/cleared", clearedUploads, async (req, res) 
             }, {})
             : (req.files || {});
 
-        const [[shipment]] = await conn.query(`SELECT id, shipment_stage_id FROM shipment WHERE ship_uniqid = ?`, [shipUniqid]);
+        const [[shipment]] = await conn.query(`SELECT id, po_id, shipment_stage_id, is_mofa_required FROM shipment WHERE ship_uniqid = ?`, [shipUniqid]);
         if (!shipment) {
             throw new Error("Shipment not found.");
         }
@@ -2781,6 +2878,30 @@ router.post("/:shipUniqid/transition/cleared", clearedUploads, async (req, res) 
                 action: 'STAGE_CHANGED',
                 details: { from: 'Sailed', to: 'Cleared', user: userName }
             });
+            await recordStageHistory(conn, {
+                poId: shipment.po_id,
+                shipmentId: shipment.id,
+                fromStageId,
+                toStageId: 5,
+                payload: {
+                    source: 'cleared',
+                    do_no,
+                    do_validity_date,
+                    boe_no,
+                    boe_date,
+                    firs_no,
+                    firs_date,
+                    firs_due_date,
+                    mofa_due_date,
+                    custom_submission_due_date,
+                    is_transport_required,
+                    transporter_name,
+                    hauler_code,
+                    transport_from_place,
+                    transport_to_place,
+                    container_returns: containerReturnsPayload
+                }
+            });
             toStageId = 5;
         } else if (fromStageId === 4) {
             // Save without transitioning - add history log for data update
@@ -2827,7 +2948,7 @@ router.post("/:shipUniqid/transition/closed", closedUploads, async (req, res) =>
         await conn.beginTransaction();
 
         const [[shipment]] = await conn.query(
-            `SELECT s.id, s.shipment_stage_id, po.mode_shipment_id, s.is_mofa_required
+            `SELECT s.id, s.po_id, s.shipment_stage_id, po.mode_shipment_id, s.is_mofa_required
              FROM shipment s
              LEFT JOIN purchase_orders po ON po.id = s.po_id
              WHERE s.ship_uniqid = ?`,
@@ -2986,6 +3107,13 @@ router.post("/:shipUniqid/transition/closed", closedUploads, async (req, res) =>
             action: 'STAGE_CHANGED',
             details: { from: 'Cleared', to: 'Closed', user: userName, comment }
         });
+        await recordStageHistory(conn, {
+            poId: shipment.po_id,
+            shipmentId: shipment.id,
+            fromStageId: 5,
+            toStageId: 6,
+            payload: { source: 'closed', comment }
+        });
 
         await conn.commit();
         res.json({
@@ -3015,7 +3143,7 @@ router.post("/:shipUniqid/transition/archive", archiveUploads, async (req, res) 
         await conn.beginTransaction();
 
         const [[shipment]] = await conn.query(
-            `SELECT id, shipment_stage_id
+            `SELECT id, po_id, shipment_stage_id
              FROM shipment
              WHERE ship_uniqid = ?`,
             [shipUniqid]
@@ -3085,6 +3213,13 @@ router.post("/:shipUniqid/transition/archive", archiveUploads, async (req, res) 
             userId,
             action: 'STAGE_CHANGED',
             details: { from: 'Closed', to: 'Archive', user: userName, comment }
+        });
+        await recordStageHistory(conn, {
+            poId: shipment.po_id,
+            shipmentId: shipment.id,
+            fromStageId: 6,
+            toStageId: 7,
+            payload: { source: 'archive', comment }
         });
 
         await conn.commit();
