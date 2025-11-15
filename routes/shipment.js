@@ -514,8 +514,8 @@ router.get("/board", async (req, res) => {
                     sc.container_no,
                     DATE_FORMAT(scr.return_date, '%Y-%m-%d') AS return_date_raw,
                     DATE_FORMAT(scr.return_date, '%d-%b-%Y') AS return_date_formatted,
-                    DATE_FORMAT(dtcm.to_town_date, '%Y-%m-%d') AS to_town_date_raw,
-                    DATE_FORMAT(dtcm.to_town_date, '%d-%b-%Y') AS to_town_date_formatted,
+                    DATE_FORMAT(COALESCE(dtcm.to_town_date, scr.to_town_date), '%Y-%m-%d') AS to_town_date_raw,
+                    DATE_FORMAT(COALESCE(dtcm.to_town_date, scr.to_town_date), '%d-%b-%Y') AS to_town_date_formatted,
                     COUNT(DISTINCT scrf.id) AS attachment_count
                 FROM shipment_container sc
                 LEFT JOIN dubai_trade_container_status dtcs ON dtcs.shipment_container_id = sc.id
@@ -530,7 +530,7 @@ router.get("/board", async (req, res) => {
                 LEFT JOIN shipment_container_return scr ON scr.container_id = sc.id
                 LEFT JOIN shipment_container_return_file scrf ON scrf.return_id = scr.id
                 WHERE sc.shipment_id IN (?)
-                GROUP BY sc.id, sc.shipment_id, sc.container_no, scr.return_date, dtcm.to_town_date
+                GROUP BY sc.id, sc.shipment_id, sc.container_no, scr.return_date, scr.to_town_date, dtcm.to_town_date
                 `,
                 [shipmentIds]
             );
@@ -813,7 +813,7 @@ router.get("/:shipUniqid", async (req, res) => {
         }, {});
 
         const [containerReturns] = await db.promise().query(`
-            SELECT scr.id, scr.container_id, scr.return_date
+            SELECT scr.id, scr.container_id, scr.return_date, scr.to_town_date
             FROM shipment_container_return scr
             WHERE scr.container_id IN (?)
         `, [containerIds]);
@@ -848,6 +848,7 @@ router.get("/:shipUniqid", async (req, res) => {
                 c.return_details = {
                     id: returnInfo.id,
                     return_date: returnInfo.return_date,
+                    to_town_date: returnInfo.to_town_date,
                     files: returnFilesByReturnId[returnInfo.id] || []
                 };
             } else {
@@ -2686,7 +2687,7 @@ router.post("/:shipUniqid/transition/cleared", clearedUploads, async (req, res) 
         let existingContainerReturns = [];
         if (validContainerIdList.length > 0) {
             const [rows] = await conn.query(
-                `SELECT id, container_id, return_date FROM shipment_container_return WHERE container_id IN (?)`,
+                `SELECT id, container_id, return_date, to_town_date FROM shipment_container_return WHERE container_id IN (?)`,
                 [validContainerIdList]
             );
             existingContainerReturns = rows;
@@ -2800,6 +2801,7 @@ router.post("/:shipUniqid/transition/cleared", clearedUploads, async (req, res) 
 
                 const entry = containerEntryById.get(containerId) || {};
                 const returnDateNormalized = entry?.return_date ? entry.return_date : null;
+                const toTownDateNormalized = entry?.to_town_date ? entry.to_town_date : null;
                 const keptFileIds = Array.isArray(entry?.kept_file_ids)
                     ? entry.kept_file_ids.map((id) => Number(id)).filter(Boolean)
                     : [];
@@ -2809,17 +2811,18 @@ router.post("/:shipUniqid/transition/cleared", clearedUploads, async (req, res) 
 
                 if (existingReturn) {
                     await conn.query(
-                        `UPDATE shipment_container_return SET return_date = ?, updated_at = NOW() WHERE id = ?`,
-                        [returnDateNormalized || null, existingReturn.id]
+                        `UPDATE shipment_container_return SET return_date = ?, to_town_date = ?, updated_at = NOW() WHERE id = ?`,
+                        [returnDateNormalized || null, toTownDateNormalized || null, existingReturn.id]
                     );
                     returnRecordId = existingReturn.id;
+                    existingReturn.to_town_date = toTownDateNormalized || null;
                 } else {
                     const [result] = await conn.query(
-                        `INSERT INTO shipment_container_return (shipment_id, container_id, return_date, created_at, updated_at) VALUES (?, ?, ?, NOW(), NOW())`,
-                        [shipment.id, containerId, returnDateNormalized || null]
+                        `INSERT INTO shipment_container_return (shipment_id, container_id, return_date, to_town_date, created_at, updated_at) VALUES (?, ?, ?, ?, NOW(), NOW())`,
+                        [shipment.id, containerId, returnDateNormalized || null, toTownDateNormalized || null]
                     );
                     returnRecordId = result.insertId;
-                    returnByContainerId[containerId] = { id: returnRecordId, container_id: containerId, return_date: returnDateNormalized };
+                    returnByContainerId[containerId] = { id: returnRecordId, container_id: containerId, return_date: returnDateNormalized, to_town_date: toTownDateNormalized };
                 }
 
                 if (returnRecordId) {
