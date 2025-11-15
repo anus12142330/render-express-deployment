@@ -53,8 +53,8 @@ const recordStageHistory = async (connLike, {
     }
 
     const shouldTrackHistory =
-        (Number.isFinite(normalizedFromStageId) && normalizedFromStageId >= 3) ||
-        normalizedToStageId >= 3;
+        (Number.isFinite(normalizedFromStageId) && normalizedFromStageId >= 2) ||
+        normalizedToStageId >= 2;
 
     if (!shouldTrackHistory) {
         return;
@@ -248,6 +248,42 @@ router.get("/stages/:stageId/documents", async (req, res) => {
         res.json(rows || []);
     } catch (e) {
         res.status(500).json({ error: "Failed to load stage documents" });
+    }
+});
+
+router.get("/:shipUniqid/stage-history", async (req, res) => {
+    try {
+        const shipUniqid = req.params.shipUniqid;
+        const [[shipment]] = await db.promise().query(
+            `SELECT id, po_id FROM shipment WHERE ship_uniqid = ? LIMIT 1`,
+            [shipUniqid]
+        );
+        if (!shipment) {
+            return res.status(404).json(errPayload("Shipment not found"));
+        }
+
+        const [rows] = await db.promise().query(
+            `
+            SELECT ssh.id,
+                   ssh.po_id,
+                   ssh.shipment_id,
+                   ssh.from_stage_id,
+                   ssh.to_stage_id,
+                   ssh.changed_at,
+                   fs.name AS from_stage_name,
+                   ts.name AS to_stage_name
+            FROM shipment_stage_history ssh
+            LEFT JOIN shipment_stage fs ON fs.id = ssh.from_stage_id
+            LEFT JOIN shipment_stage ts ON ts.id = ssh.to_stage_id
+            WHERE ssh.po_id = ?
+            ORDER BY ssh.changed_at ASC
+            `,
+            [shipment.po_id]
+        );
+
+        res.json({ ok: true, stageHistory: rows });
+    } catch (e) {
+        res.status(500).json(errPayload("Failed to fetch stage history", "DB_ERROR", e.message));
     }
 });
 
