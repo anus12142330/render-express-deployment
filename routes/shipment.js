@@ -531,8 +531,70 @@ router.get("/board", async (req, res) => {
                     sc.container_no,
                     DATE_FORMAT(scr.return_date, '%Y-%m-%d') AS return_date_raw,
                     DATE_FORMAT(scr.return_date, '%d-%b-%Y') AS return_date_formatted,
-                    DATE_FORMAT(COALESCE(dtcm.to_town_date, scr.to_town_date), '%Y-%m-%d') AS to_town_date_raw,
-                    DATE_FORMAT(COALESCE(dtcm.to_town_date, scr.to_town_date), '%d-%b-%Y') AS to_town_date_formatted,
+                        (
+                            SELECT DATE_FORMAT(
+                                       MAX(COALESCE(
+                                           STR_TO_DATE(m.date, '%Y-%m-%d %H:%i:%s'),
+                                           STR_TO_DATE(m.date, '%Y-%m-%d'),
+                                           STR_TO_DATE(m.date, '%d-%b-%Y %H:%i'),
+                                           STR_TO_DATE(m.date, '%d-%b-%Y')
+                                       )),
+                                       '%Y-%m-%d'
+                                   )
+                            FROM dubai_trade_container_moves m
+                            WHERE m.dubai_trade_status_id = dtcs.id
+                              AND UPPER(m.move) LIKE '%TO TOWN%'
+                        ) AS dt_to_town_date_raw,
+                        (
+                            SELECT DATE_FORMAT(
+                                       MAX(COALESCE(
+                                           STR_TO_DATE(m.date, '%Y-%m-%d %H:%i:%s'),
+                                           STR_TO_DATE(m.date, '%Y-%m-%d'),
+                                           STR_TO_DATE(m.date, '%d-%b-%Y %H:%i'),
+                                           STR_TO_DATE(m.date, '%d-%b-%Y')
+                                       )),
+                                       '%d-%b-%Y'
+                                   )
+                            FROM dubai_trade_container_moves m
+                            WHERE m.dubai_trade_status_id = dtcs.id
+                              AND UPPER(m.move) LIKE '%TO TOWN%'
+                        ) AS dt_to_town_date_formatted,
+                        DATE_FORMAT(
+                            COALESCE(
+                                (
+                                    SELECT MAX(COALESCE(
+                                               STR_TO_DATE(m.date, '%Y-%m-%d %H:%i:%s'),
+                                               STR_TO_DATE(m.date, '%Y-%m-%d'),
+                                               STR_TO_DATE(m.date, '%d-%b-%Y %H:%i'),
+                                               STR_TO_DATE(m.date, '%d-%b-%Y')
+                                           ))
+                                    FROM dubai_trade_container_moves m
+                                    WHERE m.dubai_trade_status_id = dtcs.id
+                                      AND UPPER(m.move) LIKE '%TO TOWN%'
+                                ),
+                                dtcm.to_town_date,
+                                scr.to_town_date
+                            ),
+                            '%Y-%m-%d'
+                        ) AS to_town_date_raw,
+                        DATE_FORMAT(
+                            COALESCE(
+                                (
+                                    SELECT MAX(COALESCE(
+                                               STR_TO_DATE(m.date, '%Y-%m-%d %H:%i:%s'),
+                                               STR_TO_DATE(m.date, '%Y-%m-%d'),
+                                               STR_TO_DATE(m.date, '%d-%b-%Y %H:%i'),
+                                               STR_TO_DATE(m.date, '%d-%b-%Y')
+                                           ))
+                                    FROM dubai_trade_container_moves m
+                                    WHERE m.dubai_trade_status_id = dtcs.id
+                                      AND UPPER(m.move) LIKE '%TO TOWN%'
+                                ),
+                                dtcm.to_town_date,
+                                scr.to_town_date
+                            ),
+                            '%d-%b-%Y'
+                        ) AS to_town_date_formatted,
                     COUNT(DISTINCT scrf.id) AS attachment_count
                 FROM shipment_container sc
                 LEFT JOIN dubai_trade_container_status dtcs ON dtcs.shipment_container_id = sc.id
@@ -561,6 +623,8 @@ router.get("/board", async (req, res) => {
                     container_no: row.container_no,
                     return_date_raw: row.return_date_raw,
                     return_date_formatted: row.return_date_formatted,
+                        dt_to_town_date_raw: row.dt_to_town_date_raw,
+                        dt_to_town_date_formatted: row.dt_to_town_date_formatted,
                     to_town_date_raw: row.to_town_date_raw,
                     to_town_date_formatted: row.to_town_date_formatted,
                     attachment_count: Number(row.attachment_count || 0)
