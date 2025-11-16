@@ -541,7 +541,7 @@ router.get("/board", async (req, res) => {
                         dubai_trade_status_id, 
                         MAX(date) AS to_town_date
                     FROM dubai_trade_container_moves
-                    WHERE move = 'TO TOWN'
+                    WHERE UPPER(move) LIKE '%TO TOWN%'
                     GROUP BY dubai_trade_status_id
                 ) AS dtcm ON dtcm.dubai_trade_status_id = dtcs.id
                 LEFT JOIN shipment_container_return scr ON scr.container_id = sc.id
