@@ -842,7 +842,11 @@ router.get("/:shipUniqid", async (req, res) => {
                    (SELECT pi.file_path 
                     FROM product_images pi 
                     WHERE pi.product_id = sci.product_id 
-                    ORDER BY pi.is_primary DESC, pi.id ASC LIMIT 1) as image_url
+                    ORDER BY pi.is_primary DESC, pi.id ASC LIMIT 1) as image_url,
+                   (SELECT pd.variety
+                    FROM product_details pd
+                    WHERE pd.product_id = sci.product_id
+                    ORDER BY pd.id ASC LIMIT 1) as variety
             FROM shipment_container_item sci WHERE container_id IN (?) ORDER BY id ASC
         `, [containerIds]);
     

@@ -1729,6 +1729,7 @@ router.get("/items/:poId", async (req, res) => {
                  i.item_name,
                  i.item_id AS product_id,
                  i.hscode,
+                 i.description,
                  i.quantity,
                  i.rate,
                  i.amount,
@@ -1753,7 +1754,7 @@ router.get("/items/:poId", async (req, res) => {
              LEFT JOIN uom_master um ON um.id = i.uom_id
              LEFT JOIN shipment_po_item_allocation spia ON spia.po_item_id = i.id AND spia.po_id = i.purchase_order_id
              WHERE i.purchase_order_id = ?
-             GROUP BY i.id, i.purchase_order_id, i.item_name, i.item_id, i.hscode, i.quantity, i.rate, i.amount, i.uom_id, um.name`,
+             GROUP BY i.id, i.purchase_order_id, i.item_name, i.item_id, i.hscode, i.description, i.quantity, i.rate, i.amount, i.uom_id, um.name`,
             [poId]
         );
         res.json(items || []);
