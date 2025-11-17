@@ -1749,7 +1749,17 @@ router.get("/items/:poId", async (req, res) => {
                   FROM product_images pi
                   WHERE pi.product_id = i.item_id
                   ORDER BY pi.is_primary DESC, pi.id ASC
-                  LIMIT 1) AS image_url
+                  LIMIT 1) AS image_url,
+                 (SELECT pd.variety
+                  FROM product_details pd
+                  WHERE pd.product_id = i.item_id
+                  ORDER BY pd.id ASC
+                  LIMIT 1) AS variety,
+                 (SELECT pd.grade_and_size_code
+                  FROM product_details pd
+                  WHERE pd.product_id = i.item_id
+                  ORDER BY pd.id ASC
+                  LIMIT 1) AS grade_and_size_code
              FROM purchase_order_items AS i
              LEFT JOIN uom_master um ON um.id = i.uom_id
              LEFT JOIN shipment_po_item_allocation spia ON spia.po_item_id = i.id AND spia.po_id = i.purchase_order_id

@@ -846,7 +846,11 @@ router.get("/:shipUniqid", async (req, res) => {
                    (SELECT pd.variety
                     FROM product_details pd
                     WHERE pd.product_id = sci.product_id
-                    ORDER BY pd.id ASC LIMIT 1) as variety
+                    ORDER BY pd.id ASC LIMIT 1) as variety,
+                   (SELECT pd.grade_and_size_code
+                    FROM product_details pd
+                    WHERE pd.product_id = sci.product_id
+                    ORDER BY pd.id ASC LIMIT 1) as grade_and_size_code
             FROM shipment_container_item sci WHERE container_id IN (?) ORDER BY id ASC
         `, [containerIds]);
     
@@ -2082,11 +2086,22 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
         const commonImages = files.filter(f => f.fieldname === 'common_images');
         for (const file of commonImages) {
             if (commonDocType) {
-                const thumbName = `thumb_${path.basename(file.path)}`;
-                const thumbDiskPath = path.join(THUMB_DIR, thumbName);
-                await sharp(file.path).resize(200, 200, { fit: 'inside', withoutEnlargement: true }).toFile(thumbDiskPath);
+                const isImage = file.mimetype && file.mimetype.startsWith('image/');
+                const isVideo = file.mimetype && file.mimetype.startsWith('video/');
+                let thumbPath = null;
+                
+                if (isImage) {
+                    // Generate thumbnail for images only
+                    const thumbName = `thumb_${path.basename(file.path)}`;
+                    const thumbDiskPath = path.join(THUMB_DIR, thumbName);
+                    await sharp(file.path).resize(200, 200, { fit: 'inside', withoutEnlargement: true }).toFile(thumbDiskPath);
+                    thumbPath = path.posix.join("uploads", "shipment", "thumbnail", thumbName);
+                } else if (isVideo) {
+                    // For videos, use the video file itself as thumbnail (or null)
+                    thumbPath = null;
+                }
+                
                 const originalPath = path.posix.join("uploads", "shipment", path.basename(file.path));
-                const thumbPath = path.posix.join("uploads", "shipment", "thumbnail", thumbName);
                 await conn.query(
                     `INSERT INTO shipment_file (shipment_id, document_type_id, file_name, file_path, thumbnail_path, mime_type, size_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)`,
                     [shipment.id, commonDocType.id, file.originalname, originalPath, thumbPath, file.mimetype, file.size]
@@ -2138,14 +2153,24 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
             // Save container-specific images
             const containerImages = files.filter(f => f.fieldname === `container_images_${container.id}`);
             for (const file of containerImages) {
-                const thumbName = `thumb_${path.basename(file.path)}`;
-                const thumbDiskPath = path.join(THUMB_DIR, thumbName);
-                await sharp(file.path)
-                    .resize(200, 200, { fit: 'inside', withoutEnlargement: true })
-                    .toFile(thumbDiskPath);
+                const isImage = file.mimetype && file.mimetype.startsWith('image/');
+                const isVideo = file.mimetype && file.mimetype.startsWith('video/');
+                let thumbPath = null;
+                
+                if (isImage) {
+                    // Generate thumbnail for images only
+                    const thumbName = `thumb_${path.basename(file.path)}`;
+                    const thumbDiskPath = path.join(THUMB_DIR, thumbName);
+                    await sharp(file.path)
+                        .resize(200, 200, { fit: 'inside', withoutEnlargement: true })
+                        .toFile(thumbDiskPath);
+                    thumbPath = path.posix.join("uploads", "shipment", "thumbnail", thumbName);
+                } else if (isVideo) {
+                    // For videos, use null for thumbnail (or could use video file itself)
+                    thumbPath = null;
+                }
 
                 const originalPath = path.posix.join("uploads", "shipment", path.basename(file.path));
-                const thumbPath = path.posix.join("uploads", "shipment", "thumbnail", thumbName);
                 await conn.query(
                     `INSERT INTO shipment_container_file (container_id, file_name, file_path, thumbnail_path, mime_type, size_bytes) VALUES (?, ?, ?, ?, ?, ?)`,
                     [containerId, file.originalname, originalPath, thumbPath, file.mimetype, file.size]
@@ -2394,11 +2419,22 @@ router.post("/:shipUniqid/underloading-air", upload.any(), async (req, res) => {
         const commonImagesToSave = files.filter(f => f.fieldname === 'common_images');
         for (const file of commonImagesToSave) {
             if (commonDocType) {
-                const thumbName = `thumb_${path.basename(file.path)}`;
-                const thumbDiskPath = path.join(THUMB_DIR, thumbName);
-                await sharp(file.path).resize(200, 200, { fit: 'inside', withoutEnlargement: true }).toFile(thumbDiskPath);
+                const isImage = file.mimetype && file.mimetype.startsWith('image/');
+                const isVideo = file.mimetype && file.mimetype.startsWith('video/');
+                let thumbPath = null;
+                
+                if (isImage) {
+                    // Generate thumbnail for images only
+                    const thumbName = `thumb_${path.basename(file.path)}`;
+                    const thumbDiskPath = path.join(THUMB_DIR, thumbName);
+                    await sharp(file.path).resize(200, 200, { fit: 'inside', withoutEnlargement: true }).toFile(thumbDiskPath);
+                    thumbPath = path.posix.join("uploads", "shipment", "thumbnail", thumbName);
+                } else if (isVideo) {
+                    // For videos, use null for thumbnail
+                    thumbPath = null;
+                }
+                
                 const originalPath = path.posix.join("uploads", "shipment", path.basename(file.path));
-                const thumbPath = path.posix.join("uploads", "shipment", "thumbnail", thumbName);
                 await conn.query(
                     `INSERT INTO shipment_file (shipment_id, document_type_id, file_name, file_path, thumbnail_path, mime_type, size_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)`,
                     [shipment.id, commonDocType.id, file.originalname, originalPath, thumbPath, file.mimetype, file.size]
