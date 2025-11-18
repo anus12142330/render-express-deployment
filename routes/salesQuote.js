@@ -259,6 +259,8 @@ router.post("/", upload.array("attachments", 20), async (req, res) => {
                 country_destination=?,
                 mode_of_transport=?,
                 incoterms=?,
+                terms_of_delivery=?,
+                containerized=?,
                 delivery_schedule=?,
                 partial_shipment=?,
                 transhipment=?,
@@ -272,6 +274,7 @@ router.post("/", upload.array("attachments", 20), async (req, res) => {
                 grand_total=?,
                 currency_sale=?,
                 exchange_rate=?,
+                quote_type=?,
                 status_id=?,
                 user_id=?,
                 payment_terms_id=?,
@@ -281,6 +284,7 @@ router.post("/", upload.array("attachments", 20), async (req, res) => {
                 documents_provided=?,
                 terms_conditions=?,
                 other_terms=?,
+                customer_notes=?,
                 buyer_reference=?,
                 manager_id=?,
                 approved_at=?,
@@ -314,6 +318,8 @@ router.post("/", upload.array("attachments", 20), async (req, res) => {
                 v(header.country_destination),
                 v(header.mode_of_transport),
                 v(header.incoterms),
+                v(header.terms_of_delivery),
+                v(header.containerized),
                 v(header.delivery_schedule),
                 v(header.partial_shipment),
                 v(header.transhipment),
@@ -327,7 +333,8 @@ router.post("/", upload.array("attachments", 20), async (req, res) => {
                 n(totals?.grand_total),
                 v(header.currency_sale),
                 v(header.exchange_rate),
-                v(header.status_id, 'SQ_DRAFT'),
+                v(header.quote_type),
+                v(header.status_id, 3), // 2 = Draft
                 v(header.user_id ?? userId),
                 v(payment?.payment_terms_id),
                 v(payment?.tenor),
@@ -336,6 +343,7 @@ router.post("/", upload.array("attachments", 20), async (req, res) => {
                 v(texts?.documents_provided),
                 v(texts?.terms_conditions),
                 v(texts?.other_terms),
+                v(payload.customer_notes),
                 v(header.buyer_reference),
                 null,
                 null,
@@ -492,6 +500,8 @@ router.put("/:id", upload.array("attachments", 20), async (req, res) => {
                 country_destination=?,
                 mode_of_transport=?,
                 incoterms=?,
+                terms_of_delivery=?,
+                containerized=?,
                 partial_shipment=?,
                 transhipment=?,
                 proforma_invoice_no=?,
@@ -504,6 +514,7 @@ router.put("/:id", upload.array("attachments", 20), async (req, res) => {
                 contract_date=?,
                 currency_sale=?,
                 exchange_rate=?,
+                quote_type=?,
                 status_id=?,
                 user_id=?,
                 payment_terms_id=?,
@@ -513,6 +524,7 @@ router.put("/:id", upload.array("attachments", 20), async (req, res) => {
                 documents_provided=?,
                 terms_conditions=?,
                 other_terms=?,
+                customer_notes=?,
                 delivery_schedule=?,
                 buyer_reference=?
             WHERE id=?`;
@@ -538,6 +550,8 @@ router.put("/:id", upload.array("attachments", 20), async (req, res) => {
                 v(header.country_destination),
                 v(header.mode_of_transport),
                 v(header.incoterms),
+                v(header.terms_of_delivery),
+                v(header.containerized),
                 v(header.partial_shipment),
                 v(header.transhipment),
                 v(header.proforma_invoice_no),
@@ -550,7 +564,8 @@ router.put("/:id", upload.array("attachments", 20), async (req, res) => {
                 d(header.contract_date),
                 v(header.currency_sale),
                 v(header.exchange_rate),
-                v(header.status_id, oldHeader.status_id ?? 'SQ_DRAFT'),
+                v(header.quote_type),
+                v(header.status_id, oldHeader.status_id ?? 3), // 2 = Draft (default)
                 v(header.user_id ?? userId),
                 v(payment?.payment_terms_id),
                 v(payment?.tenor),
@@ -559,6 +574,7 @@ router.put("/:id", upload.array("attachments", 20), async (req, res) => {
                 v(texts?.documents_provided),
                 v(texts?.terms_conditions),
                 v(texts?.other_terms),
+                v(payload.customer_notes),
                 v(header.delivery_schedule),
                 v(header.buyer_reference),
                 quoteId
@@ -641,13 +657,16 @@ router.put("/:id", upload.array("attachments", 20), async (req, res) => {
                 );
             }
 
-            await addHistory(conn, {
-                module: 'sales_quote',
-                moduleId: quoteId,
-                userId: userId,
-                action: 'UPDATED',
-                details: { from: oldHeader.proforma_invoice_no, to: header.proforma_invoice_no }
-            });
+            // Only log history if the quote number actually changed
+            if (oldHeader.proforma_invoice_no !== header.proforma_invoice_no) {
+                await addHistory(conn, {
+                    module: 'sales_quote',
+                    moduleId: quoteId,
+                    userId: userId,
+                    action: 'UPDATED',
+                    details: { from: oldHeader.proforma_invoice_no, to: header.proforma_invoice_no }
+                });
+            }
         });
 
         res.json({ success: true, message: "Sales quote updated" });
@@ -731,7 +750,11 @@ router.get("/:id", async (req, res) => {
                 it.vat_id,
                 it.vat_rate,
                 it.origin,
-                it.packing_id
+                it.packing_id,
+                COALESCE(
+                    (SELECT pi.file_path FROM product_images pi WHERE pi.product_id = it.product_id AND pi.is_primary = 1 LIMIT 1),
+                    (SELECT pi.file_path FROM product_images pi WHERE pi.product_id = it.product_id ORDER BY pi.id ASC LIMIT 1)
+                ) AS product_image
             FROM sales_quote_items it
             WHERE it.sales_quote_id = ?
         `, [header.id]);

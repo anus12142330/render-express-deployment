@@ -963,7 +963,45 @@ router.get("/:shipUniqid", async (req, res) => {
     // Combine both sets of files into one `commonFiles` array for the frontend
     const allFiles = [...(shipmentFiles || []), ...(poAttachments || []).map(f => ({ ...f, document_type_code: 'po_document' }))];
     
-    res.json({ ...row, po_items: poItems || [], containers: containers || [], commonFiles: allFiles, po_documents: poDocuments || [] });
+    // Fetch additional products
+    const [additionalProducts] = await db.promise().query(`
+        SELECT sap.id, sap.product_id, p.product_name, p.hscode,
+               (SELECT pi.file_path 
+                FROM product_images pi 
+                WHERE pi.product_id = sap.product_id 
+                ORDER BY pi.is_primary DESC, pi.id ASC LIMIT 1) as image_url,
+               (SELECT pd.variety
+                FROM product_details pd
+                WHERE pd.product_id = sap.product_id
+                ORDER BY pd.id ASC LIMIT 1) as variety,
+               (SELECT pd.grade_and_size_code
+                FROM product_details pd
+                WHERE pd.product_id = sap.product_id
+                ORDER BY pd.id ASC LIMIT 1) as grade_and_size_code,
+               (SELECT pd.packing_alias
+                FROM product_details pd
+                WHERE pd.product_id = sap.product_id
+                ORDER BY pd.id ASC LIMIT 1) as packing_alias,
+               (SELECT pd.packing_text
+                FROM product_details pd
+                WHERE pd.product_id = sap.product_id
+                ORDER BY pd.id ASC LIMIT 1) as packing_text,
+               (SELECT um.name
+                FROM product_details pd
+                LEFT JOIN uom_master um ON um.id = pd.uom_id
+                WHERE pd.product_id = sap.product_id
+                ORDER BY pd.id ASC LIMIT 1) as uom_name,
+               (SELECT pd.uom_id
+                FROM product_details pd
+                WHERE pd.product_id = sap.product_id
+                ORDER BY pd.id ASC LIMIT 1) as uom_id
+        FROM shipment_additional_product sap
+        LEFT JOIN products p ON p.id = sap.product_id
+        WHERE sap.shipment_id = ?
+        ORDER BY sap.id ASC
+    `, [row.id]);
+    
+    res.json({ ...row, po_items: poItems || [], containers: containers || [], commonFiles: allFiles, po_documents: poDocuments || [], additional_products: additionalProducts || [] });
 });
 
 /* ---------- update planned details (from wizard edit) ---------- */
@@ -979,7 +1017,8 @@ router.put("/:shipUniqid/planned-details", upload.none(), async (req, res) => {
         const {
             bl_description, free_time,
             discharge_port_local_charges, discharge_port_agent, freight_charges, freight_payment_terms, freight_amount_if_payable, freight_amount_currency_id, bl_type, po_documents,
-            etd_date, vessel_name, shipping_line_name, departure_time, airline, flight_no, arrival_date, arrival_time, airway_bill_no, shipper, consignee, notify_party
+            etd_date, vessel_name, shipping_line_name, departure_time, airline, flight_no, arrival_date, arrival_time, airway_bill_no, shipper, consignee, notify_party,
+            has_additional_products, additional_products
         } = req.body;
 
         // Find the shipment
@@ -1062,6 +1101,24 @@ router.put("/:shipUniqid/planned-details", upload.none(), async (req, res) => {
                     'INSERT INTO shipment_po_document (shipment_id, document_type_id, document_name) VALUES ?',
                     [poDocValues]
                 );
+            }
+        }
+
+        // Handle Additional Products
+        await connection.query('DELETE FROM shipment_additional_product WHERE shipment_id = ?', [oldShipment.id]);
+        if (has_additional_products === '1' || has_additional_products === 1) {
+            const additionalProductsParsed = typeof additional_products === 'string' ? JSON.parse(additional_products) : additional_products;
+            if (additionalProductsParsed && Array.isArray(additionalProductsParsed) && additionalProductsParsed.length > 0) {
+                const productValues = additionalProductsParsed
+                    .filter(prod => prod.product_id && !isNaN(Number(prod.product_id)) && Number(prod.product_id) > 0)
+                    .map(prod => [oldShipment.id, Number(prod.product_id)]);
+                
+                if (productValues.length > 0) {
+                    await connection.query(
+                        'INSERT INTO shipment_additional_product (shipment_id, product_id) VALUES ?',
+                        [productValues]
+                    );
+                }
             }
         }
         // Add history for the update
@@ -1753,7 +1810,7 @@ router.post("/create-from-po", upload.none(), async (req, res) => {
             bl_description, free_time, discharge_port_local_charges, discharge_port_agent, freight_charges,
             freight_payment_terms, freight_amount_if_payable, freight_amount_currency_id, bl_type, po_documents,
             etd_date, vessel_name, shipping_line_name, departure_time, airline, flight_no, arrival_date, arrival_time, airway_bill_no,
-            shipper, consignee, notify_party
+            shipper, consignee, notify_party, has_additional_products, additional_products
         } = req.body;
 
         // Find the existing shipment record linked to the Purchase Order
@@ -1819,6 +1876,24 @@ router.post("/create-from-po", upload.none(), async (req, res) => {
                     'INSERT INTO shipment_po_document (shipment_id, document_type_id, document_name) VALUES ?',
                     [poDocValues]
                 );
+            }
+        }
+
+        // Handle Additional Products
+        await connection.query('DELETE FROM shipment_additional_product WHERE shipment_id = ?', [shipmentId]);
+        if (has_additional_products === '1' || has_additional_products === 1) {
+            const additionalProductsParsed = typeof additional_products === 'string' ? JSON.parse(additional_products) : additional_products;
+            if (additionalProductsParsed && Array.isArray(additionalProductsParsed) && additionalProductsParsed.length > 0) {
+                const productValues = additionalProductsParsed
+                    .filter(prod => prod.product_id && !isNaN(Number(prod.product_id)) && Number(prod.product_id) > 0)
+                    .map(prod => [shipmentId, Number(prod.product_id)]);
+                
+                if (productValues.length > 0) {
+                    await connection.query(
+                        'INSERT INTO shipment_additional_product (shipment_id, product_id) VALUES ?',
+                        [productValues]
+                    );
+                }
             }
         }
 
