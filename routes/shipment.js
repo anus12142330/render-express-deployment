@@ -299,7 +299,7 @@ router.get("/stages", async (req, res) => {
         }
 
         const [rows] = await db.promise().query(
-            `SELECT id, name, sort_order, is_import FROM shipment_stage ${where} ORDER BY sort_order, id`,
+            `SELECT id, name, sort_order, is_import, chip_bg_color, chip_text_color FROM shipment_stage ${where} ORDER BY sort_order, id`,
             params
         );
         res.json(rows || []);

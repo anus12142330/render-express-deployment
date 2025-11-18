@@ -80,7 +80,9 @@ async function getMaxSequenceForYear(conn, yearPrefix) {
     );
     const top = rows?.[0]?.no || null;
     if (!top) return 0;
-    const m = top.match(/(\d{3})$/);
+    // Remove suffix (-L, -U, -T) if present before extracting sequence
+    const withoutSuffix = top.replace(/[-][LUT]$/, '');
+    const m = withoutSuffix.match(/(\d{3})$/);
     return m ? Number(m[1]) : 0;
 }
 async function generateNextQuoteNumber(conn, { width = 3 } = {}) {
@@ -91,19 +93,32 @@ async function generateNextQuoteNumber(conn, { width = 3 } = {}) {
 }
 async function ensureUniqueQuoteNumber(conn, n, { width = 3 } = {}) {
     let value = n || await generateNextQuoteNumber(conn, { width });
+    // Extract suffix if present (-L, -U, -T)
+    const suffixMatch = value.match(/[-]([LUT])$/);
+    const suffix = suffixMatch ? `-${suffixMatch[1]}` : '';
+    const baseValue = suffix ? value.replace(/[-][LUT]$/, '') : value;
+    
     for (let i = 0; i < 8; i++) {
         const [[dupe]] = await conn.query(
             "SELECT id FROM sales_quote WHERE proforma_invoice_no=? LIMIT 1",
             [value]
         );
         if (!dupe) return value;
-        const m = value.match(/^(.*?)(\d{3})$/);
-        value = m ? `${m[1]}${pad((parseInt(m[2], 10) || 0) + 1, width)}`
-            : await generateNextQuoteNumber(conn, { width });
+        // Increment the sequence number while preserving suffix
+        const m = baseValue.match(/^(.*?)(\d{3})$/);
+        if (m) {
+            const incremented = `${m[1]}${pad((parseInt(m[2], 10) || 0) + 1, width)}${suffix}`;
+            value = incremented;
+        } else {
+            // If pattern doesn't match, generate new number and add suffix back
+            const newBase = await generateNextQuoteNumber(conn, { width });
+            value = suffix ? `${newBase}${suffix}` : newBase;
+        }
     }
     const prefix = currentYearPrefix();
     const mm = currentMonthSegment();
-    return `${prefix}${mm}${pad(Math.floor(Math.random() * 999), width)}`;
+    const fallback = `${prefix}${mm}${pad(Math.floor(Math.random() * 999), width)}`;
+    return suffix ? `${fallback}${suffix}` : fallback;
 }
 
 /* ============================================================================
@@ -177,7 +192,6 @@ router.get("/", async (req, res) => {
                 sq.uniqid,
                 sq.date_issue,
                 sq.proforma_invoice_no,
-                sq.quote_type,
                 c.display_name as customer_name,
                 sq.contract_reference,
                 COALESCE(c.display_name, sq.buyer_address) as customer_display_name,
@@ -225,7 +239,6 @@ router.post("/", upload.array("attachments", 20), async (req, res) => {
             const headerSql = `INSERT INTO sales_quote SET
                 uniqid=?,
                 invoice_type=?,
-                quote_type=?,
                 expo_id=?,
                 exporter=?,
                 e_phone=?,
@@ -281,7 +294,6 @@ router.post("/", upload.array("attachments", 20), async (req, res) => {
             const headerValues = [
                 uniqid,
                 'sales_quote',
-                v(header.quote_type, 'LOCAL'),
                 v(header.expo_id),
                 v(header.exporter),
                 v(header.e_phone),
@@ -460,7 +472,6 @@ router.put("/:id", upload.array("attachments", 20), async (req, res) => {
 
             const updateSql = `UPDATE sales_quote SET
                 invoice_type=?,
-                quote_type=?,
                 expo_id=?,
                 exporter=?,
                 e_phone=?,
@@ -507,7 +518,6 @@ router.put("/:id", upload.array("attachments", 20), async (req, res) => {
             WHERE id=?`;
             const updateValues = [
                 'sales_quote',
-                v(header.quote_type, oldHeader.quote_type || 'LOCAL'),
                 v(header.expo_id),
                 v(header.exporter),
                 v(header.e_phone),
