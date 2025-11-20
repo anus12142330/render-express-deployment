@@ -379,27 +379,40 @@ router.get("/board", async (req, res) => {
             FROM dubai_trade_container_status dtcs 
             WHERE dtcs.shipment_id = s.id
         ) as scraped_discharge_date,
-        -- Get discharge date as YYYY-MM-DD for calendar
-        (
-            SELECT DATE_FORMAT(MIN(dtcs.discharge_date), '%Y-%m-%d')
-            FROM dubai_trade_container_status dtcs 
-            WHERE dtcs.shipment_id = s.id
+        -- Get discharge date as YYYY-MM-DD for calendar, fallback to shipment table eta_date
+        COALESCE(
+            (
+                SELECT DATE_FORMAT(MIN(dtcs.discharge_date), '%Y-%m-%d')
+                FROM dubai_trade_container_status dtcs 
+                WHERE dtcs.shipment_id = s.id
+            ),
+            DATE_FORMAT(s.eta_date, '%Y-%m-%d')
         ) as discharge_date_raw,
-        -- Get to_town_date from Dubai Trade moves
-        (
-            SELECT DATE_FORMAT(
-                MAX(COALESCE(
-                    STR_TO_DATE(m.date, '%Y-%m-%d %H:%i:%s'),
-                    STR_TO_DATE(m.date, '%Y-%m-%d'),
-                    STR_TO_DATE(m.date, '%d-%b-%Y %H:%i'),
-                    STR_TO_DATE(m.date, '%d-%b-%Y')
-                )),
-                '%Y-%m-%d'
-            )
-            FROM dubai_trade_container_status dtcs
-            INNER JOIN dubai_trade_container_moves m ON m.dubai_trade_status_id = dtcs.id
-            WHERE dtcs.shipment_id = s.id
-              AND UPPER(m.move) LIKE '%TO TOWN%'
+        -- Get to_town_date from Dubai Trade moves, fallback to container return's to_town_date
+        COALESCE(
+            (
+                SELECT DATE_FORMAT(
+                    MAX(COALESCE(
+                        STR_TO_DATE(m.date, '%Y-%m-%d %H:%i:%s'),
+                        STR_TO_DATE(m.date, '%Y-%m-%d'),
+                        STR_TO_DATE(m.date, '%d-%b-%Y %H:%i'),
+                        STR_TO_DATE(m.date, '%d-%b-%Y')
+                    )),
+                    '%Y-%m-%d'
+                )
+                FROM dubai_trade_container_status dtcs
+                INNER JOIN dubai_trade_container_moves m ON m.dubai_trade_status_id = dtcs.id
+                WHERE dtcs.shipment_id = s.id
+                  AND UPPER(m.move) LIKE '%TO TOWN%'
+            ),
+            (
+                SELECT DATE_FORMAT(MAX(scr.to_town_date), '%Y-%m-%d')
+                FROM shipment_container sc
+                LEFT JOIN shipment_container_return scr ON scr.container_id = sc.id
+                WHERE sc.shipment_id = s.id
+                  AND scr.to_town_date IS NOT NULL
+            ),
+            DATE_FORMAT(s.cleared_date, '%Y-%m-%d')
         ) as to_town_date_raw,
         -- Get from_town_date from Dubai Trade moves
         (
@@ -419,6 +432,7 @@ router.get("/board", async (req, res) => {
         ) as from_town_date_raw,
         DATE_FORMAT(s.sailing_date, '%Y-%m-%d') as sailing_date_raw,
         DATE_FORMAT(s.cleared_date, '%Y-%m-%d') as cleared_date_raw,
+        DATE_FORMAT(s.discharge_date, '%Y-%m-%d') as discharge_date,
         COALESCE(s.confirm_airway_bill_no, s.airway_bill_no) as airway_bill_no,
         s.departure_time,
         s.bl_no,
@@ -569,6 +583,8 @@ router.get("/board", async (req, res) => {
                     sc.shipment_id,
                     sc.id AS container_id,
                     sc.container_no,
+                     DATE_FORMAT(scr.to_town_date, '%Y-%m-%d') AS to_town_date_raw,
+                    DATE_FORMAT(scr.to_town_date, '%d-%b-%Y') AS to_town_date_formatted,
                     DATE_FORMAT(scr.return_date, '%Y-%m-%d') AS return_date_raw,
                     DATE_FORMAT(scr.return_date, '%d-%b-%Y') AS return_date_formatted,
                         (
