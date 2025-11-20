@@ -10,6 +10,7 @@ import productRoutes from './routes/products.js';
 import customerRoutes from './routes/customer.js';
 import vendorRoutes from './routes/vendor.js';
 import purchaseorderRoutes from './routes/purchaseorder.js';
+import poTimelineRoutes from './routes/poTimeline.js';
 import portRoutes from './routes/port.js';
 import incoRoutes from './routes/inco.js';
 import uomRoutes from './routes/uom.js';
@@ -158,6 +159,7 @@ app.get('/', (req, res) => {
 });
 
 app.use("/api/purchaseorder", purchaseorderRoutes);
+app.use("/api/po-timeline", poTimelineRoutes);
 app.use("/api/customers", customerRoutes);
 app.use("/api/vendors", vendorRoutes);
 app.use("/api/ports", portRoutes);

@@ -808,14 +808,18 @@ router.post("/:id/actions", async (req, res) => {
 
             switch (action) {
                 case "submit": {
-                    if (!["SQ_DRAFT"].includes(quote.status_id)) throw new Error("Only draft quotes can be submitted");
-                    setStatus("SQ_PENDING_MANAGER_APPROVAL");
+                    // Status 3 = Draft, Status 2 = Rejected (can resubmit)
+                    const currentStatus = Number(quote.status_id);
+                    if (![2, 3].includes(currentStatus)) throw new Error("Only draft or rejected quotes can be submitted");
+                    setStatus(8); // 8 = Pending Manager Approval
                     details.action = "SUBMITTED";
                     break;
                 }
                 case "approve": {
-                    if (!["SQ_PENDING_MANAGER_APPROVAL"].includes(quote.status_id)) throw new Error("Quote is not pending approval");
-                    setStatus("SQ_APPROVED");
+                    // Status 8 = Pending Manager Approval
+                    const currentStatus = Number(quote.status_id);
+                    if (currentStatus !== 8) throw new Error("Quote is not pending approval");
+                    setStatus(1); // 1 = Approved
                     pushUpdate("manager_id", userId || null);
                     pushUpdate("approved_at", now);
                     pushUpdate("rejection_reason", null);
@@ -823,8 +827,10 @@ router.post("/:id/actions", async (req, res) => {
                     break;
                 }
                 case "reject": {
-                    if (!["SQ_PENDING_MANAGER_APPROVAL"].includes(quote.status_id)) throw new Error("Quote is not pending approval");
-                    setStatus("SQ_REJECTED");
+                    // Status 8 = Pending Manager Approval
+                    const currentStatus = Number(quote.status_id);
+                    if (currentStatus !== 8) throw new Error("Quote is not pending approval");
+                    setStatus(2); // 2 = Rejected
                     pushUpdate("manager_id", userId || null);
                     pushUpdate("approved_at", now);
                     pushUpdate("rejection_reason", v(reason, "No reason provided"));
@@ -833,15 +839,19 @@ router.post("/:id/actions", async (req, res) => {
                     break;
                 }
                 case "send": {
-                    if (!["SQ_APPROVED", "SQ_NEGOTIATION"].includes(quote.status_id)) throw new Error("Quote must be approved or in negotiation before sending");
-                    setStatus("SQ_SENT");
+                    // Status 1 = Approved, Status 5 = Negotiation
+                    const currentStatus = Number(quote.status_id);
+                    if (![1, 5].includes(currentStatus)) throw new Error("Quote must be approved or in negotiation before sending");
+                    setStatus(4); // 4 = Sent
                     pushUpdate("sent_at", now);
                     details.action = "SENT_TO_CUSTOMER";
                     break;
                 }
                 case "negotiate": {
-                    if (!["SQ_SENT"].includes(quote.status_id)) throw new Error("Only sent quotes can be marked for negotiation");
-                    setStatus("SQ_NEGOTIATION");
+                    // Status 4 = Sent
+                    const currentStatus = Number(quote.status_id);
+                    if (currentStatus !== 4) throw new Error("Only sent quotes can be marked for negotiation");
+                    setStatus(5); // 5 = Negotiation
                     details.action = "NEGOTIATION";
                     pushUpdate("customer_decision", "NEGOTIATION");
                     pushUpdate("customer_decision_reason", v(reason));
@@ -849,8 +859,10 @@ router.post("/:id/actions", async (req, res) => {
                     break;
                 }
                 case "accept": {
-                    if (!["SQ_SENT", "SQ_NEGOTIATION"].includes(quote.status_id)) throw new Error("Quote must be sent or in negotiation before acceptance");
-                    setStatus("SQ_ACCEPTED");
+                    // Status 4 = Sent, Status 5 = Negotiation
+                    const currentStatus = Number(quote.status_id);
+                    if (![4, 5].includes(currentStatus)) throw new Error("Quote must be sent or in negotiation before acceptance");
+                    setStatus(6); // 6 = Accepted (assuming this is the accepted status ID)
                     pushUpdate("customer_decision", "ACCEPTED");
                     pushUpdate("customer_decision_reason", v(reason));
                     pushUpdate("customer_decision_at", now);
@@ -860,8 +872,10 @@ router.post("/:id/actions", async (req, res) => {
                     break;
                 }
                 case "reject-customer": {
-                    if (!["SQ_SENT", "SQ_NEGOTIATION"].includes(quote.status_id)) throw new Error("Quote must be sent or in negotiation to record customer rejection");
-                    setStatus("SQ_REJECTED");
+                    // Status 4 = Sent, Status 5 = Negotiation
+                    const currentStatus = Number(quote.status_id);
+                    if (![4, 5].includes(currentStatus)) throw new Error("Quote must be sent or in negotiation to record customer rejection");
+                    setStatus(2); // 2 = Rejected
                     pushUpdate("customer_decision", "REJECTED");
                     pushUpdate("customer_decision_reason", v(reason));
                     pushUpdate("customer_decision_at", now);
@@ -871,8 +885,10 @@ router.post("/:id/actions", async (req, res) => {
                     break;
                 }
                 case "lost": {
-                    if (!["SQ_SENT", "SQ_NEGOTIATION"].includes(quote.status_id)) throw new Error("Quote must be sent or in negotiation to mark lost");
-                    setStatus("SQ_LOST");
+                    // Status 4 = Sent, Status 5 = Negotiation
+                    const currentStatus = Number(quote.status_id);
+                    if (![4, 5].includes(currentStatus)) throw new Error("Quote must be sent or in negotiation to mark lost");
+                    setStatus(7); // 7 = Lost (assuming this is the lost status ID)
                     pushUpdate("lost_reason", v(reason));
                     pushUpdate("customer_decision", "LOST");
                     pushUpdate("customer_decision_reason", v(reason));
@@ -883,8 +899,10 @@ router.post("/:id/actions", async (req, res) => {
                     break;
                 }
                 case "expire": {
-                    if (!["SQ_SENT", "SQ_APPROVED", "SQ_NEGOTIATION"].includes(quote.status_id)) throw new Error("Quote must be active to expire");
-                    setStatus("SQ_EXPIRED");
+                    // Status 4 = Sent, Status 1 = Approved, Status 5 = Negotiation
+                    const currentStatus = Number(quote.status_id);
+                    if (![1, 4, 5].includes(currentStatus)) throw new Error("Quote must be active to expire");
+                    setStatus(9); // 9 = Expired (assuming this is the expired status ID)
                     pushUpdate("closed_at", now);
                     details.action = "EXPIRED";
                     break;

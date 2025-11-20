@@ -379,6 +379,46 @@ router.get("/board", async (req, res) => {
             FROM dubai_trade_container_status dtcs 
             WHERE dtcs.shipment_id = s.id
         ) as scraped_discharge_date,
+        -- Get discharge date as YYYY-MM-DD for calendar
+        (
+            SELECT DATE_FORMAT(MIN(dtcs.discharge_date), '%Y-%m-%d')
+            FROM dubai_trade_container_status dtcs 
+            WHERE dtcs.shipment_id = s.id
+        ) as discharge_date_raw,
+        -- Get to_town_date from Dubai Trade moves
+        (
+            SELECT DATE_FORMAT(
+                MAX(COALESCE(
+                    STR_TO_DATE(m.date, '%Y-%m-%d %H:%i:%s'),
+                    STR_TO_DATE(m.date, '%Y-%m-%d'),
+                    STR_TO_DATE(m.date, '%d-%b-%Y %H:%i'),
+                    STR_TO_DATE(m.date, '%d-%b-%Y')
+                )),
+                '%Y-%m-%d'
+            )
+            FROM dubai_trade_container_status dtcs
+            INNER JOIN dubai_trade_container_moves m ON m.dubai_trade_status_id = dtcs.id
+            WHERE dtcs.shipment_id = s.id
+              AND UPPER(m.move) LIKE '%TO TOWN%'
+        ) as to_town_date_raw,
+        -- Get from_town_date from Dubai Trade moves
+        (
+            SELECT DATE_FORMAT(
+                MAX(COALESCE(
+                    STR_TO_DATE(m.date, '%Y-%m-%d %H:%i:%s'),
+                    STR_TO_DATE(m.date, '%Y-%m-%d'),
+                    STR_TO_DATE(m.date, '%d-%b-%Y %H:%i'),
+                    STR_TO_DATE(m.date, '%d-%b-%Y')
+                )),
+                '%Y-%m-%d'
+            )
+            FROM dubai_trade_container_status dtcs
+            INNER JOIN dubai_trade_container_moves m ON m.dubai_trade_status_id = dtcs.id
+            WHERE dtcs.shipment_id = s.id
+              AND (UPPER(m.move) LIKE '%FROM_TOWN%' OR UPPER(m.move) LIKE '%FROM TOWN%')
+        ) as from_town_date_raw,
+        DATE_FORMAT(s.sailing_date, '%Y-%m-%d') as sailing_date_raw,
+        DATE_FORMAT(s.cleared_date, '%Y-%m-%d') as cleared_date_raw,
         COALESCE(s.confirm_airway_bill_no, s.airway_bill_no) as airway_bill_no,
         s.departure_time,
         s.bl_no,
@@ -660,6 +700,403 @@ router.get("/board", async (req, res) => {
     } catch (e) {
         res.status(500).json({
             error: { message: "Failed to load board", type: "DB_ERROR", hint: e.message }
+        });
+    }
+});
+
+// Helper function to safely parse and format date
+const safeDateParse = (dateStr) => {
+    if (!dateStr) return null;
+    try {
+        const parsed = dayjs(dateStr, ['YYYY-MM-DD', 'DD-MMM-YYYY', 'YYYY-MM-DD HH:mm:ss'], true);
+        return parsed.isValid() ? parsed.format('YYYY-MM-DD') : null;
+    } catch {
+        return null;
+    }
+};
+
+// Helper function to ensure start <= end
+const validateDateRange = (start, end) => {
+    if (!start || !end) return null;
+    const startDate = dayjs(start);
+    const endDate = dayjs(end);
+    if (!startDate.isValid() || !endDate.isValid()) return null;
+    if (endDate.isBefore(startDate, 'day')) return null;
+    return { start: startDate.format('YYYY-MM-DD'), end: endDate.format('YYYY-MM-DD') };
+};
+
+// Received Calendar endpoint - returns date ranges for in-hand containers
+router.get("/received-calendar", async (req, res) => {
+    try {
+        // Fetch shipments that are relevant for received / in-hand status
+        // Stages: Discharge (4), Cleared (5), Closed (6) - containers have landed at POD
+        const [rows] = await db.promise().query(`
+            SELECT 
+                s.id as shipment_id,
+                s.ship_uniqid,
+                s.po_id,
+                po.po_number,
+                v.display_name as vendor_name,
+                dpd.name as discharge_port,
+                s.shipment_stage_id as stage_id,
+                po.mode_shipment_id,
+                -- Get discharge date from Dubai Trade
+                (
+                    SELECT DATE_FORMAT(MIN(dtcs.discharge_date), '%Y-%m-%d')
+                    FROM dubai_trade_container_status dtcs 
+                    WHERE dtcs.shipment_id = s.id
+                ) as discharge_date_raw,
+                -- Get to_town_date from Dubai Trade moves
+                (
+                    SELECT DATE_FORMAT(
+                        MAX(COALESCE(
+                            STR_TO_DATE(m.date, '%Y-%m-%d %H:%i:%s'),
+                            STR_TO_DATE(m.date, '%Y-%m-%d'),
+                            STR_TO_DATE(m.date, '%d-%b-%Y %H:%i'),
+                            STR_TO_DATE(m.date, '%d-%b-%Y')
+                        )),
+                        '%Y-%m-%d'
+                    )
+                    FROM dubai_trade_container_status dtcs
+                    INNER JOIN dubai_trade_container_moves m ON m.dubai_trade_status_id = dtcs.id
+                    WHERE dtcs.shipment_id = s.id
+                      AND UPPER(m.move) LIKE '%TO TOWN%'
+                ) as to_town_date_raw,
+                -- Get from_town_date from Dubai Trade moves
+                (
+                    SELECT DATE_FORMAT(
+                        MAX(COALESCE(
+                            STR_TO_DATE(m.date, '%Y-%m-%d %H:%i:%s'),
+                            STR_TO_DATE(m.date, '%Y-%m-%d'),
+                            STR_TO_DATE(m.date, '%d-%b-%Y %H:%i'),
+                            STR_TO_DATE(m.date, '%d-%b-%Y')
+                        )),
+                        '%Y-%m-%d'
+                    )
+                    FROM dubai_trade_container_status dtcs
+                    INNER JOIN dubai_trade_container_moves m ON m.dubai_trade_status_id = dtcs.id
+                    WHERE dtcs.shipment_id = s.id
+                      AND (UPPER(m.move) LIKE '%FROM_TOWN%' OR UPPER(m.move) LIKE '%FROM TOWN%')
+                ) as from_town_date_raw,
+                -- Fallback dates from shipment stages
+                DATE_FORMAT(s.sailing_date, '%Y-%m-%d') as sailing_date_raw,
+                DATE_FORMAT(s.cleared_date, '%Y-%m-%d') as cleared_date_raw,
+                DATE_FORMAT(s.eta_date, '%Y-%m-%d') as eta_date_raw,
+                DATE_FORMAT(s.confirm_arrival_date, '%Y-%m-%d') as confirm_arrival_date_raw,
+                -- Container numbers
+                (
+                    SELECT GROUP_CONCAT(sc.container_no ORDER BY sc.id SEPARATOR ', ')
+                    FROM shipment_container sc
+                    WHERE sc.shipment_id = s.id
+                ) as container_numbers
+            FROM shipment s
+            LEFT JOIN purchase_orders po ON po.id = s.po_id
+            LEFT JOIN vendor v ON v.id = s.vendor_id
+            LEFT JOIN delivery_place dpd ON dpd.id = po.port_discharge
+            WHERE s.shipment_stage_id >= 4  -- Sailed and after (containers have landed)
+              AND s.shipment_stage_id <= 6  -- Up to Closed
+            ORDER BY s.shipment_stage_id, s.id DESC
+        `);
+
+        // Fetch container return dates for fallback
+        const shipmentIds = rows.map(r => r.shipment_id);
+        let returnDatesByShipment = {};
+        if (shipmentIds.length > 0) {
+            const [returnRows] = await db.promise().query(`
+                SELECT 
+                    sc.shipment_id,
+                    DATE_FORMAT(scr.return_date, '%Y-%m-%d') AS return_date_raw,
+                    DATE_FORMAT(scr.to_town_date, '%Y-%m-%d') AS return_to_town_date_raw
+                FROM shipment_container sc
+                LEFT JOIN shipment_container_return scr ON scr.container_id = sc.id
+                WHERE sc.shipment_id IN (?)
+                GROUP BY sc.shipment_id, scr.return_date, scr.to_town_date
+            `, [shipmentIds]);
+
+            returnRows.forEach(row => {
+                if (!returnDatesByShipment[row.shipment_id]) {
+                    returnDatesByShipment[row.shipment_id] = [];
+                }
+                returnDatesByShipment[row.shipment_id].push({
+                    return_date_raw: row.return_date_raw,
+                    return_to_town_date_raw: row.return_to_town_date_raw
+                });
+            });
+        }
+
+        // Process each shipment and compute date ranges
+        // Each PO/shipment should show two ranges:
+        // Range 1: Discharge Date → To Town Date
+        // Range 2: To Town Date → From Town Date
+        // Priority: Dubai Trade moves first, then fallback to stage dates
+        const result = [];
+        for (const row of rows) {
+            // Priority 1: Try Dubai Trade dates first
+            let dischargeDate = safeDateParse(row.discharge_date_raw);
+            let toTownDate = safeDateParse(row.to_town_date_raw);
+            let fromTownDate = safeDateParse(row.from_town_date_raw);
+
+            // Fallback for Range 1: Discharge Date
+            // If Dubai Trade doesn't have discharge_date, use ETA/Sailing date from Sailed stage (stage 4)
+            if (!dischargeDate && Number(row.stage_id) >= 4) {
+                dischargeDate = safeDateParse(row.sailing_date_raw) || 
+                                safeDateParse(row.eta_date_raw) || 
+                                safeDateParse(row.confirm_arrival_date_raw);
+            }
+
+            // Fallback for Range 1 & 2: To Town Date
+            // If Dubai Trade doesn't have to_town_date, use cleared_date from Cleared stage (stage 5)
+            // Then check container return table for return_to_town_date_raw
+            if (!toTownDate && Number(row.stage_id) >= 5) {
+                toTownDate = safeDateParse(row.cleared_date_raw);
+                
+                if (!toTownDate && returnDatesByShipment[row.shipment_id]) {
+                    const returnData = returnDatesByShipment[row.shipment_id][0];
+                    toTownDate = safeDateParse(returnData?.return_to_town_date_raw);
+                }
+            }
+
+            // Fallback for Range 2: From Town Date
+            // If Dubai Trade doesn't have from_town_date, use return_date from container return table
+            if (!fromTownDate) {
+                if (returnDatesByShipment[row.shipment_id]) {
+                    const returnData = returnDatesByShipment[row.shipment_id][0];
+                    fromTownDate = safeDateParse(returnData?.return_date_raw);
+                }
+            }
+
+            // Compute Range 1: Discharge Date → To Town Date
+            // Shows period from discharge/ETA to to_town/cleared
+            // Compute independently - use best available dates for this range
+            const range1Discharge = dischargeDate; // Already has fallback applied
+            const range1ToTown = toTownDate; // Already has fallback applied
+            const range1 = validateDateRange(range1Discharge, range1ToTown);
+
+            // Compute Range 2: To Town Date → From Town Date
+            // Shows period from to_town/cleared to from_town/return
+            // Compute independently - use best available dates for this range
+            const range2ToTown = toTownDate; // Already has fallback applied
+            const range2FromTown = fromTownDate; // Already has fallback applied
+            const range2 = validateDateRange(range2ToTown, range2FromTown);
+
+            // Always include the shipment if at least one range is valid
+            // Both range1 and range2 are computed independently and included (even if null)
+            // This ensures the frontend can display both ranges when available
+            if (range1 || range2) {
+                result.push({
+                    id: row.shipment_id,
+                    po_id: row.po_id,
+                    po_number: row.po_number || row.ship_uniqid,
+                    ship_uniqid: row.ship_uniqid,
+                    vendor_name: row.vendor_name || null,
+                    discharge_port: row.discharge_port || null,
+                    container_no: row.container_numbers || null,
+                    range1: range1,  // Discharge → To Town (can be null if dates unavailable)
+                    range2: range2,  // To Town → From Town (can be null if dates unavailable)
+                    stage_id: Number(row.stage_id),
+                    mode_shipment_id: Number(row.mode_shipment_id)
+                });
+            }
+        }
+
+        res.json(result);
+    } catch (e) {
+        res.status(500).json({
+            error: { message: "Failed to load received calendar", type: "DB_ERROR", hint: e.message }
+        });
+    }
+});
+
+// In Hand Calendar endpoint - alias for received-calendar with same logic
+router.get("/inhand-calendar", async (req, res) => {
+    try {
+        // Fetch shipments that are relevant for in-hand status
+        // Stages: Sailed (4), Cleared (5), Closed (6) - containers have landed at POD
+        const [rows] = await db.promise().query(`
+            SELECT 
+                s.id as shipment_id,
+                s.ship_uniqid,
+                s.po_id,
+                po.po_number,
+                v.display_name as vendor_name,
+                dpd.name as discharge_port,
+                s.shipment_stage_id as stage_id,
+                po.mode_shipment_id,
+                -- Get discharge date from Dubai Trade
+                (
+                    SELECT DATE_FORMAT(MIN(dtcs.discharge_date), '%Y-%m-%d')
+                    FROM dubai_trade_container_status dtcs 
+                    WHERE dtcs.shipment_id = s.id
+                ) as discharge_date_raw,
+                -- Get to_town_date from Dubai Trade moves
+                (
+                    SELECT DATE_FORMAT(
+                        MAX(COALESCE(
+                            STR_TO_DATE(m.date, '%Y-%m-%d %H:%i:%s'),
+                            STR_TO_DATE(m.date, '%Y-%m-%d'),
+                            STR_TO_DATE(m.date, '%d-%b-%Y %H:%i'),
+                            STR_TO_DATE(m.date, '%d-%b-%Y')
+                        )),
+                        '%Y-%m-%d'
+                    )
+                    FROM dubai_trade_container_status dtcs
+                    INNER JOIN dubai_trade_container_moves m ON m.dubai_trade_status_id = dtcs.id
+                    WHERE dtcs.shipment_id = s.id
+                      AND UPPER(m.move) LIKE '%TO TOWN%'
+                ) as to_town_date_raw,
+                -- Get from_town_date from Dubai Trade moves
+                (
+                    SELECT DATE_FORMAT(
+                        MAX(COALESCE(
+                            STR_TO_DATE(m.date, '%Y-%m-%d %H:%i:%s'),
+                            STR_TO_DATE(m.date, '%Y-%m-%d'),
+                            STR_TO_DATE(m.date, '%d-%b-%Y %H:%i'),
+                            STR_TO_DATE(m.date, '%d-%b-%Y')
+                        )),
+                        '%Y-%m-%d'
+                    )
+                    FROM dubai_trade_container_status dtcs
+                    INNER JOIN dubai_trade_container_moves m ON m.dubai_trade_status_id = dtcs.id
+                    WHERE dtcs.shipment_id = s.id
+                      AND (UPPER(m.move) LIKE '%FROM_TOWN%' OR UPPER(m.move) LIKE '%FROM TOWN%')
+                ) as from_town_date_raw,
+                -- Fallback dates from shipment stages
+                DATE_FORMAT(s.sailing_date, '%Y-%m-%d') as sailing_date_raw,
+                DATE_FORMAT(s.cleared_date, '%Y-%m-%d') as cleared_date_raw,
+                DATE_FORMAT(s.eta_date, '%Y-%m-%d') as eta_date_raw,
+                DATE_FORMAT(s.confirm_arrival_date, '%Y-%m-%d') as confirm_arrival_date_raw,
+                -- Container numbers
+                (
+                    SELECT GROUP_CONCAT(sc.container_no ORDER BY sc.id SEPARATOR ', ')
+                    FROM shipment_container sc
+                    WHERE sc.shipment_id = s.id
+                ) as container_numbers
+            FROM shipment s
+            LEFT JOIN purchase_orders po ON po.id = s.po_id
+            LEFT JOIN vendor v ON v.id = s.vendor_id
+            LEFT JOIN delivery_place dpd ON dpd.id = po.port_discharge
+            WHERE s.shipment_stage_id >= 4  -- Sailed and after (containers have landed)
+              AND s.shipment_stage_id <= 6  -- Up to Closed
+            ORDER BY s.shipment_stage_id, s.id DESC
+        `);
+
+        // Fetch container return dates for fallback
+        const shipmentIds = rows.map(r => r.shipment_id);
+        let returnDatesByShipment = {};
+        if (shipmentIds.length > 0) {
+            const [returnRows] = await db.promise().query(`
+                SELECT 
+                    sc.shipment_id,
+                    DATE_FORMAT(scr.return_date, '%Y-%m-%d') AS return_date_raw,
+                    DATE_FORMAT(scr.to_town_date, '%Y-%m-%d') AS return_to_town_date_raw
+                FROM shipment_container sc
+                LEFT JOIN shipment_container_return scr ON scr.container_id = sc.id
+                WHERE sc.shipment_id IN (?)
+                GROUP BY sc.shipment_id, scr.return_date, scr.to_town_date
+            `, [shipmentIds]);
+
+            returnRows.forEach(row => {
+                if (!returnDatesByShipment[row.shipment_id]) {
+                    returnDatesByShipment[row.shipment_id] = [];
+                }
+                returnDatesByShipment[row.shipment_id].push({
+                    return_date_raw: row.return_date_raw,
+                    return_to_town_date_raw: row.return_to_town_date_raw
+                });
+            });
+        }
+
+        // Process each shipment and compute date ranges
+        // Each PO/shipment should show two ranges:
+        // Range 1: Discharge Date → To Town Date
+        // Range 2: To Town Date → From Town Date
+        // Priority: Dubai Trade moves first, then fallback to stage dates
+        const result = [];
+        for (const row of rows) {
+            // Priority 1: Try Dubai Trade dates first
+            let dischargeDate = safeDateParse(row.discharge_date_raw);
+            let toTownDate = safeDateParse(row.to_town_date_raw);
+            let fromTownDate = safeDateParse(row.from_town_date_raw);
+
+            // Fallback for Range 1: Discharge Date
+            // If Dubai Trade doesn't have discharge_date, use ETA/Sailing date from Sailed stage (stage 4)
+            if (!dischargeDate && Number(row.stage_id) >= 4) {
+                dischargeDate = safeDateParse(row.sailing_date_raw) || 
+                                safeDateParse(row.eta_date_raw) || 
+                                safeDateParse(row.confirm_arrival_date_raw);
+            }
+
+            // Fallback for Range 1 & 2: To Town Date
+            // If Dubai Trade doesn't have to_town_date, use cleared_date from Cleared stage (stage 5)
+            // Then check container return table for return_to_town_date_raw
+            if (!toTownDate && Number(row.stage_id) >= 5) {
+                toTownDate = safeDateParse(row.cleared_date_raw);
+                
+                if (!toTownDate && returnDatesByShipment[row.shipment_id]) {
+                    const returnData = returnDatesByShipment[row.shipment_id][0];
+                    toTownDate = safeDateParse(returnData?.return_to_town_date_raw);
+                }
+            }
+
+            // Fallback for Range 2: From Town Date
+            // If Dubai Trade doesn't have from_town_date, use return_date from container return table
+            if (!fromTownDate) {
+                if (returnDatesByShipment[row.shipment_id]) {
+                    const returnData = returnDatesByShipment[row.shipment_id][0];
+                    fromTownDate = safeDateParse(returnData?.return_date_raw);
+                }
+            }
+
+            // Compute Range 1: Discharge Date → To Town Date
+            const range1 = validateDateRange(dischargeDate, toTownDate);
+
+            // Compute Range 2: To Town Date → From Town Date
+            // Range 2 should start from the day AFTER toTownDate (not including toTownDate itself)
+            // because toTownDate is the end of Range 1
+            let range2Start = null;
+            if (toTownDate) {
+                const toTownDay = dayjs(toTownDate);
+                if (toTownDay.isValid()) {
+                    range2Start = toTownDay.add(1, 'day').format('YYYY-MM-DD');
+                }
+            }
+            const range2 = validateDateRange(range2Start, fromTownDate);
+
+            // Debug logging for first few shipments
+            if (result.length < 3) {
+                console.log(`[inhand-calendar] PO ${row.po_number || row.ship_uniqid}:`, {
+                    dischargeDate,
+                    toTownDate,
+                    fromTownDate,
+                    range2Start,
+                    range1: range1 ? `${range1.start} to ${range1.end}` : 'null',
+                    range2: range2 ? `${range2.start} to ${range2.end}` : 'null'
+                });
+            }
+
+            // Always include the shipment if at least one range is valid
+            // Both range1 and range2 are included (even if null) so frontend can display both when available
+            if (range1 || range2) {
+                result.push({
+                    id: row.shipment_id,
+                    po_id: row.po_id,
+                    po_number: row.po_number || row.ship_uniqid,
+                    ship_uniqid: row.ship_uniqid,
+                    vendor_name: row.vendor_name || null,
+                    discharge_port: row.discharge_port || null,
+                    container_no: row.container_numbers || null,
+                    range1: range1,  // Discharge → To Town (can be null if dates unavailable)
+                    range2: range2,  // To Town → From Town (can be null if dates unavailable)
+                    stage_id: Number(row.stage_id),
+                    mode_shipment_id: Number(row.mode_shipment_id)
+                });
+            }
+        }
+
+        res.json(result);
+    } catch (e) {
+        res.status(500).json({
+            error: { message: "Failed to load in-hand calendar", type: "DB_ERROR", hint: e.message }
         });
     }
 });
