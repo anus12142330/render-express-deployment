@@ -5,6 +5,7 @@ const GROUPS = [
   { name: 'Items', sort_order: 20 },
   { name: 'Sales', sort_order: 30 },
   { name: 'Purchase', sort_order: 40 },
+  { name: 'Operations', sort_order: 45 },
   { name: 'Accountant', sort_order: 50 },
   { name: 'Settings', sort_order: 999 },
 ];
@@ -26,6 +27,9 @@ const MODULES = [
   // --- Purchase ---
   { key_name: 'PurchaseOrders', group_name: 'Purchase', display_name: 'Purchase Orders', sort_order: 10 },
   { key_name: 'Bills', group_name: 'Purchase', display_name: 'Bills', sort_order: 20 },
+
+  // --- Operations ---
+  { key_name: 'CargoArrivalSummary', group_name: 'Operations', display_name: 'Cargo Arrival Summary', sort_order: 10 },
 
   // --- Accountant ---
   // As per your request, this group is currently empty.
