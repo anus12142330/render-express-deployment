@@ -272,16 +272,16 @@ router.patch('/:id/status', async (req, res) => {
 router.get('/packings/:packingDetailId/in-use', async (req, res) => {
     const { packingDetailId } = req.params;
     try {
-      // If your schema uses a different table/column, change here:
-      const rows = await q(
-        'SELECT COUNT(*) AS c FROM purchase_order_items WHERE packing_id = ?',
-        [packingDetailId]
-      );
-      const count = rows?.[0]?.c || 0;
-      res.json({ inUse: count > 0, count });
+        // If your schema uses a different table/column, change here:
+        const rows = await q(
+            'SELECT COUNT(*) AS c FROM purchase_order_items WHERE packing_id = ?',
+            [packingDetailId]
+        );
+        const count = rows?.[0]?.c || 0;
+        res.json({ inUse: count > 0, count });
     } catch (e) {
-      console.error('packings in-use check failed', e);
-      res.status(500).json({ inUse: true, error: 'CHECK_FAILED' });
+        console.error('packings in-use check failed', e);
+        res.status(500).json({ inUse: true, error: 'CHECK_FAILED' });
     }
 });
 // ==================================================
@@ -305,6 +305,7 @@ router.get('/:identifier', async (req, res) => {
         sales_acc.name AS sales_account_name,
         p.is_active,
         purch_acc.name AS purchase_account_name,
+        inv_acc.name AS inventory_account_name,
         mos.name as mode_of_shipment_name,
         vm.method_name AS valuation_method_name,
         creator.name   AS created_by_name
@@ -312,6 +313,7 @@ router.get('/:identifier', async (req, res) => {
       LEFT JOIN categories cat ON cat.id = p.category_id
       LEFT JOIN acc_chart_accounts sales_acc ON sales_acc.id = p.sales_account_id
       LEFT JOIN acc_chart_accounts purch_acc ON purch_acc.id = p.purchase_account_id
+      LEFT JOIN acc_chart_accounts inv_acc ON inv_acc.id = p.inventory_account_id
       LEFT JOIN mode_of_shipment mos ON mos.id = p.mode_of_shipment_id
       LEFT JOIN valuation_methods vm ON vm.id = p.valuation_method_id
       LEFT JOIN \`user\` creator ON creator.id = p.created_by
@@ -324,14 +326,15 @@ router.get('/:identifier', async (req, res) => {
         const productId = product.id;
 
         // Check if the product is used in any transactions
-       const [usage] = await q(
-  `SELECT (
+        // Uses purchase orders and AP bills (ap_bill_lines) instead of legacy purchase_bill_items
+        const [usage] = await q(
+            `SELECT (
      (SELECT 1 FROM purchase_order_items WHERE item_id = ? LIMIT 1) IS NOT NULL OR
-     (SELECT 1 FROM purchase_bill_items   WHERE product_id = ? LIMIT 1) IS NOT NULL
+     (SELECT 1 FROM ap_bill_lines        WHERE product_id = ? LIMIT 1) IS NOT NULL
    ) AS in_use`,
-  [productId, productId]
-);
-const is_in_use = !!usage?.in_use;
+            [productId, productId]
+        );
+        const is_in_use = !!usage?.in_use;
 
         // 2) images (unchanged)
         const images = (await q(
@@ -425,7 +428,7 @@ const is_in_use = !!usage?.in_use;
             ean: r.ean || '',
             uom_id: r.uom_id != null ? r.uom_id.toString() : '',
             brand_id: r.brand_id != null ? r.brand_id.toString() : '',
-           // manufacturer_id: r.manufacturer_id != null ? r.manufacturer_id.toString() : '',
+            // manufacturer_id: r.manufacturer_id != null ? r.manufacturer_id.toString() : '',
             pack_image_url: r.pack_image_path || ''
         }));
 
@@ -455,6 +458,62 @@ const is_in_use = !!usage?.in_use;
             [productId]
         );
 
+        // 9) Fetch QC defect types for this product
+        const qcDefectTypes = await q(
+            `SELECT dt.id, dt.code, dt.name, dt.description, dt.severity, dt.sort_order
+             FROM product_qc_defect_types pqdt
+             JOIN qc_defect_types dt ON dt.id = pqdt.defect_type_id
+             WHERE pqdt.product_id = ? AND dt.is_active = 1
+             ORDER BY dt.sort_order, dt.name`,
+            [productId]
+        );
+
+        // 10) Fetch product-specific QC config rules and merge with global config
+        const productQcConfig = await q(
+            `SELECT pqc.config_key, qc.config_name, pqc.config_value, pqc.description
+             FROM product_qc_config pqc
+             LEFT JOIN qc_config qc ON qc.config_key = pqc.config_key
+             WHERE pqc.product_id = ?`,
+            [productId]
+        );
+
+        // Fetch global config to show all available config rules
+        const globalConfig = await q(
+            `SELECT config_key, config_name, config_value, description
+             FROM qc_config
+             WHERE is_active = 1
+             ORDER BY config_key`
+        );
+
+        // Merge: use product-specific values if available, otherwise use global defaults
+        const configMap = {};
+        if (Array.isArray(globalConfig) && globalConfig.length > 0) {
+            globalConfig.forEach(gc => {
+                configMap[gc.config_key] = {
+                    config_key: gc.config_key,
+                    config_name: gc.config_name,
+                    config_value: gc.config_value,
+                    description: gc.description
+                };
+            });
+        }
+        if (Array.isArray(productQcConfig) && productQcConfig.length > 0) {
+            productQcConfig.forEach(pc => {
+                if (configMap[pc.config_key]) {
+                    configMap[pc.config_key].config_value = pc.config_value; // Override with product-specific value
+                } else {
+                    // Add product-specific config even if not in global (edge case)
+                    configMap[pc.config_key] = {
+                        config_key: pc.config_key,
+                        config_name: pc.config_name || pc.config_key,
+                        config_value: pc.config_value,
+                        description: pc.description
+                    };
+                }
+            });
+        }
+        const mergedConfig = Object.values(configMap);
+
         res.json({
             ...product,
             images,
@@ -466,6 +525,10 @@ const is_in_use = !!usage?.in_use;
             dimension_rows,            // fully hydrated packing/origin rows
             history: history || [],
             in_use: is_in_use,
+            qc_defect_types: qcDefectTypes || [],
+            qc_tolerance_min: product.qc_tolerance_min != null ? product.qc_tolerance_min : 0,
+            qc_tolerance_max: product.qc_tolerance_max != null ? product.qc_tolerance_max : 3,
+            qc_config: mergedConfig || [],
         });
     } catch (e) {
         console.error('GET /api/products/:id error:', e);
@@ -553,17 +616,18 @@ router.post('/', uploadFields, async (req, res) => {
         }
 
         // Validate FKs (stay consistent with your table names)
-        const sales_account_id     = await fkOrNull(conn, 'acc_chart_accounts',    p.sales_account_id);
-        const purchase_account_id  = await fkOrNull(conn, 'acc_chart_accounts',    p.purchase_account_id);
-        const selling_currency_id  = await fkOrNull(conn, 'currency', p.selling_currency_id);
-        const cost_currency_id     = await fkOrNull(conn, 'currency', p.cost_currency_id);
-        const category_id          = await fkOrNull(conn, 'categories',            p.category_id);
-        const mode_of_shipment_id  = await fkOrNull(conn, 'mode_of_shipment',      p.mode_of_shipment_id);
+        const sales_account_id = await fkOrNull(conn, 'acc_chart_accounts', p.sales_account_id);
+        const purchase_account_id = await fkOrNull(conn, 'acc_chart_accounts', p.purchase_account_id);
+        const selling_currency_id = await fkOrNull(conn, 'currency', p.selling_currency_id);
+        const cost_currency_id = await fkOrNull(conn, 'currency', p.cost_currency_id);
+        const category_id = await fkOrNull(conn, 'categories', p.category_id);
+        const mode_of_shipment_id = await fkOrNull(conn, 'mode_of_shipment', p.mode_of_shipment_id);
 
-        const preferred_vendor_id  = await fkOrNull(conn, 'vendor',               p.preferred_vendor_id);
-        const valuation_method_id  = await fkOrNull(conn, 'valuation_methods',  p.valuation_method_id);
-        const sales_tax_id         = await fkOrNull(conn, 'taxes',                 p.sales_tax_id);
-        const purchase_tax_id      = await fkOrNull(conn, 'taxes',                 p.purchase_tax_id);
+        const preferred_vendor_id = await fkOrNull(conn, 'vendor', p.preferred_vendor_id);
+        const valuation_method_id = await fkOrNull(conn, 'valuation_methods', p.valuation_method_id);
+        const inventory_account_id = await fkOrNull(conn, 'acc_chart_accounts', p.inventory_account_id);
+        const sales_tax_id = await fkOrNull(conn, 'taxes', p.sales_tax_id);
+        const purchase_tax_id = await fkOrNull(conn, 'taxes', p.purchase_tax_id);
 
         const pdt_uniqid = `pdt_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
 
@@ -573,10 +637,10 @@ router.post('/', uploadFields, async (req, res) => {
         returnable, excise,
         enable_sales, selling_currency_id, selling_price, sales_account_id, sales_description, sales_tax_id,
         enable_purchase, cost_currency_id, cost_price, purchase_account_id, purchase_tax_id, purchase_description, preferred_vendor_id,
-        track_inventory, track_batches, valuation_method_id, reorder_point,
-        description, created_at, updated_at)
+        track_inventory, track_batches, valuation_method_id, inventory_account_id, reorder_point,
+        description, qc_tolerance_min, qc_tolerance_max, created_at, updated_at)
        VALUES
-       (?,?,?, ?, ?,?,?,  ?,?,  ?,?,?,?,?, ?,?,  ?,?,?,?,?,?, ?,?,  ?,?,?, NOW(), NOW())`,
+       (?,?,?, ?, ?,?,?,  ?,?,  ?,?,?,?,?, ?,?,  ?,?,?,?,?,?, ?,?,  ?,?,?,?, ?, ?, NOW(), NOW())`,
             [
                 pdt_uniqid, category_id, readBool01(p, ['is_taxable']), mode_of_shipment_id,
 
@@ -605,9 +669,12 @@ router.post('/', uploadFields, async (req, res) => {
                 readBool01(p, ['track_inventory']),
                 readBool01(p, ['track_batches']),
                 valuation_method_id,
+                inventory_account_id,
                 readNum(p, ['reorder_point'], null),
 
                 read(p, ['description'], null),
+                readNum(p, ['qc_tolerance_min'], 0),
+                readNum(p, ['qc_tolerance_max'], 3),
             ]
         );
 
@@ -640,8 +707,8 @@ router.post('/', uploadFields, async (req, res) => {
                 (r.packing_id || null),                // free-text packing
                 r.dimensions || null,
                 r.dim_unit || r.dimensions_unit || 'cm',
-                r.net_weight === ''  ? null : numOrNull(r.net_weight),
-                r.gross_weight === ''? null : numOrNull(r.gross_weight),
+                r.net_weight === '' ? null : numOrNull(r.net_weight),
+                r.gross_weight === '' ? null : numOrNull(r.gross_weight),
                 r.weight_unit || 'kg',
                 numOrNull(r.brand_id),
                 r.mpn || null,
@@ -668,7 +735,7 @@ router.post('/', uploadFields, async (req, res) => {
 
 
         // ---- product_opening_stock ----
-        const opening = (() => { try { return JSON.parse(p.opening_stocks || '[]'); } catch { return []; }})();
+        const opening = (() => { try { return JSON.parse(p.opening_stocks || '[]'); } catch { return []; } })();
         if (Array.isArray(opening) && opening.length) {
             const values = opening
                 .filter(r => r && r.warehouse_id)
@@ -714,12 +781,12 @@ router.post('/', uploadFields, async (req, res) => {
 
                 const is_primary = primarySet ? 0 : (i === 0 ? 1 : 0);
                 if (!primarySet && is_primary === 1) primarySet = true;
-                
+
                 return [
                     productId,
                     relPath(f.path),
                     //relPath(thumbDiskPath),
-                    relPath(thumbDiskPath, true), 
+                    relPath(thumbDiskPath, true),
                     is_primary,
                     f.originalname || null,
                     f.mimetype || null,
@@ -736,6 +803,44 @@ router.post('/', uploadFields, async (req, res) => {
             );
         }
 
+        // Save QC defect types (many-to-many relationship)
+        const qcDefectTypes = parseJSON(p, 'qc_defect_types', []);
+        if (Array.isArray(qcDefectTypes) && qcDefectTypes.length > 0) {
+            const defectTypeValues = qcDefectTypes
+                .filter(id => id && Number.isFinite(Number(id)))
+                .map(defectTypeId => [productId, Number(defectTypeId)]);
+
+            if (defectTypeValues.length > 0) {
+                await conn.query(
+                    `INSERT INTO product_qc_defect_types (product_id, defect_type_id) VALUES ?`,
+                    [defectTypeValues]
+                );
+            }
+        }
+
+        // Save product-specific QC config rules
+        const qcConfig = parseJSON(p, 'qc_config', {});
+        if (typeof qcConfig === 'object' && qcConfig !== null) {
+            // Get global config to get descriptions
+            const [globalConfig] = await conn.query(
+                'SELECT config_key, description FROM qc_config WHERE is_active = 1'
+            );
+            const configMap = {};
+            globalConfig.forEach(gc => {
+                configMap[gc.config_key] = gc.description;
+            });
+
+            // Insert product-specific config values
+            for (const [configKey, configValue] of Object.entries(qcConfig)) {
+                if (configKey.startsWith('editing_')) continue; // Skip editing flags
+
+                await conn.query(
+                    `INSERT INTO product_qc_config (product_id, config_key, config_value, description)
+                     VALUES (?, ?, ?, ?)`,
+                    [productId, configKey, configValue || '', configMap[configKey] || null]
+                );
+            }
+        }
 
         await conn.commit();
         return res.json({ ok: true, id: productId });
@@ -775,7 +880,7 @@ function getChangedFields(oldValues, newValues) {
     // This prevents comparing fields like `id`, `created_at`, etc.
     const keysToCompare = Object.keys(newValues);
 
-    const numericFields = ['selling_price', 'cost_price', 'reorder_point'];
+    const numericFields = ['selling_price', 'cost_price', 'reorder_point', 'qc_tolerance_min', 'qc_tolerance_max'];
     const booleanFields = ['returnable', 'excise', 'is_taxable', 'enable_sales', 'enable_purchase', 'track_inventory', 'track_batches'];
 
     for (const key of keysToCompare) {
@@ -844,17 +949,18 @@ router.put('/:id', uploadFields, async (req, res) => {
 
         const p = req.body;
         // ----- Validate FKs (stay consistent with your table names) -----
-        const sales_account_id     = await fkOrNull(conn, 'acc_chart_accounts',    p.sales_account_id);
-        const purchase_account_id  = await fkOrNull(conn, 'acc_chart_accounts',    p.purchase_account_id);
-        const selling_currency_id  = await fkOrNull(conn, 'currency',            p.selling_currency_id);
-        const cost_currency_id     = await fkOrNull(conn, 'currency',            p.cost_currency_id);
-        const category_id          = await fkOrNull(conn, 'categories',          p.category_id);
-        const mode_of_shipment_id  = await fkOrNull(conn, 'mode_of_shipment',      p.mode_of_shipment_id);
+        const sales_account_id = await fkOrNull(conn, 'acc_chart_accounts', p.sales_account_id);
+        const purchase_account_id = await fkOrNull(conn, 'acc_chart_accounts', p.purchase_account_id);
+        const selling_currency_id = await fkOrNull(conn, 'currency', p.selling_currency_id);
+        const cost_currency_id = await fkOrNull(conn, 'currency', p.cost_currency_id);
+        const category_id = await fkOrNull(conn, 'categories', p.category_id);
+        const mode_of_shipment_id = await fkOrNull(conn, 'mode_of_shipment', p.mode_of_shipment_id);
 
-        const preferred_vendor_id  = await fkOrNull(conn, 'vendor',              p.preferred_vendor_id);
-        const valuation_method_id  = await fkOrNull(conn, 'valuation_methods',   p.valuation_method_id);
-        const sales_tax_id         = await fkOrNull(conn, 'taxes',               p.sales_tax_id);
-        const purchase_tax_id      = await fkOrNull(conn, 'taxes',               p.purchase_tax_id);
+        const preferred_vendor_id = await fkOrNull(conn, 'vendor', p.preferred_vendor_id);
+        const valuation_method_id = await fkOrNull(conn, 'valuation_methods', p.valuation_method_id);
+        const inventory_account_id = await fkOrNull(conn, 'acc_chart_accounts', p.inventory_account_id);
+        const sales_tax_id = await fkOrNull(conn, 'taxes', p.sales_tax_id);
+        const purchase_tax_id = await fkOrNull(conn, 'taxes', p.purchase_tax_id);
 
         const newValuesForHistory = {
             category_id,
@@ -880,8 +986,11 @@ router.put('/:id', uploadFields, async (req, res) => {
             track_inventory: readBool01(p, ['track_inventory']),
             track_batches: readBool01(p, ['track_batches']),
             valuation_method_id,
+            inventory_account_id,
             reorder_point: readNum(p, ['reorder_point'], null),
             description: read(p, ['description'], null),
+            qc_tolerance_min: readNum(p, ['qc_tolerance_min'], 0),
+            qc_tolerance_max: readNum(p, ['qc_tolerance_max'], 3),
         };
 
         const changedFields = getChangedFields(oldProduct, newValuesForHistory);
@@ -912,8 +1021,11 @@ router.put('/:id', uploadFields, async (req, res) => {
         track_inventory=?,
         track_batches=?,
         valuation_method_id=?,
+        inventory_account_id=?,
         reorder_point=?,
         description=?,
+        qc_tolerance_min=?,
+        qc_tolerance_max=?,
         updated_at=NOW()
       WHERE id=?`,
             [
@@ -944,13 +1056,57 @@ router.put('/:id', uploadFields, async (req, res) => {
                 readBool01(p, ['track_inventory']),
                 readBool01(p, ['track_batches']),
                 valuation_method_id,
+                inventory_account_id,
                 readNum(p, ['reorder_point'], null),
 
                 read(p, ['description'], null),
+                readNum(p, ['qc_tolerance_min'], 0),
+                readNum(p, ['qc_tolerance_max'], 3),
 
                 productId
             ]
         );
+
+        // Update QC defect types (delete existing and insert new)
+        await conn.query('DELETE FROM product_qc_defect_types WHERE product_id = ?', [productId]);
+        const qcDefectTypes = parseJSON(p, 'qc_defect_types', []);
+        if (Array.isArray(qcDefectTypes) && qcDefectTypes.length > 0) {
+            const defectTypeValues = qcDefectTypes
+                .filter(id => id && Number.isFinite(Number(id)))
+                .map(defectTypeId => [productId, Number(defectTypeId)]);
+
+            if (defectTypeValues.length > 0) {
+                await conn.query(
+                    `INSERT INTO product_qc_defect_types (product_id, defect_type_id) VALUES ?`,
+                    [defectTypeValues]
+                );
+            }
+        }
+
+        // Update product-specific QC config rules
+        const qcConfig = parseJSON(p, 'qc_config', {});
+        if (typeof qcConfig === 'object' && qcConfig !== null) {
+            // Get global config to get descriptions
+            const [globalConfig] = await conn.query(
+                'SELECT config_key, description FROM qc_config WHERE is_active = 1'
+            );
+            const configMap = {};
+            globalConfig.forEach(gc => {
+                configMap[gc.config_key] = gc.description;
+            });
+
+            // Insert or update product-specific config values
+            for (const [configKey, configValue] of Object.entries(qcConfig)) {
+                if (configKey.startsWith('editing_')) continue; // Skip editing flags
+
+                await conn.query(
+                    `INSERT INTO product_qc_config (product_id, config_key, config_value, description)
+                     VALUES (?, ?, ?, ?)
+                     ON DUPLICATE KEY UPDATE config_value = VALUES(config_value), updated_at = NOW()`,
+                    [productId, configKey, configValue || '', configMap[configKey] || null]
+                );
+            }
+        }
 
         if (changedFields.length > 0) {
             await conn.query(
@@ -1034,7 +1190,7 @@ router.put('/:id', uploadFields, async (req, res) => {
         }
 
         // ----- product_opening_stock: replace-all strategy -----
-        const opening = (() => { try { return JSON.parse(p.opening_stocks || '[]'); } catch { return []; }})();
+        const opening = (() => { try { return JSON.parse(p.opening_stocks || '[]'); } catch { return []; } })();
         await conn.query('DELETE FROM product_opening_stock WHERE product_id=?', [productId]);
 
         if (Array.isArray(opening) && opening.length) {
@@ -1259,7 +1415,7 @@ router.get('/:id/packings', async (req, res) => {
             grade_and_size_code: r.grade_and_size_code || '',
             packing_alias: r.packing_alias || '',
             brand_id: r.brand_id != null ? String(r.brand_id) : '',
-          //  manufacturer_id: r.manufacturer_id != null ? String(r.manufacturer_id) : '',
+            //  manufacturer_id: r.manufacturer_id != null ? String(r.manufacturer_id) : '',
             mpn: r.mpn || '',
             isbn: r.isbn || '',
             upc: r.upc || '',
@@ -1305,7 +1461,7 @@ router.post('/:id/images', uploadFields, async (req, res) => {
         }
         res.json({ success: true, added: files.length });
     } catch (e) {
-        await Promise.all(files.map(f => fs.promises.unlink(f.path).catch(() => {})));
+        await Promise.all(files.map(f => fs.promises.unlink(f.path).catch(() => { })));
         res.status(500).json({ error: e.message });
     }
 });
@@ -1326,10 +1482,11 @@ router.delete('/:id', async (req, res) => {
         }
 
         // Check if the product is in use before allowing deletion
+        // Use purchase orders and AP bills (ap_bill_lines) instead of legacy purchase_bill_items
         const [usageResult] = await q(
             `SELECT (
                 (SELECT 1 FROM purchase_order_items WHERE item_id = ? LIMIT 1) IS NOT NULL OR
-                (SELECT 1 FROM purchase_bill_items WHERE product_id = ? LIMIT 1) IS NOT NULL
+                (SELECT 1 FROM ap_bill_lines        WHERE product_id = ? LIMIT 1) IS NOT NULL
             ) AS in_use`,
             [productId, productId]
         );
@@ -1380,7 +1537,7 @@ router.delete('/:id/images/:imageId', async (req, res) => {
         await q(`DELETE FROM product_images WHERE id=? AND product_id=?`, [imageId, id]);
 
         const diskPath = path.join(process.cwd(), rel.replace(/^\//, ''));
-        fs.promises.unlink(diskPath).catch(() => {});
+        fs.promises.unlink(diskPath).catch(() => { });
 
         res.json({ success: true });
     } catch (err) {

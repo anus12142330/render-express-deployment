@@ -1008,4 +1008,145 @@ router.patch('/:id/status', async (req, res, next) => {
     }
 });
 
+/* ================================
+   GET /api/vendors/:id/statement
+   Get vendor transaction statement from GL journals (all transaction history)
+================================ */
+router.get('/:id/statement', async (req, res, next) => {
+    try {
+        const vendorId = parseInt(req.params.id, 10);
+        if (!vendorId || !Number.isFinite(vendorId)) {
+            return res.status(400).json(errPayload('Invalid vendor ID'));
+        }
+
+        // Get all GL journal lines for this vendor (buyer_id)
+        // This includes all transactions: bills, payments, and any other GL entries
+        const [journalLines] = await db.promise().query(`
+            SELECT 
+                gjl.id,
+                gjl.journal_id,
+                gjl.line_no,
+                gjl.account_id,
+                gjl.debit,
+                gjl.credit,
+                gjl.description,
+                gjl.entity_type,
+                gjl.entity_id,
+                gjl.product_id,
+                gjl.buyer_id,
+                gjl.currency_id,
+                gjl.foreign_amount,
+                gjl.total_amount,
+                gj.id as journal_id_full,
+                gj.journal_number,
+                gj.journal_date,
+                gj.source_type,
+                gj.source_id,
+                gj.source_name,
+                gj.source_date,
+                gj.memo,
+                gj.currency_id as journal_currency_id,
+                gj.exchange_rate,
+                gj.foreign_amount as journal_foreign_amount,
+                gj.total_amount as journal_total_amount,
+                acc.name as account_name,
+                acc.account_code,
+                c.name as currency_code,
+                p.product_name
+            FROM gl_journal_lines gjl
+            INNER JOIN gl_journals gj ON gj.id = gjl.journal_id
+            LEFT JOIN acc_chart_accounts acc ON acc.id = gjl.account_id
+            LEFT JOIN currency c ON c.id = gjl.currency_id
+            LEFT JOIN products p ON p.id = gjl.product_id
+            WHERE gjl.buyer_id = ?
+            AND (gj.is_deleted = 0 OR gj.is_deleted IS NULL)
+            ORDER BY gj.journal_date DESC, gj.id DESC, gjl.line_no ASC
+        `, [vendorId]);
+
+        // Transform journal lines into statement entries
+        // Use total_amount if available (for multi-currency), otherwise use debit/credit
+        const allTransactions = journalLines.map(line => {
+            // Determine transaction type from source_type
+            let transactionType = 'GL_ENTRY';
+            if (line.source_type === 'AP_BILL') {
+                transactionType = 'BILL';
+            } else if (line.source_type === 'AP_PAYMENT') {
+                transactionType = 'PAYMENT';
+            } else if (line.source_type === 'AR_INVOICE') {
+                transactionType = 'INVOICE';
+            } else if (line.source_type === 'AR_RECEIPT') {
+                transactionType = 'RECEIPT';
+            }
+
+            // Use total_amount if available (for multi-currency), otherwise use debit/credit
+            // total_amount represents the converted amount in default currency
+            const debitAmount = line.total_amount !== null && line.total_amount !== undefined && parseFloat(line.debit || 0) > 0
+                ? parseFloat(line.total_amount)
+                : parseFloat(line.debit || 0);
+            const creditAmount = line.total_amount !== null && line.total_amount !== undefined && parseFloat(line.credit || 0) > 0
+                ? parseFloat(line.total_amount)
+                : parseFloat(line.credit || 0);
+            
+            const amount = debitAmount > 0 ? debitAmount : creditAmount;
+
+            return {
+                id: line.id,
+                journal_id: line.journal_id,
+                line_no: line.line_no,
+                date: line.journal_date || line.source_date,
+                document_number: line.source_name || line.journal_number,
+                document_uniqid: line.source_id,
+                source_type: line.source_type,
+                source_id: line.source_id,
+                type: transactionType,
+                account_name: line.account_name,
+                account_code: line.account_code,
+                description: line.description || line.memo,
+                product_name: line.product_name,
+                debit: debitAmount,
+                credit: creditAmount,
+                amount: amount,
+                currency_code: line.currency_code,
+                status_name: 'Posted', // GL journals are always posted
+                memo: line.memo,
+                journal_number: line.journal_number
+            };
+        });
+
+        // Sort by date (most recent first), then by journal_id, then by line_no
+        allTransactions.sort((a, b) => {
+            const dateA = new Date(a.date);
+            const dateB = new Date(b.date);
+            if (dateA.getTime() !== dateB.getTime()) {
+                return dateB - dateA; // Most recent first
+            }
+            if (a.journal_id !== b.journal_id) {
+                return b.journal_id - a.journal_id; // Higher journal ID first
+            }
+            return a.line_no - b.line_no; // Lower line_no first
+        });
+
+        // Calculate running balance
+        // Running balance = sum of debits - sum of credits
+        // Debit and credit amounts are already using total_amount if available (from transformation above)
+        let runningBalance = 0;
+        const statement = allTransactions.map(txn => {
+            runningBalance = runningBalance + parseFloat(txn.debit || 0) - parseFloat(txn.credit || 0);
+            return {
+                ...txn,
+                running_balance: runningBalance
+            };
+        });
+
+        res.json({ 
+            statement,
+            opening_balance: 0, // Can be calculated from previous period if needed
+            closing_balance: runningBalance
+        });
+    } catch (err) {
+        console.error('vendors/:id/statement:', err);
+        next(err);
+    }
+});
+
 export default router;

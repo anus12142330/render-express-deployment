@@ -46,13 +46,22 @@ import uploadRoutes from "./routes/upload.js";
 import rbacRoutes from './routes/rbac.js';
 import roleRoutes from './routes/roles.js';
 import documentTemplateRoutes from './routes/documentTemplate.js';
+import qualityCheckRoutes from './routes/qualityCheck.js';
+import systemSettingsRoutes from './routes/systemSettings.js';
 import db from "./db.js";
 import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import { requireAuth, requirePerm } from './middleware/authz.js';
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
 
 // Helper function to run queries with promises and return rows
 const q = async (sql, p = []) => (await db.promise().query(sql, p))[0];
+
+// Import CommonJS modules for AP/AR/Inventory
+const apRoutes = require('./src/modules/ap/ap.routes.cjs');
+const arRoutes = require('./src/modules/ar/ar.routes.cjs');
+const inventoryRoutes = require('./src/modules/inventory/inventory.routes.cjs');
 
 const app = express();
 app.use(cors());
@@ -195,6 +204,21 @@ app.use('/api/rbac', rbacRoutes);
 app.use('/api/paymentTerms', paymentTermsRoutes);
 app.use('/api/document-template', documentTemplateRoutes);
 app.use('/api/roles', roleRoutes);
+app.use('/api/quality-check', qualityCheckRoutes);
+app.use('/api/system-settings', systemSettingsRoutes);
+
+// AP/AR/Inventory routes (CommonJS modules)
+app.use('/api/ap', apRoutes);
+app.use('/api/ar', arRoutes);
+app.use('/api/inventory', inventoryRoutes);
+
+// GL (General Ledger) routes
+const glRoutes = require('./src/modules/gl/gl.routes.cjs');
+app.use('/api/gl', glRoutes);
+
+// Reports routes
+const reportsRoutes = require('./src/modules/reports/reports.routes.cjs');
+app.use('/api/reports', reportsRoutes);
 
 //Role permission
 app.get('/api/me', requireAuth, async (req, res) => {
@@ -351,7 +375,8 @@ app.post('/api/login', async (req, res) => {
     res.json({ success: true, user: userWithDetails });
   } catch (err) {
     console.error('❌ Login error:', err);
-    res.status(500).json({ success: false, error: 'Database error' });
+    console.error('❌ Login error stack:', err.stack);
+    res.status(500).json({ success: false, error: err.message || 'Database error', details: process.env.NODE_ENV === 'development' ? err.stack : undefined });
   }
 });
 

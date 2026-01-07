@@ -30,6 +30,10 @@ const MODULES = [
 
   // --- Operations ---
   { key_name: 'CargoArrivalSummary', group_name: 'Operations', display_name: 'Cargo Arrival Summary', sort_order: 10 },
+  { key_name: 'UpcomingShipment', group_name: 'Operations', display_name: 'Upcoming Shipment', sort_order: 20 },
+
+  // --- Quality Check ---
+  { key_name: 'QualityCheck', group_name: 'Operations', display_name: 'Quality Check', sort_order: 30 },
 
   // --- Accountant ---
   // As per your request, this group is currently empty.

@@ -38,6 +38,169 @@ const addHistory = async (conn, { module, moduleId, userId, action, details }) =
     );
 };
 
+// Helper function to generate QC lot number
+const generateQCLotNumber = async (conn) => {
+    const year = new Date().getFullYear().toString().slice(-2);
+    const month = String(new Date().getMonth() + 1).padStart(2, '0');
+    const prefix = `QC${year}${month}`;
+    
+    const [rows] = await conn.query(
+        `SELECT lot_number FROM qc_lots WHERE lot_number LIKE ? ORDER BY lot_number DESC LIMIT 1`,
+        [`${prefix}%`]
+    );
+    
+    let seq = 1;
+    if (rows.length > 0) {
+        const lastNumber = rows[0].lot_number;
+        const match = lastNumber.match(new RegExp(`^${prefix}(\\d{3})$`));
+        if (match) {
+            seq = parseInt(match[1], 10) + 1;
+        }
+    }
+    
+    return `${prefix}${String(seq).padStart(3, '0')}`;
+};
+
+// Auto-create QC lot when shipment transitions from Sailed to Cleared
+const autoCreateQCLot = async (conn, shipmentId, poId, userId) => {
+    try {
+        // Check if QC lot already exists for this shipment
+        const [existing] = await conn.query(
+            'SELECT id FROM qc_lots WHERE shipment_id = ? LIMIT 1',
+            [shipmentId]
+        );
+        
+        if (existing.length > 0) {
+            // QC lot already exists, skip creation
+            return;
+        }
+
+        // Fetch shipment details
+        const [shipments] = await conn.query(`
+            SELECT 
+                s.id, s.ship_uniqid, s.arrival_date, s.arrival_time,
+                po.po_number, po.id as po_id,
+                v.display_name as vendor_name
+            FROM shipment s
+            LEFT JOIN purchase_orders po ON po.id = s.po_id
+            LEFT JOIN vendor v ON v.id = s.vendor_id
+            WHERE s.id = ?
+        `, [shipmentId]);
+
+        if (shipments.length === 0) return;
+        const shipment = shipments[0];
+
+        // Fetch containers
+        const [containers] = await conn.query(`
+            SELECT container_no, id
+            FROM shipment_container
+            WHERE shipment_id = ?
+        `, [shipmentId]);
+
+        // Fetch container items (products)
+        const containerIds = containers.map(c => c.id);
+        let items = [];
+        if (containerIds.length > 0) {
+            const [containerItems] = await conn.query(`
+                SELECT DISTINCT
+                    sci.product_id,
+                    sci.product_name,
+                    pd.variety,
+                    sci.package_type,
+                    SUM(sci.package_count) as total_package_count,
+                    SUM(sci.net_weight) as total_net_weight,
+                    SUM(sci.gross_weight) as total_gross_weight,
+                    i.uom_id
+                FROM shipment_container_item sci
+                LEFT JOIN product_details pd ON pd.product_id = sci.product_id
+                LEFT JOIN purchase_order_items i ON i.item_id = sci.product_id AND i.purchase_order_id = ?
+                WHERE sci.container_id IN (?)
+                GROUP BY sci.product_id, sci.product_name, pd.variety, sci.package_type, i.uom_id
+            `, [poId, containerIds]);
+            items = containerItems;
+        }
+
+        // If no container items, try to get from PO items
+        if (items.length === 0 && poId) {
+            const [poItems] = await conn.query(`
+                SELECT 
+                    i.item_id as product_id,
+                    i.item_name as product_name,
+                    pd.variety,
+                    i.quantity as total_package_count,
+                    i.uom_id
+                FROM purchase_order_items i
+                LEFT JOIN product_details pd ON pd.product_id = i.item_id
+                WHERE i.purchase_order_id = ?
+            `, [poId]);
+            items = poItems;
+        }
+
+        // Generate lot number
+        const lotNumber = await generateQCLotNumber(conn);
+
+        // Get origin info (could be from vendor or shipment)
+        const containerNumber = containers.length > 0 ? containers.map(c => c.container_no).join(', ') : null;
+        const arrivalDateTime = shipment.arrival_date && shipment.arrival_time
+            ? `${shipment.arrival_date} ${shipment.arrival_time}`
+            : shipment.arrival_date || null;
+
+        // Insert QC lot
+        const [lotResult] = await conn.query(`
+            INSERT INTO qc_lots (
+                lot_number, shipment_id, container_number,
+                po_id, po_number, arrival_date_time,
+                status, created_by
+            ) VALUES (?, ?, ?, ?, ?, ?, 'AWAITING_QC', ?)
+        `, [
+            lotNumber,
+            shipmentId,
+            containerNumber,
+            poId || null,
+            shipment.po_number || null,
+            arrivalDateTime,
+            userId
+        ]);
+
+        const qcLotId = lotResult.insertId;
+
+        // Insert lot items
+        if (items.length > 0) {
+            const itemValues = items.map(item => [
+                qcLotId,
+                item.product_id || null,
+                item.product_name || 'Unknown Product',
+                item.variety || null,
+                item.package_type || null,
+                item.total_package_count || null,
+                item.total_net_weight || null,
+                item.uom_id || null
+            ]);
+
+            await conn.query(`
+                INSERT INTO qc_lot_items (
+                    qc_lot_id, product_id, product_name, variety, packaging_type,
+                    declared_quantity_units, declared_quantity_net_weight, uom_id
+                ) VALUES ?
+            `, [itemValues]);
+        }
+
+        // Log history
+        await addHistory(conn, {
+            module: 'shipment',
+            moduleId: shipmentId,
+            userId,
+            action: 'QC_LOT_AUTO_CREATED',
+            details: { qc_lot_id: qcLotId, lot_number: lotNumber }
+        });
+
+    } catch (error) {
+        // Log error but don't fail the shipment transition
+        console.error('Error auto-creating QC lot:', error);
+        // Optionally log to a separate error table or history
+    }
+};
+
 const recordStageHistory = async (connLike, {
     poId = null,
     shipmentId,
@@ -1214,7 +1377,10 @@ router.get("/:shipUniqid", async (req, res) => {
          s.archive_comment,
            cs.country AS company_country,
            ct.name AS container_type_name, 
-           cl.name AS container_load_name
+           cl.name AS container_load_name,
+           -- Linked AP Purchase Bill (if any)
+           s.purchase_bill_id,
+           ab.bill_number AS purchase_bill_number
       FROM shipment s
       JOIN purchase_orders po ON po.id = s.po_id      
       LEFT JOIN mode_of_shipment ms ON ms.id = po.mode_shipment_id
@@ -1231,6 +1397,7 @@ router.get("/:shipUniqid", async (req, res) => {
       LEFT JOIN company_settings cs ON cs.id = po.company_id
       LEFT JOIN currency curr ON curr.id = s.freight_amount_currency_id
       LEFT JOIN container_load cl ON cl.id = po.container_load_id
+      LEFT JOIN ap_bills ab ON ab.id = s.purchase_bill_id
      WHERE s.ship_uniqid = ? LIMIT 1`, [id]);
     if (!row) return res.status(404).json({ error: { message: "Not found" } });
 
@@ -3096,6 +3263,8 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
             confirm_sailing_date, confirm_departure_time, confirm_vessel_name, confirm_eta_date, bl_no, confirm_shipping_line, confirm_discharge_port_agent,
             confirm_airway_bill_no, confirm_flight_no, confirm_airline, confirm_arrival_date, confirm_arrival_time, 
             confirm_free_time,
+            // New: linked AP purchase bill (ap_bills.id)
+            purchase_bill_id,
             is_mofa_required, original_doc_receipt_mode, doc_receipt_person_name, doc_receipt_person_contact,
             doc_receipt_courier_no, doc_receipt_courier_company, doc_receipt_tracking_link,
             documents_meta,
@@ -3199,23 +3368,30 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
         }
 
         // --- 2. Update Shipment with Confirmed Details ---
+        // Coerce purchase_bill_id to integer or null (expects shipment.purchase_bill_id column to exist)
+        const parsedPurchaseBillId = purchase_bill_id ? parseInt(purchase_bill_id, 10) || null : null;
+
         if (isAir) {
             await conn.query(
                 `UPDATE shipment SET 
                     sailing_date = ?,
                     confirm_departure_time = ?,
                     confirm_airway_bill_no = ?, confirm_flight_no = ?, confirm_airline = ?,
-                    confirm_arrival_date = ?, confirm_arrival_time = ?, is_mofa_required = ?,
+                    confirm_arrival_date = ?, confirm_arrival_time = ?, 
+                    is_mofa_required = ?,
                     original_doc_receipt_mode = ?, doc_receipt_person_name = ?, doc_receipt_person_contact = ?,
-                    doc_receipt_courier_no = ?, doc_receipt_courier_company = ?, doc_receipt_tracking_link = ?
+                    doc_receipt_courier_no = ?, doc_receipt_courier_company = ?, doc_receipt_tracking_link = ?,
+                    purchase_bill_id = ?
                  WHERE id = ?`, 
                 [
                     confirm_sailing_date,
                     (confirm_departure_time && confirm_departure_time.trim() !== '') ? confirm_departure_time : null,
                     confirm_airway_bill_no, confirm_flight_no, confirm_airline, 
-                    confirm_arrival_date, (confirm_arrival_time && confirm_arrival_time.trim() !== '') ? confirm_arrival_time : null, is_mofa_required === '1' ? 1 : 0,
+                    confirm_arrival_date, (confirm_arrival_time && confirm_arrival_time.trim() !== '') ? confirm_arrival_time : null, 
+                    is_mofa_required === '1' ? 1 : 0,
                     original_doc_receipt_mode || null, doc_receipt_person_name || null, doc_receipt_person_contact || null,
                     doc_receipt_courier_no || null, doc_receipt_courier_company || null, doc_receipt_tracking_link || null,
+                    parsedPurchaseBillId,
                     shipment.id
                 ]
             );
@@ -3228,16 +3404,18 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
                     confirm_shipping_line = ?, confirm_discharge_port_agent = ?, confirm_free_time = ?,
                     is_mofa_required = ?,
                     original_doc_receipt_mode = ?, doc_receipt_person_name = ?, doc_receipt_person_contact = ?,
-                    doc_receipt_courier_no = ?, doc_receipt_courier_company = ?, doc_receipt_tracking_link = ?
+                    doc_receipt_courier_no = ?, doc_receipt_courier_company = ?, doc_receipt_tracking_link = ?,
+                    purchase_bill_id = ?
                  WHERE id = ?`, 
                 [
                     confirm_sailing_date,
                     confirm_vessel_name, confirm_eta_date,
                     bl_no, confirm_shipping_line, confirm_discharge_port_agent, 
-                    confirm_free_time ? parseInt(confirm_free_time) : null,
+                    confirm_free_time ? parseInt(confirm_free_time, 10) : null,
                     is_mofa_required === '1' ? 1 : 0,
                     original_doc_receipt_mode || null, doc_receipt_person_name || null, doc_receipt_person_contact || null,
                     doc_receipt_courier_no || null, doc_receipt_courier_company || null, doc_receipt_tracking_link || null,
+                    parsedPurchaseBillId,
                     shipment.id
                 ]
             );
@@ -3591,6 +3769,9 @@ router.post("/:shipUniqid/transition/cleared", clearedUploads, async (req, res) 
                 }
             });
             toStageId = 5;
+
+            // Auto-create QC lot when transitioning from Sailed (4) to Cleared (5)
+            await autoCreateQCLot(conn, shipment.id, shipment.po_id, userId);
         } else if (fromStageId === 4) {
             // Save without transitioning - add history log for data update
             await addHistory(conn, {

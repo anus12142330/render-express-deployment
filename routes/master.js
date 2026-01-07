@@ -420,6 +420,32 @@ chart_of_accounts: {
             { name: 'colour', type: 'string' }
         ],
         listOrderBy: 'name'
+    },
+
+    defect_type: {
+        table: 'qc_defect_types',
+        id: 'id',
+        fields: [
+            { name: 'code', type: 'string', required: true },
+            { name: 'name', type: 'string', required: true },
+            { name: 'description', type: 'string' },
+            { name: 'severity', type: 'string', required: true },
+            { name: 'sort_order', type: 'number', default: 0 },
+            { name: 'is_active', type: 'boolean', default: true }
+        ],
+        listOrderBy: 'sort_order, name'
+    },
+
+    system_settings: {
+        table: 'system_settings',
+        id: 'id',
+        fields: [
+            { name: 'setting_key', type: 'string', required: true },
+            { name: 'setting_value', type: 'string', required: true },
+            { name: 'setting_type', type: 'string', required: true },
+            { name: 'description', type: 'string' }
+        ],
+        listOrderBy: 'setting_key'
     }
 };
 
@@ -528,7 +554,16 @@ router.get('/:type', async (req, res, next) => {
         if (cfg.listFrom && cfg.listSelect) {
             // Use requested sort field if valid, otherwise fallback to config or default
             const defaultSortCol = cfg.listOrderBy || `${cfg.listSearchIn?.[0]?.split('.')[0] || 'c'}.${cfg.id}`;
-            const orderBy = sortField ? `${sortField} ${sortOrder}` : `${defaultSortCol} DESC`;
+            // Handle multiple columns in listOrderBy for JOIN queries
+            let orderBy;
+            if (sortField) {
+                orderBy = `${sortField} ${sortOrder}`;
+            } else if (defaultSortCol.includes(',')) {
+                // For JOIN queries with multiple columns, use as-is (columns may have table aliases)
+                orderBy = `${defaultSortCol} ASC`;
+            } else {
+                orderBy = `${defaultSortCol} DESC`;
+            }
 
             // Ignore search query `q` when `all` is requested for dropdowns
             const { whereSql, params } = buildSearchClause(cfg.listSearchIn, all ? '' : q);
@@ -569,7 +604,16 @@ router.get('/:type', async (req, res, next) => {
 
         // Simple table path
         const defaultSortCol = cfg.listOrderBy || cfg.id || 'id';
-        const orderBy = sortField ? `\`${sortField}\` ${sortOrder}` : `\`${defaultSortCol}\` DESC`;
+        // Handle multiple columns in listOrderBy (e.g., 'sort_order, name')
+        let orderByClause;
+        if (defaultSortCol.includes(',')) {
+            // Backtick each column individually
+            const columns = defaultSortCol.split(',').map(col => `\`${col.trim()}\``).join(', ');
+            orderByClause = `${columns} ASC`;
+        } else {
+            orderByClause = `\`${defaultSortCol}\` DESC`;
+        }
+        const orderBy = sortField ? `\`${sortField}\` ${sortOrder}` : orderByClause;
 
         const searchCols = cfg.fields?.map(f => `\`${f.name}\``) || ['`name`'];
         // Ignore search query `q` when `all` is requested for dropdowns
@@ -578,7 +622,16 @@ router.get('/:type', async (req, res, next) => {
         // For dropdowns, we don't need the in_use check.
         if (all) {
             const dropdownOrderBy = cfg.listOrderBy || cfg.fields?.[0]?.name || cfg.id || 'id';
-            const dataSql = `SELECT * FROM \`${cfg.table}\` ${whereSql} ORDER BY \`${dropdownOrderBy}\` ASC`;
+            // Handle multiple columns in listOrderBy
+            let orderByClause;
+            if (dropdownOrderBy.includes(',')) {
+                // Backtick each column individually
+                const columns = dropdownOrderBy.split(',').map(col => `\`${col.trim()}\``).join(', ');
+                orderByClause = `${columns} ASC`;
+            } else {
+                orderByClause = `\`${dropdownOrderBy}\` ASC`;
+            }
+            const dataSql = `SELECT * FROM \`${cfg.table}\` ${whereSql} ORDER BY ${orderByClause}`;
             db.query(dataSql, params, (err, rows) => {
                 if (err) return next(err);
                 return res.json(rows);
