@@ -3682,8 +3682,14 @@ router.get('/reports/waste', requireAuth, async (req, res) => {
 
     if (rows.length === 0) {
       // Diagnostic queries to understand why no data
+      // Extract the conditions after "WHERE 1=1" for reuse, removing leading AND
+      const conditionsOnly = whereClause.replace(/^WHERE\s+1=1\s*/, '').trim();
+      const conditionsWithoutAnd = conditionsOnly.replace(/^\s*AND\s+/, '');
+      const diagnosticWhere = conditionsWithoutAnd ? `WHERE ${conditionsWithoutAnd}` : '';
+      const diagnosticAnd = conditionsWithoutAnd ? `AND ${conditionsWithoutAnd}` : '';
+      
       const [lotCheck] = await db.promise().query(`
-        SELECT COUNT(*) as count FROM qc_lots ql ${whereClause.replace('WHERE 1=1', 'WHERE')}
+        SELECT COUNT(*) as count FROM qc_lots ql ${diagnosticWhere}
       `, params);
       console.log('[Waste Report] Total lots matching date filter:', lotCheck[0]?.count || 0);
 
@@ -3691,7 +3697,7 @@ router.get('/reports/waste', requireAuth, async (req, res) => {
         SELECT COUNT(*) as count, SUM(rejected_quantity_units) as total_rejected
         FROM qc_inspections qi
         INNER JOIN qc_lots ql ON ql.id = qi.qc_lot_id
-        WHERE qi.decision = 'REJECT' ${whereClause.replace('WHERE 1=1', 'AND')}
+        WHERE qi.decision = 'REJECT' ${diagnosticAnd}
       `, params);
       console.log('[Waste Report] Rejected inspections:', rejectedCheck[0]?.count || 0, 'Total rejected units:', rejectedCheck[0]?.total_rejected || 0);
 
@@ -3702,7 +3708,7 @@ router.get('/reports/waste', requireAuth, async (req, res) => {
         INNER JOIN qc_regrading_daily_logs rdl ON rdl.qc_regrading_job_id = rj.id
         WHERE rj.status IN ('COMPLETED', 'CLOSED') 
         AND rdl.discarded_units > 0
-        ${whereClause.replace('WHERE 1=1', 'AND')}
+        ${diagnosticAnd}
       `, params);
       console.log('[Waste Report] Regrading jobs with discarded:', discardedCheck[0]?.count || 0, 'Total discarded units:', discardedCheck[0]?.total_discarded || 0);
     }
