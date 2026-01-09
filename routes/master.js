@@ -208,6 +208,18 @@ const MASTER_CONFIG = {
         fields: [{ name: 'type_name', type: 'string', required: true }],
         listOrderBy: 'type_name'
     },
+    
+    payment_type: {
+        table: 'payment_type',
+        id: 'id',
+        fields: [
+            { name: 'name', type: 'string', required: true },
+            { name: 'code', type: 'string', required: true },
+            { name: 'description', type: 'string' },
+            { name: 'is_active', type: 'boolean', default: true }
+        ],
+        listOrderBy: 'name'
+    },
 
     /* ---------- CHART OF ACCOUNTS – DROPDOWN SOURCES ---------- */
 acc_type: {

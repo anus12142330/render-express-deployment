@@ -147,13 +147,13 @@ async function postBill(conn, billId, userId) {
 
         // Soft delete existing inventory transactions
         if (movementEnabled) {
-            await conn.query(`
-                UPDATE inventory_transactions 
-                SET is_deleted = 1 
-                WHERE source_type = 'AP_BILL' AND source_id = ? 
-                AND txn_type = 'PURCHASE_BILL_RECEIPT'
-                AND (is_deleted = 0 OR is_deleted IS NULL)
-            `, [billId]);
+        await conn.query(`
+            UPDATE inventory_transactions 
+            SET is_deleted = 1 
+            WHERE source_type = 'AP_BILL' AND source_id = ? 
+            AND txn_type = 'PURCHASE_BILL_RECEIPT'
+            AND (is_deleted = 0 OR is_deleted IS NULL)
+        `, [billId]);
         }
     }
 
@@ -254,25 +254,25 @@ async function postBill(conn, billId, userId) {
             // Stock remains in transit until QC decision moves it to regular stock (IN) or discard
             // Use movement = 'IN TRANSIT' (enum value) - stock is not yet available for sale
             if (movementEnabled) {
-                await inventoryService.insertInventoryTransaction(conn, {
-                    txn_date: bill.bill_date,
-                    movement: 'IN TRANSIT', // Enum value - stock is in transit, not yet available
-                    txn_type: 'PURCHASE_BILL_RECEIPT',
-                    source_type: 'AP_BILL',
-                    source_id: billId,
-                    source_line_id: line.id,
-                    product_id: line.product_id,
-                    warehouse_id: bill.warehouse_id,
-                    batch_id: batchId,
-                    qty: qty,
-                    unit_cost: unitCost,
-                    currency_id: bill.currency_id || null,
-                    exchange_rate: exchangeRate,
-                    foreign_amount: amount, // Transaction currency amount
-                    total_amount: aedAmount, // AED converted amount
-                    uom_id: line.uom_id || null,
-                    movement_type_id: 3 // IN_TRANSIT (movement_types.id = 3) - will be moved to regular stock (1) or discard (5) based on QC decision
-                });
+            await inventoryService.insertInventoryTransaction(conn, {
+                txn_date: bill.bill_date,
+                movement: 'IN TRANSIT', // Enum value - stock is in transit, not yet available
+                txn_type: 'PURCHASE_BILL_RECEIPT',
+                source_type: 'AP_BILL',
+                source_id: billId,
+                source_line_id: line.id,
+                product_id: line.product_id,
+                warehouse_id: bill.warehouse_id,
+                batch_id: batchId,
+                qty: qty,
+                unit_cost: unitCost,
+                currency_id: bill.currency_id || null,
+                exchange_rate: exchangeRate,
+                foreign_amount: amount, // Transaction currency amount
+                total_amount: aedAmount, // AED converted amount
+                uom_id: line.uom_id || null,
+                movement_type_id: 3 // IN_TRANSIT (movement_types.id = 3) - will be moved to regular stock (1) or discard (5) based on QC decision
+            });
             }
 
             inventoryValue += qty * unitCost;

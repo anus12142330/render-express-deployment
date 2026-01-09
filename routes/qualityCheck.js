@@ -4058,20 +4058,44 @@ router.get('/reports/export', requireAuth, async (req, res) => {
 // GET /api/quality-check/settings - Get all settings
 router.get('/settings', requireAuth, async (req, res) => {
   try {
-    const [defectTypes] = await db.promise().query(`
-      SELECT * FROM qc_defect_types ORDER BY sort_order, name
-    `);
+    // Fetch defect types (handle if table doesn't exist)
+    let defectTypes = [];
+    try {
+      const [result] = await db.promise().query(`
+        SELECT * FROM qc_defect_types ORDER BY sort_order, name
+      `);
+      defectTypes = result;
+    } catch (e) {
+      console.warn('qc_defect_types table not found or error:', e.message);
+      defectTypes = [];
+    }
 
-    const [productSpecs] = await db.promise().query(`
-      SELECT ps.*, p.product_name as product_name_full
-      FROM qc_product_specs ps
-      LEFT JOIN products p ON p.id = ps.product_id
-      ORDER BY ps.product_name, ps.spec_name
-    `);
+    // Fetch product specs (handle if table doesn't exist)
+    let productSpecs = [];
+    try {
+      const [result] = await db.promise().query(`
+        SELECT ps.*, p.product_name as product_name_full
+        FROM qc_product_specs ps
+        LEFT JOIN products p ON p.id = ps.product_id
+        ORDER BY ps.product_name, ps.spec_name
+      `);
+      productSpecs = result;
+    } catch (e) {
+      console.warn('qc_product_specs table not found or error:', e.message);
+      productSpecs = [];
+    }
 
-    const [config] = await db.promise().query(`
-      SELECT * FROM qc_config WHERE is_active = 1 ORDER BY config_key
-    `);
+    // Fetch config rules (handle if table doesn't exist)
+    let config = [];
+    try {
+      const [result] = await db.promise().query(`
+        SELECT * FROM qc_config WHERE is_active = 1 ORDER BY config_key
+      `);
+      config = result;
+    } catch (e) {
+      console.warn('qc_config table not found or error:', e.message);
+      config = [];
+    }
 
     res.json({
       defect_types: defectTypes,

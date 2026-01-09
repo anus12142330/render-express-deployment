@@ -161,10 +161,10 @@ async function listBills(req, res, next) {
                 u.name as created_by_name,
                 ua.name as approved_by_name,
                 edit_req_user.name as edit_requested_by_name,
-                (SELECT COALESCE(SUM(pa.allocated_amount), 0) 
-                 FROM ap_payment_allocations pa 
-                 WHERE pa.bill_id = ab.id) as paid_amount,
-                (ab.total - COALESCE((SELECT SUM(pa.allocated_amount) FROM ap_payment_allocations pa WHERE pa.bill_id = ab.id), 0)) as outstanding_amount
+                (SELECT COALESCE(SUM(pa.amount_bank), 0) 
+                 FROM tbl_payment_allocation pa 
+                 WHERE pa.bill_id = ab.id AND pa.alloc_type = 'bill') as paid_amount,
+                (ab.total - COALESCE((SELECT SUM(pa.amount_bank) FROM tbl_payment_allocation pa WHERE pa.bill_id = ab.id AND pa.alloc_type = 'bill'), 0)) as outstanding_amount
             FROM ap_bills ab
             LEFT JOIN vendor v ON v.id = ab.supplier_id
             LEFT JOIN currency c ON c.id = ab.currency_id
