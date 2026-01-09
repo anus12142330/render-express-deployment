@@ -919,14 +919,23 @@ async function updateStatus(req, res, next) {
             }
 
             const bill = bills[0];
+            const newStatusId = parseInt(status_id);
 
-            // Only allow status change from DRAFT (3) to SUBMITTED_FOR_APPROVAL (8)
-            if (bill.status_id !== 3) {
-                return res.status(400).json({ error: 'Only DRAFT bills can be submitted for approval' });
-            }
-
-            if (parseInt(status_id) !== 8) {
-                return res.status(400).json({ error: 'Invalid status_id. Only status_id 8 (Submitted for Approval) is allowed' });
+            // Allow status changes:
+            // 1. From DRAFT (3) to SUBMITTED_FOR_APPROVAL (8)
+            // 2. From REJECTED (2) to DRAFT (3) or SUBMITTED_FOR_APPROVAL (8)
+            if (bill.status_id === 3) {
+                // DRAFT can only go to SUBMITTED_FOR_APPROVAL (8)
+                if (newStatusId !== 8) {
+                    return res.status(400).json({ error: 'DRAFT bills can only be changed to SUBMITTED_FOR_APPROVAL (8)' });
+                }
+            } else if (bill.status_id === 2) {
+                // REJECTED can go to DRAFT (3) or SUBMITTED_FOR_APPROVAL (8)
+                if (newStatusId !== 3 && newStatusId !== 8) {
+                    return res.status(400).json({ error: 'REJECTED bills can only be changed to DRAFT (3) or SUBMITTED_FOR_APPROVAL (8)' });
+                }
+            } else {
+                return res.status(400).json({ error: 'Status change not allowed from current status' });
             }
 
             // Fetch status names from status table
@@ -956,7 +965,12 @@ async function updateStatus(req, res, next) {
                 }
             });
 
-            res.json({ success: true, message: 'Status updated successfully' });
+            res.json({ 
+                success: true, 
+                message: 'Status updated successfully',
+                status_id: parseInt(status_id),
+                status_name: toStatusName
+            });
         } catch (error) {
             throw error;
         }
