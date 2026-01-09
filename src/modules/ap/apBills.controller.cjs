@@ -206,7 +206,8 @@ async function getBill(req, res, next) {
                 st.name as status_name,
                 st.bg_colour,
                 st.colour,
-                edit_req_user.name as edit_requested_by_name
+                edit_req_user.name as edit_requested_by_name,
+                po.company_id as po_company_id
             FROM ap_bills ab
             LEFT JOIN vendor v ON v.id = ab.supplier_id
             LEFT JOIN vendor_address va ON va.vendor_id = v.id
@@ -215,6 +216,7 @@ async function getBill(req, res, next) {
             LEFT JOIN currency c ON c.id = ab.currency_id
             LEFT JOIN status st ON st.id = ab.status_id
             LEFT JOIN user edit_req_user ON edit_req_user.id = ab.edit_requested_by
+            LEFT JOIN purchase_orders po ON po.id = ab.purchase_order_id
             WHERE ${whereField} = ?
         `, [id]);
 

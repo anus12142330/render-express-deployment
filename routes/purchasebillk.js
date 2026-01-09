@@ -204,12 +204,14 @@ router.get('/:id', async (req, res, next) => {
                 va.bill_city as vendor_city,
                 vs.name as vendor_state,
                 vc.name as vendor_country,
-                va.bill_zip_code as vendor_postal_code
+                va.bill_zip_code as vendor_postal_code,
+                po.company_id as po_company_id
             FROM purchase_bills pb
             LEFT JOIN vendor v ON v.id = pb.vendor_id
             LEFT JOIN vendor_address va ON va.vendor_id = v.id
             LEFT JOIN state vs ON vs.id = va.bill_state_id
             LEFT JOIN country vc ON vc.id = va.bill_country_id
+            LEFT JOIN purchase_orders po ON po.id = pb.purchase_order_id
             WHERE ${whereField} = ?`, [identifier]);
         if (!bill) return res.status(404).json({ error: 'Bill not found' });
 
