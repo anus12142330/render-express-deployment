@@ -31,6 +31,75 @@ const errPayload = (message, code, details) => ({
   error: { message, code, details }
 });
 
+// Helper function to update bill open balance
+const updateBillOpenBalance = async (conn, billId, paymentCurrencyId = null) => {
+  const [billData] = await conn.query(`
+    SELECT 
+      ab.total,
+      ab.currency_id,
+      COALESCE(
+        (SELECT SUM(
+          CASE 
+            WHEN ? IS NOT NULL AND p.currency_id = ab.currency_id THEN pa.amount_bank
+            ELSE pa.amount_base
+          END
+        )
+         FROM tbl_payment_allocation pa
+         INNER JOIN tbl_payment p ON p.id = pa.payment_id
+         WHERE pa.bill_id = ab.id 
+           AND (p.is_deleted = 0 OR p.is_deleted IS NULL)), 
+        0
+      ) as paid_amount
+    FROM ap_bills ab
+    WHERE ab.id = ?
+  `, [paymentCurrencyId, billId]);
+
+  if (billData.length > 0) {
+    const bill = billData[0];
+    const openBalance = parseFloat(bill.total) - parseFloat(bill.paid_amount);
+    await conn.query(`
+      UPDATE ap_bills 
+      SET open_balance = ? 
+      WHERE id = ?
+    `, [openBalance, billId]);
+  }
+};
+
+// Helper function to update PO open balance
+const updatePOOpenBalance = async (conn, poId, paymentCurrencyId = null) => {
+  const [poData] = await conn.query(`
+    SELECT 
+      po.total,
+      po.currency_id,
+      COALESCE(
+        (SELECT SUM(
+          CASE 
+            WHEN ? IS NOT NULL AND p.currency_id = po.currency_id THEN pa.amount_bank
+            ELSE pa.amount_base
+          END
+        )
+         FROM tbl_payment_allocation pa
+         INNER JOIN tbl_payment p ON p.id = pa.payment_id
+         WHERE pa.po_id = po.id 
+           AND pa.alloc_type = 'advance'
+           AND (p.is_deleted = 0 OR p.is_deleted IS NULL)), 
+        0
+      ) as allocated_amount
+    FROM purchase_orders po
+    WHERE po.id = ?
+  `, [paymentCurrencyId, poId]);
+
+  if (poData.length > 0) {
+    const po = poData[0];
+    const openBalance = parseFloat(po.total) - parseFloat(po.allocated_amount);
+    await conn.query(`
+      UPDATE purchase_orders 
+      SET open_balance = ? 
+      WHERE id = ?
+    `, [openBalance, poId]);
+  }
+};
+
 // Helper function to generate payment number (PAY-OUT-000001 format)
 const generatePaymentNumber = async (conn) => {
   const [rows] = await conn.query(`
@@ -92,11 +161,25 @@ router.get('/payments/vendors/search', requireAuth, async (req, res) => {
 });
 
 // GET /api/payments/vendor/:id/open-bills - Get open bills for a vendor
+// Optional query param: currency_id - filter bills by currency (to match payment currency)
 router.get('/payments/vendor/:id/open-bills', requireAuth, async (req, res) => {
+  const conn = await db.promise().getConnection();
   try {
     const { id } = req.params;
+    const { currency_id } = req.query;
     
-    const [bills] = await db.promise().query(`
+    // Build WHERE clause - filter by currency if provided
+    let currencyFilter = '';
+    const params = [id];
+    if (currency_id) {
+      currencyFilter = ' AND ab.currency_id = ?';
+      params.push(parseInt(currency_id));
+    }
+    
+    // Calculate outstanding amount for each bill
+    // Use amount_bank (payment currency) when payment currency matches bill currency
+    // This ensures correct calculation for multi-currency scenarios
+    const [bills] = await conn.query(`
       SELECT 
         ab.id,
         ab.bill_number,
@@ -106,38 +189,62 @@ router.get('/payments/vendor/:id/open-bills', requireAuth, async (req, res) => {
         ab.currency_id,
         c.name AS currency_code,
         COALESCE(
-          (SELECT SUM(pa.amount_base) 
-           FROM tbl_payment_allocation pa 
+          (SELECT SUM(
+            CASE 
+              WHEN p.currency_id = ab.currency_id THEN pa.amount_bank
+              ELSE pa.amount_base
+            END
+          )
+           FROM tbl_payment_allocation pa
+           INNER JOIN tbl_payment p ON p.id = pa.payment_id
            WHERE pa.bill_id = ab.id 
-             AND pa.payment_id IN (SELECT id FROM tbl_payment WHERE status_id = 1)), 
+             AND (p.is_deleted = 0 OR p.is_deleted IS NULL)), 
           0
         ) as paid_amount,
         (ab.total - COALESCE(
-          (SELECT SUM(pa.amount_base) 
-           FROM tbl_payment_allocation pa 
+          (SELECT SUM(
+            CASE 
+              WHEN p.currency_id = ab.currency_id THEN pa.amount_bank
+              ELSE pa.amount_base
+            END
+          )
+           FROM tbl_payment_allocation pa
+           INNER JOIN tbl_payment p ON p.id = pa.payment_id
            WHERE pa.bill_id = ab.id 
-             AND pa.payment_id IN (SELECT id FROM tbl_payment WHERE status_id = 1)), 
+             AND (p.is_deleted = 0 OR p.is_deleted IS NULL)), 
           0
         )) as outstanding_amount
       FROM ap_bills ab
       LEFT JOIN currency c ON c.id = ab.currency_id
       WHERE ab.supplier_id = ? 
         AND ab.status_id = 1
+        ${currencyFilter}
       HAVING outstanding_amount > 0.01
       ORDER BY ab.bill_date ASC
-    `, [id]);
+    `, params);
+    
+    // Update open_balance field in ap_bills table for each bill
+    for (const bill of bills) {
+      await conn.query(`
+        UPDATE ap_bills 
+        SET open_balance = ? 
+        WHERE id = ?
+      `, [bill.outstanding_amount, bill.id]);
+    }
     
     res.json(bills || []);
   } catch (e) {
     console.error('Error fetching open bills:', e);
     res.status(500).json(errPayload('Failed to fetch open bills', 'DB_ERROR', e.message));
+  } finally {
+    conn.release();
   }
 });
 
 // GET /api/payments/outward - List outward payments
 router.get('/payments/outward', requireAuth, async (req, res) => {
   try {
-    const { page = 1, per_page = 25, search = '' } = req.query;
+    const { page = 1, per_page = 25, search = '', status_id, edit_request_status } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(per_page);
     const searchTerm = `%${search}%`;
     
@@ -147,6 +254,16 @@ router.get('/payments/outward', requireAuth, async (req, res) => {
     if (search) {
       whereClause += " AND (p.payment_number LIKE ? OR p.cheque_no LIKE ? OR p.tt_ref_no LIKE ? OR v.display_name LIKE ?)";
       params.push(searchTerm, searchTerm, searchTerm, searchTerm);
+    }
+    
+    if (status_id) {
+      whereClause += " AND p.status_id = ?";
+      params.push(parseInt(status_id, 10));
+    }
+    
+    if (edit_request_status !== undefined && edit_request_status !== null) {
+      whereClause += " AND p.edit_request_status = ?";
+      params.push(parseInt(edit_request_status, 10));
     }
     
     const [rows] = await db.promise().query(`
@@ -160,7 +277,8 @@ router.get('/payments/outward', requireAuth, async (req, res) => {
         s.bg_colour AS status_bg_colour,
         s.colour AS status_colour,
         created_user.name AS created_by_name,
-        approved_user.name AS approved_by_name
+        approved_user.name AS approved_by_name,
+        edit_req_user.name AS edit_requested_by_name
       FROM tbl_payment p
       LEFT JOIN vendor v ON v.id = p.party_id
       LEFT JOIN acc_bank_details b ON b.id = p.bank_account_id
@@ -168,6 +286,7 @@ router.get('/payments/outward', requireAuth, async (req, res) => {
       LEFT JOIN status s ON s.id = p.status_id
       LEFT JOIN user created_user ON created_user.id = p.created_by
       LEFT JOIN user approved_user ON approved_user.id = p.approved_by
+      LEFT JOIN user edit_req_user ON edit_req_user.id = p.edit_requested_by
       ${whereClause}
       ORDER BY p.transaction_date DESC, p.id DESC
       LIMIT ? OFFSET ?
@@ -355,7 +474,8 @@ router.post('/payments/outward', requireAuth, requirePerm('Purchase', 'create'),
     }
     
     // Get account details (if account is provided)
-    let accountCurrency = 'AED'; // Default currency
+    let accountCurrency = 'AED'; // Payment currency (bank/cash currency)
+    let currencyId = null;       // currency.id for this payment
     let effectiveFxRate = 1.0;
     
     if (accountId) {
@@ -370,17 +490,31 @@ router.post('/payments/outward', requireAuth, requirePerm('Purchase', 'create'),
         return res.status(404).json(errPayload('Account not found', 'NOT_FOUND'));
       }
       
-      // If acc_currency is a currency ID, fetch the currency code
+      // If acc_currency is a currency ID, use it directly; also ensure we know the currency code
+      currencyId = account.acc_currency || null;
       accountCurrency = account.currency_code || 'AED';
       if (!accountCurrency && account.acc_currency) {
         try {
-          const [[currency]] = await conn.query(`SELECT name FROM currency WHERE id = ?`, [account.acc_currency]);
+          const [[currency]] = await conn.query(`SELECT id, name FROM currency WHERE id = ?`, [account.acc_currency]);
           if (currency && currency.name) {
             accountCurrency = currency.name;
+            currencyId = currency.id;
           }
         } catch (e) {
           console.warn('Error fetching currency for account:', e);
           accountCurrency = 'AED';
+        }
+      }
+
+      // If we still don't have a currencyId, try to find it by currency name
+      if (!currencyId && accountCurrency) {
+        try {
+          const [[currencyRow]] = await conn.query(`SELECT id FROM currency WHERE name = ? LIMIT 1`, [accountCurrency]);
+          if (currencyRow && currencyRow.id) {
+            currencyId = currencyRow.id;
+          }
+        } catch (e) {
+          console.warn('Error resolving currency_id for payment:', e);
         }
       }
       
@@ -392,6 +526,16 @@ router.post('/payments/outward', requireAuth, requirePerm('Purchase', 'create'),
       }
       
       effectiveFxRate = fxRate || 1.0;
+    } else {
+      // CASH payments without a specific bank/cash account - default to base currency (e.g., AED)
+      try {
+        const [[baseCurr]] = await conn.query(`SELECT id FROM currency WHERE name = ? LIMIT 1`, [accountCurrency]);
+        if (baseCurr && baseCurr.id) {
+          currencyId = baseCurr.id;
+        }
+      } catch (e) {
+        console.warn('Error resolving base currency_id for CASH payment:', e);
+      }
     }
     
     // Calculate total amount from allocations
@@ -420,22 +564,22 @@ router.post('/payments/outward', requireAuth, requirePerm('Purchase', 'create'),
     // Generate unique ID
     const paymentUniqid = `out_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
     
-    // Insert payment with status_id = 8 (Submitted for Approval)
+    // Insert payment with status_id = 3 (DRAFT)
     const [paymentResult] = await conn.query(`
       INSERT INTO tbl_payment (
         payment_uniqid, payment_number, transaction_date, payment_type, payment_type_id,
         bank_account_id, cash_account_id, cheque_no, cheque_date,
         tt_ref_no, value_date, reference_no,
         direction, party_type, party_id,
-        currency_code, total_amount_bank, total_amount_base, fx_rate,
+        currency_id, currency_code, total_amount_bank, total_amount_base, fx_rate,
         notes, status_id, user_id, created_by, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OUT', 'SUPPLIER', ?, ?, ?, ?, ?, ?, 8, ?, ?, NOW())
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OUT', 'SUPPLIER', ?, ?, ?, ?, ?, ?, ?, 3, ?, ?, NOW())
     `, [
       paymentUniqid, paymentNumber, transaction_date, paymentTypeCode, payment_type_id || null,
       bank_account_id || null, cash_account_id || null,
       cheque_no || null, cheque_date || null,
       tt_ref_no || null, value_date || null, reference_no || null,
-      supplier_id, accountCurrency, totalAmount, totalAmountBase, effectiveFxRate,
+      supplier_id, currencyId || null, accountCurrency, totalAmount, totalAmountBase, effectiveFxRate,
       notes || null, userId, userId
     ]);
     
@@ -449,11 +593,18 @@ router.post('/payments/outward', requireAuth, requirePerm('Purchase', 'create'),
             ab.id,
             ab.bill_number,
             ab.total,
+            ab.currency_id as bill_currency_id,
             COALESCE(
-              (SELECT SUM(pa.amount_base) 
-               FROM tbl_payment_allocation pa 
+              (SELECT SUM(
+                CASE 
+                  WHEN p.currency_id = ab.currency_id THEN pa.amount_bank
+                  ELSE pa.amount_base
+                END
+              )
+               FROM tbl_payment_allocation pa
+               INNER JOIN tbl_payment p ON p.id = pa.payment_id
                WHERE pa.bill_id = ab.id 
-                 AND pa.payment_id IN (SELECT id FROM tbl_payment WHERE status_id = 1)), 
+                 AND (p.is_deleted = 0 OR p.is_deleted IS NULL)), 
               0
             ) as paid_amount
           FROM ap_bills ab
@@ -513,10 +664,10 @@ router.post('/payments/outward', requireAuth, requirePerm('Purchase', 'create'),
         }
       }
       
-      // Validate PO belongs to supplier
+      // Validate PO belongs to supplier (PO table uses vendor_id, not supplier_id)
       if (type === 'advance' && po_id) {
         const [pos] = await conn.query(`
-          SELECT po_number FROM purchase_orders WHERE id = ? AND supplier_id = ?
+          SELECT po_number FROM purchase_orders WHERE id = ? AND vendor_id = ?
         `, [po_id, finalSupplierId]);
         
         if (pos.length === 0) {
@@ -535,6 +686,17 @@ router.post('/payments/outward', requireAuth, requirePerm('Purchase', 'create'),
       `, [
         paymentId, type, bill_id || null, po_id || null, finalSupplierId, allocAmount, allocAmountBase, userId
       ]);
+    }
+    
+    // Update open_balance for all bills and POs affected by this payment
+    const billIds = allocations.filter(a => a.type === 'bill' && a.bill_id).map(a => a.bill_id);
+    for (const billId of billIds) {
+      await updateBillOpenBalance(conn, billId, currencyId);
+    }
+    
+    const poIds = allocations.filter(a => a.type === 'advance' && a.po_id).map(a => a.po_id);
+    for (const poId of poIds) {
+      await updatePOOpenBalance(conn, poId, currencyId);
     }
     
     // Handle attachments
@@ -615,11 +777,20 @@ router.put('/payments/outward/:id', requireAuth, requirePerm('Purchase', 'edit')
       return res.status(404).json(errPayload('Payment not found', 'NOT_FOUND'));
     }
     
-    // Allow editing if status is DRAFT (3), Submitted for Approval (8), or REJECTED (2)
-    if (existingPayment.status_id !== 3 && existingPayment.status_id !== 8 && existingPayment.status_id !== 2) {
+    // Allow editing if status is DRAFT (3), Submitted for Approval (8), REJECTED (2), or APPROVED with approved edit request (status_id = 1 with edit_request_status = 1)
+    const canEdit = existingPayment.status_id === 3 || 
+                    existingPayment.status_id === 8 || 
+                    existingPayment.status_id === 2 ||
+                    (existingPayment.status_id === 1 && existingPayment.edit_request_status === 1);
+    
+    if (!canEdit) {
       await conn.rollback();
-      return res.status(400).json(errPayload('Only DRAFT, Submitted for Approval, or REJECTED payments can be updated', 'VALIDATION_ERROR'));
+      return res.status(400).json(errPayload('Only DRAFT, Submitted for Approval, REJECTED, or APPROVED with approved edit request payments can be updated', 'VALIDATION_ERROR'));
     }
+    
+    // Clear edit_request_status when payment is edited after an approved edit request
+    // Once the user has edited and re-saved, the edit cycle is complete and a new request can be made later.
+    const shouldClearEditRequest = existingPayment.edit_request_status === 1;
     
     // Parse FormData fields (same as POST)
     let allocations = [];
@@ -707,7 +878,8 @@ router.put('/payments/outward/:id', requireAuth, requirePerm('Purchase', 'edit')
     }
     
     // Get account details (if account is provided)
-    let accountCurrency = 'AED'; // Default currency
+    let accountCurrency = 'AED'; // Payment currency (bank/cash currency)
+    let currencyId = null;       // currency.id for this payment
     let effectiveFxRate = 1.0;
     
     if (accountId) {
@@ -722,17 +894,31 @@ router.put('/payments/outward/:id', requireAuth, requirePerm('Purchase', 'edit')
         return res.status(404).json(errPayload('Account not found', 'NOT_FOUND'));
       }
       
-      // If acc_currency is a currency ID, fetch the currency code
+      // If acc_currency is a currency ID, use it directly; also ensure we know the currency code
+      currencyId = account.acc_currency || null;
       accountCurrency = account.currency_code || 'AED';
       if (!accountCurrency && account.acc_currency) {
         try {
-          const [[currency]] = await conn.query(`SELECT name FROM currency WHERE id = ?`, [account.acc_currency]);
+          const [[currency]] = await conn.query(`SELECT id, name FROM currency WHERE id = ?`, [account.acc_currency]);
           if (currency && currency.name) {
             accountCurrency = currency.name;
+            currencyId = currency.id;
           }
         } catch (e) {
           console.warn('Error fetching currency for account:', e);
           accountCurrency = 'AED';
+        }
+      }
+
+      // If we still don't have a currencyId, try to find it by currency name
+      if (!currencyId && accountCurrency) {
+        try {
+          const [[currencyRow]] = await conn.query(`SELECT id FROM currency WHERE name = ? LIMIT 1`, [accountCurrency]);
+          if (currencyRow && currencyRow.id) {
+            currencyId = currencyRow.id;
+          }
+        } catch (e) {
+          console.warn('Error resolving currency_id for payment (update):', e);
         }
       }
       
@@ -744,6 +930,16 @@ router.put('/payments/outward/:id', requireAuth, requirePerm('Purchase', 'edit')
       }
       
       effectiveFxRate = fxRate || 1.0;
+    } else {
+      // CASH payments without a specific bank/cash account - default to base currency (e.g., AED)
+      try {
+        const [[baseCurr]] = await conn.query(`SELECT id FROM currency WHERE name = ? LIMIT 1`, [accountCurrency]);
+        if (baseCurr && baseCurr.id) {
+          currencyId = baseCurr.id;
+        }
+      } catch (e) {
+        console.warn('Error resolving base currency_id for CASH payment (update):', e);
+      }
     }
     
     // Calculate total amount from allocations
@@ -757,36 +953,64 @@ router.put('/payments/outward/:id', requireAuth, requirePerm('Purchase', 'edit')
     const totalAmountBase = totalAmount * effectiveFxRate;
     
     // Update payment and set status back to DRAFT (3) when editing
-    await conn.query(`
-      UPDATE tbl_payment SET
-        transaction_date = ?,
-        payment_type = ?,
-        payment_type_id = ?,
-        bank_account_id = ?,
-        cash_account_id = ?,
-        cheque_no = ?,
-        cheque_date = ?,
-        tt_ref_no = ?,
-        value_date = ?,
-        reference_no = ?,
-        party_id = ?,
-        currency_code = ?,
-        total_amount_bank = ?,
-        total_amount_base = ?,
-        fx_rate = ?,
-        notes = ?,
-        status_id = 3,
-        updated_at = NOW(),
-        updated_by = ?
-      WHERE id = ?
-    `, [
-      transaction_date, paymentTypeCode, payment_type_id || null,
-      bank_account_id || null, cash_account_id || null,
-      cheque_no || null, cheque_date || null,
-      tt_ref_no || null, value_date || null, reference_no || null,
-      supplier_id, accountCurrency, totalAmount, totalAmountBase, effectiveFxRate,
-      notes || null, userId, id
-    ]);
+    // Clear edit_request_status if it was approved
+    const updateQuery = shouldClearEditRequest 
+      ? `UPDATE tbl_payment SET
+          transaction_date = ?,
+          payment_type = ?,
+          payment_type_id = ?,
+          bank_account_id = ?,
+          cash_account_id = ?,
+          cheque_no = ?,
+          cheque_date = ?,
+          tt_ref_no = ?,
+          value_date = ?,
+          reference_no = ?,
+          party_id = ?,
+          currency_id = ?,
+          currency_code = ?,
+          total_amount_bank = ?,
+          total_amount_base = ?,
+          fx_rate = ?,
+          notes = ?,
+          status_id = 3,
+          edit_request_status = NULL,
+          edit_approved_by = NULL,
+          edit_approved_at = NULL,
+          updated_at = NOW(),
+          updated_by = ?
+        WHERE id = ?`
+      : `UPDATE tbl_payment SET
+          transaction_date = ?,
+          payment_type = ?,
+          payment_type_id = ?,
+          bank_account_id = ?,
+          cash_account_id = ?,
+          cheque_no = ?,
+          cheque_date = ?,
+          tt_ref_no = ?,
+          value_date = ?,
+          reference_no = ?,
+          party_id = ?,
+          currency_id = ?,
+          currency_code = ?,
+          total_amount_bank = ?,
+          total_amount_base = ?,
+          fx_rate = ?,
+          notes = ?,
+          status_id = 3,
+          updated_at = NOW(),
+          updated_by = ?
+        WHERE id = ?`;
+    
+    await conn.query(updateQuery, [
+       transaction_date, paymentTypeCode, payment_type_id || null,
+       bank_account_id || null, cash_account_id || null,
+       cheque_no || null, cheque_date || null,
+       tt_ref_no || null, value_date || null, reference_no || null,
+       supplier_id, currencyId || null, accountCurrency, totalAmount, totalAmountBase, effectiveFxRate,
+       notes || null, userId, id
+     ]);
     
     // Get existing allocations for this payment (to exclude from outstanding calculation)
     const [existingAllocations] = await conn.query(`
@@ -799,22 +1023,32 @@ router.put('/payments/outward/:id', requireAuth, requirePerm('Purchase', 'edit')
     // When updating, we need to add back the current payment's allocations to outstanding
     for (const alloc of allocations) {
       if (alloc.type === 'bill' && alloc.bill_id) {
-        // Get current outstanding (excluding this payment's allocations if it was approved)
+        // Get outstanding amount EXCLUDING the current payment's allocations
+        // Formula: Open Balance = Bill Total - (Allocated amounts from all payments EXCEPT current payment)
+        // Use amount_bank when payment currency matches bill currency
         const [bills] = await conn.query(`
           SELECT 
             ab.id,
             ab.bill_number,
             ab.total,
+            ab.currency_id as bill_currency_id,
             COALESCE(
-              (SELECT SUM(pa.amount_base) 
-               FROM tbl_payment_allocation pa 
+              (SELECT SUM(
+                CASE 
+                  WHEN p.currency_id = ab.currency_id THEN pa.amount_bank
+                  ELSE pa.amount_base
+                END
+              )
+               FROM tbl_payment_allocation pa
+               INNER JOIN tbl_payment p ON p.id = pa.payment_id
                WHERE pa.bill_id = ab.id 
-                 AND pa.payment_id IN (SELECT id FROM tbl_payment WHERE status_id = 1)), 
+                 AND (p.is_deleted = 0 OR p.is_deleted IS NULL) 
+                 AND p.id != ?), 
               0
             ) as paid_amount
           FROM ap_bills ab
           WHERE ab.id = ?
-        `, [alloc.bill_id]);
+        `, [id, alloc.bill_id]);
         
         if (bills.length === 0) {
           await conn.rollback();
@@ -823,14 +1057,9 @@ router.put('/payments/outward/:id', requireAuth, requirePerm('Purchase', 'edit')
         
         const bill = bills[0];
         
-        // If this payment was previously approved, add back its allocations to outstanding
-        let outstanding = parseFloat(bill.total) - parseFloat(bill.paid_amount);
-        if (existingPayment.status_id === 1) {
-          const existingAllocForBill = existingAllocations.find(a => a.bill_id === alloc.bill_id);
-          if (existingAllocForBill) {
-            outstanding += parseFloat(existingAllocForBill.amount_base);
-          }
-        }
+        // Outstanding = Bill Total - Allocated amounts (excluding current payment)
+        // Use amount_bank when payment currency matches bill currency
+        const outstanding = parseFloat(bill.total) - parseFloat(bill.paid_amount);
         
         // Sum all new allocations for this bill in the current request
         const totalAllocatedForBill = allocations
@@ -879,10 +1108,10 @@ router.put('/payments/outward/:id', requireAuth, requirePerm('Purchase', 'edit')
         }
       }
       
-      // Validate PO belongs to supplier
+      // Validate PO belongs to supplier (PO table uses vendor_id, not supplier_id)
       if (type === 'advance' && po_id) {
         const [pos] = await conn.query(`
-          SELECT po_number FROM purchase_orders WHERE id = ? AND supplier_id = ?
+          SELECT po_number FROM purchase_orders WHERE id = ? AND vendor_id = ?
         `, [po_id, finalSupplierId]);
         
         if (pos.length === 0) {
@@ -901,6 +1130,17 @@ router.put('/payments/outward/:id', requireAuth, requirePerm('Purchase', 'edit')
       `, [
         id, type, bill_id || null, po_id || null, finalSupplierId, allocAmount, allocAmountBase, userId
       ]);
+    }
+    
+    // Update open_balance for all bills and POs affected by this payment
+    const billIds = allocations.filter(a => a.type === 'bill' && a.bill_id).map(a => a.bill_id);
+    for (const billId of billIds) {
+      await updateBillOpenBalance(conn, billId, currencyId);
+    }
+    
+    const poIds = allocations.filter(a => a.type === 'advance' && a.po_id).map(a => a.po_id);
+    for (const poId of poIds) {
+      await updatePOOpenBalance(conn, poId, currencyId);
     }
     
     // Handle attachments (add new ones, existing ones remain)
@@ -1048,6 +1288,49 @@ router.put('/payments/outward/:id', requireAuth, requirePerm('Purchase', 'edit')
       ]);
     }
     
+    // Update open_balance for all bills affected by this payment update
+    // Get all bill IDs from both old and new allocations
+    const allBillIds = new Set();
+    
+    // Add bill IDs from existing allocations
+    if (existingAllocations.length > 0) {
+      existingAllocations.forEach(a => {
+        if (a.bill_id) allBillIds.add(a.bill_id);
+      });
+    }
+    
+    // Add bill IDs from new allocations
+    allocations.forEach(a => {
+      if (a.type === 'bill' && a.bill_id) allBillIds.add(a.bill_id);
+    });
+    
+    // Update open_balance for each affected bill
+    for (const billId of allBillIds) {
+      const [billData] = await conn.query(`
+        SELECT 
+          ab.total,
+          COALESCE(
+            (SELECT SUM(pa.amount_base) 
+             FROM tbl_payment_allocation pa 
+             WHERE pa.bill_id = ab.id 
+               AND pa.payment_id IN (SELECT id FROM tbl_payment WHERE (is_deleted = 0 OR is_deleted IS NULL))), 
+            0
+          ) as paid_amount
+        FROM ap_bills ab
+        WHERE ab.id = ?
+      `, [billId]);
+      
+      if (billData.length > 0) {
+        const bill = billData[0];
+        const openBalance = parseFloat(bill.total) - parseFloat(bill.paid_amount);
+        await conn.query(`
+          UPDATE ap_bills 
+          SET open_balance = ? 
+          WHERE id = ?
+        `, [openBalance, billId]);
+      }
+    }
+    
     await conn.commit();
     
     // Fetch and return updated payment
@@ -1123,11 +1406,18 @@ router.post('/payments/outward/:id/approve', requireAuth, requirePerm('SUPPLIER_
         const [bills] = await conn.query(`
           SELECT 
             ab.total,
+            ab.currency_id as bill_currency_id,
             COALESCE(
-              (SELECT SUM(pa.amount_base) 
-               FROM tbl_payment_allocation pa 
+              (SELECT SUM(
+                CASE 
+                  WHEN p.currency_id = ab.currency_id THEN pa.amount_bank
+                  ELSE pa.amount_base
+                END
+              )
+               FROM tbl_payment_allocation pa
+               INNER JOIN tbl_payment p ON p.id = pa.payment_id
                WHERE pa.bill_id = ab.id 
-                 AND pa.payment_id IN (SELECT id FROM tbl_payment WHERE status_id = 1)), 
+                 AND (p.is_deleted = 0 OR p.is_deleted IS NULL)), 
               0
             ) as paid_amount
           FROM ap_bills ab
@@ -1149,118 +1439,205 @@ router.post('/payments/outward/:id/approve', requireAuth, requirePerm('SUPPLIER_
       }
     }
     
-    // Determine account (bank or cash) - for CASH payments, account might be null
-    const accountId = payment.bank_account_id || payment.cash_account_id;
+    // Determine account (bank or cash) for GL entry
+    // For CASH payments we always credit the Cash in Hand ledger (from chart of accounts),
+    // not any linked bank account.
     let accountCoaId = null;
-    
-    if (accountId) {
-      // Get account's chart of accounts ID
-      const [[account]] = await conn.query(`
-        SELECT coa_id FROM acc_bank_details WHERE id = ?
-      `, [accountId]);
-      
-      if (!account || !account.coa_id) {
-        await conn.rollback();
-        return res.status(400).json(errPayload('Account does not have a chart of accounts head configured', 'VALIDATION_ERROR'));
-      }
-      
-      accountCoaId = account.coa_id;
-    } else if (payment.payment_type === 'CASH') {
-      // For CASH payments without an account, try to find a default cash account
-      const [cashAccounts] = await conn.query(`
-        SELECT coa_id FROM acc_bank_details 
-        WHERE account_type = 'CASH' OR account_name LIKE '%Cash%'
+
+    if (payment.payment_type === 'CASH') {
+      // Find Cash in Hand account directly from chart of accounts
+      const [cashCoa] = await conn.query(`
+        SELECT id 
+        FROM acc_chart_accounts 
+        WHERE name LIKE '%Cash%' OR id = 3
+        ORDER BY CASE WHEN id = 3 THEN 0 ELSE 1 END, id
         LIMIT 1
       `);
-      
-      if (cashAccounts.length > 0 && cashAccounts[0].coa_id) {
-        accountCoaId = cashAccounts[0].coa_id;
-      } else {
-        // Try to get cash account from chart of accounts
-        const [cashCoa] = await conn.query(`
-          SELECT id FROM acc_chart_accounts 
-          WHERE name LIKE '%Cash%' OR code LIKE '%1000%'
-          LIMIT 1
-        `);
-        
-        if (cashCoa.length > 0) {
-          accountCoaId = cashCoa[0].id;
-        }
+
+      if (cashCoa.length > 0) {
+        accountCoaId = cashCoa[0].id;
       }
-      
+
       // If still no account found, we can't create GL entry
       if (!accountCoaId) {
         await conn.rollback();
-        return res.status(400).json(errPayload('No cash account configured. Please set up a cash account or select one for this payment.', 'VALIDATION_ERROR'));
+        return res.status(400).json(errPayload('Cash in Hand account not found in chart of accounts. Please configure a Cash account.', 'VALIDATION_ERROR'));
       }
     } else {
-      // For CHEQUE and TT, account is required
-      await conn.rollback();
-      return res.status(400).json(errPayload('Account not found', 'VALIDATION_ERROR'));
+      // For CHEQUE and TT we use the selected bank account's COA
+      const accountId = payment.bank_account_id || payment.cash_account_id;
+
+      if (!accountId) {
+        await conn.rollback();
+        return res.status(400).json(errPayload('Bank account is required for non-cash payments', 'VALIDATION_ERROR'));
+      }
+
+      const [[account]] = await conn.query(`
+        SELECT coa_id FROM acc_bank_details WHERE id = ?
+      `, [accountId]);
+
+      if (!account || !account.coa_id) {
+        await conn.rollback();
+        return res.status(400).json(errPayload('Selected bank account does not have a chart of accounts head configured', 'VALIDATION_ERROR'));
+      }
+
+      accountCoaId = account.coa_id;
     }
     
-    // Get vendor's AP account (from vendor_other or use default from chart of accounts)
-    const [[vendor]] = await conn.query(`
-      SELECT vo.ap_account_id 
-      FROM vendor v
-      LEFT JOIN vendor_other vo ON vo.vendor_id = v.id
-      WHERE v.id = ?
-    `, [payment.party_id]);
-    
-    // Use vendor's AP account or default to Accounts Payable (A/P) - ID 6 from chart of accounts
-    let apAccountId = vendor?.ap_account_id;
-    if (!apAccountId) {
-      // Try to get by name "Accounts Payable (A/P)" or use ID 6
-      const [apAccounts] = await conn.query(`
-        SELECT id FROM acc_chart_accounts 
-        WHERE name LIKE '%Accounts Payable%' OR id = 6
-        LIMIT 1
-      `);
-      apAccountId = apAccounts.length > 0 ? apAccounts[0].id : 6;
-    }
-    
+    // Get vendor's AP account if you later decide to store it per-vendor.
+    // Currently we don't rely on vendor_other.ap_account_id (column not present in your DB),
+    // so we fall back to the global Accounts Payable (A/P) account from chart of accounts.
+    let apAccountId = null;
+
+    // Try to get by name "Accounts Payable (A/P)" or fallback to id 6
+    const [apAccounts] = await conn.query(`
+      SELECT id 
+      FROM acc_chart_accounts 
+      WHERE name LIKE '%Accounts Payable%' OR id = 6
+      LIMIT 1
+    `);
+    apAccountId = apAccounts.length > 0 ? apAccounts[0].id : 6;
+
     if (!apAccountId) {
       await conn.rollback();
       return res.status(400).json(errPayload('Accounts Payable account not found in chart of accounts', 'VALIDATION_ERROR'));
     }
     
-    // Create GL journal entry
+    // Before creating a new GL journal, soft-delete any existing journal for this payment
+    // This ensures edits + re-approval don't create duplicate GL entries.
+    await conn.query(`
+      UPDATE gl_journals 
+      SET is_deleted = 1 
+      WHERE source_type = 'OUTWARD_PAYMENT' AND source_id = ?
+    `, [payment.id]);
+
+    // Prepare currency fields for GL journal
+    // foreign_amount = amount in payment form currency (bank/payment currency)
+    // total_amount = payment amount * payment currency conversion (already stored in total_amount_base)
+    let journalCurrencyId = payment.currency_id || null;
+    let journalExchangeRate = null;
+    let journalForeignAmount = parseFloat(payment.total_amount_bank || 0);  // amount in payment (form) currency
+    let journalTotalAmount = parseFloat(payment.total_amount_base || 0);    // amount in base currency (payment amount * conversion)
+
+    // Derive FX and currency_id from bank account if available (for non-cash payments)
+    if (payment.payment_type !== 'CASH') {
+      const accountId = payment.bank_account_id || payment.cash_account_id;
+      if (accountId) {
+        const [[account]] = await conn.query(`
+          SELECT id, currency_code, acc_currency 
+          FROM acc_bank_details 
+          WHERE id = ?
+        `, [accountId]);
+
+        if (account) {
+          // Resolve currency_id if missing
+          if (!journalCurrencyId) {
+            journalCurrencyId = account.acc_currency || null;
+            if (!journalCurrencyId && account.currency_code) {
+              try {
+                const [[curr]] = await conn.query(`SELECT id FROM currency WHERE name = ? LIMIT 1`, [account.currency_code]);
+                if (curr && curr.id) journalCurrencyId = curr.id;
+              } catch (e) {
+                console.warn('Error resolving currency for GL journal:', e);
+              }
+            }
+          }
+
+          // Get FX rate for transaction date (account currency -> base)
+          const fxRate = await getBankExchangeRate(accountId, payment.transaction_date);
+          journalExchangeRate = fxRate && parseFloat(fxRate) > 0 ? parseFloat(fxRate) : 1.0;
+        }
+      }
+    }
+
+    // Fallbacks if FX not resolved
+    if (!journalExchangeRate || journalExchangeRate <= 0) {
+      journalExchangeRate = payment.fx_rate && parseFloat(payment.fx_rate) > 0
+        ? parseFloat(payment.fx_rate)
+        : 1.0;
+    }
+
+    // Create separate GL journal lines for each allocation
+    // Each allocation gets a pair of lines: AP debit and Bank/Cash credit
+    const journalLines = [];
+    
+    for (const alloc of allocations) {
+      // Get allocation amount in payment currency (foreign amount)
+      const allocForeignAmount = parseFloat(alloc.amount_bank || 0);
+      const allocIsAdvance = alloc.alloc_type === 'advance' ? 1 : 0;
+      
+      // Build description based on allocation type
+      let allocDescription = '';
+      if (alloc.alloc_type === 'bill' && alloc.bill_id) {
+        // Get bill number for description
+        const [billInfo] = await conn.query(`
+          SELECT bill_number FROM ap_bills WHERE id = ?
+        `, [alloc.bill_id]);
+        const billNumber = billInfo.length > 0 ? billInfo[0].bill_number : `Bill #${alloc.bill_id}`;
+        allocDescription = `Bill payment ${billNumber} - ${payment.payment_number}`;
+      } else if (alloc.alloc_type === 'advance' && alloc.po_id) {
+        // Get PO number for description
+        const [poInfo] = await conn.query(`
+          SELECT po_number FROM purchase_orders WHERE id = ?
+        `, [alloc.po_id]);
+        const poNumber = poInfo.length > 0 ? poInfo[0].po_number : `PO #${alloc.po_id}`;
+        allocDescription = `PO advance ${poNumber} - ${payment.payment_number}`;
+      } else {
+        allocDescription = `Payment allocation - ${payment.payment_number}`;
+      }
+      
+      // Determine invoice_id (bill_id for bill allocations, po_id for advance allocations)
+      const invoiceId = alloc.alloc_type === 'bill' ? alloc.bill_id : (alloc.alloc_type === 'advance' ? alloc.po_id : null);
+      
+      // Add AP debit line for this allocation
+      journalLines.push({
+        account_id: apAccountId,
+        debit: allocForeignAmount,
+        credit: 0,
+        description: allocDescription,
+        buyer_id: payment.party_id,
+        is_advance: allocIsAdvance,
+        supplier_id: payment.party_id, // Save supplier_id (vendor_id)
+        invoice_id: invoiceId // Save bill_id or po_id as invoice_id
+      });
+      
+      // Add Bank/Cash credit line for this allocation
+      journalLines.push({
+        account_id: accountCoaId,
+        debit: 0,
+        credit: allocForeignAmount,
+        description: allocDescription,
+        buyer_id: payment.party_id,
+        is_advance: allocIsAdvance,
+        supplier_id: payment.party_id, // Save supplier_id (vendor_id)
+        invoice_id: invoiceId // Save bill_id or po_id as invoice_id
+      });
+    }
+    
+    // Create GL journal entry with multiple lines (one pair per allocation)
     await glService.createJournal(conn, {
       source_type: 'OUTWARD_PAYMENT',
       source_id: payment.id,
       journal_date: payment.transaction_date,
       memo: `Outward Payment ${payment.payment_number}`,
       created_by: userId,
+      currency_id: journalCurrencyId,
+      exchange_rate: journalExchangeRate,
+      foreign_amount: journalForeignAmount,
+      total_amount: journalTotalAmount,
       source_name: payment.payment_number,
       source_date: payment.transaction_date,
-      lines: [
-        {
-          account_id: apAccountId,
-          debit: parseFloat(payment.total_amount_base),
-          credit: 0,
-          description: `Accounts Payable payment ${payment.payment_number}`,
-          buyer_id: payment.party_id
-        },
-        {
-          account_id: accountCoaId,
-          debit: 0,
-          credit: parseFloat(payment.total_amount_base),
-          description: `${payment.payment_type} payment ${payment.payment_number}`,
-          buyer_id: payment.party_id
-        }
-      ]
+      lines: journalLines
     });
     
     // Update payment status to APPROVED (1)
-    // Store approval comment in notes if approval_comment column doesn't exist
-    const approvalComment = comment ? `\n\nApproval Comment: ${comment.trim()}` : '';
-    const updatedNotes = payment.notes ? `${payment.notes}${approvalComment}` : approvalComment.trim();
-    
+    // Reset edit_request_status to 0 when approving
+    // Do NOT modify notes; store approval comment only in history
     await conn.query(`
       UPDATE tbl_payment 
-      SET status_id = 1, approved_by = ?, approved_at = NOW(), notes = ?
+      SET status_id = 1, approved_by = ?, approved_at = NOW(), edit_request_status = 0
       WHERE id = ?
-    `, [userId, updatedNotes || payment.notes, payment.id]);
+    `, [userId, payment.id]);
     
     // Add history entry with approval comment
     await conn.query(`
@@ -1276,6 +1653,47 @@ router.post('/payments/outward/:id/approve', requireAuth, requirePerm('SUPPLIER_
         payment_number: payment.payment_number
       })
     ]);
+    
+    // Update open_balance for all bills affected by this payment
+    const billIds = allocations.filter(a => a.alloc_type === 'bill' && a.bill_id).map(a => a.bill_id);
+    for (const billId of billIds) {
+      const [billData] = await conn.query(`
+        SELECT 
+          ab.total,
+          ab.currency_id,
+          COALESCE(
+            (SELECT SUM(
+              CASE 
+                WHEN p.currency_id = ab.currency_id THEN pa.amount_bank
+                ELSE pa.amount_base
+              END
+            )
+             FROM tbl_payment_allocation pa
+             INNER JOIN tbl_payment p ON p.id = pa.payment_id
+             WHERE pa.bill_id = ab.id 
+               AND (p.is_deleted = 0 OR p.is_deleted IS NULL)), 
+            0
+          ) as paid_amount
+        FROM ap_bills ab
+        WHERE ab.id = ?
+      `, [billId]);
+      
+      if (billData.length > 0) {
+        const bill = billData[0];
+        const openBalance = parseFloat(bill.total) - parseFloat(bill.paid_amount);
+        await conn.query(`
+          UPDATE ap_bills 
+          SET open_balance = ? 
+          WHERE id = ?
+        `, [openBalance, billId]);
+      }
+    }
+    
+    // Update open_balance for all POs affected by this payment
+    const poIds = allocations.filter(a => a.alloc_type === 'advance' && a.po_id).map(a => a.po_id);
+    for (const poId of poIds) {
+      await updatePOOpenBalance(conn, poId, payment.currency_id);
+    }
     
     await conn.commit();
     
@@ -1303,7 +1721,7 @@ router.put('/payments/outward/:id/status', requireAuth, requirePerm('Purchase', 
     await conn.beginTransaction();
     
     const { id } = req.params;
-    const { status_id } = req.body;
+    const { status_id, reason, comment } = req.body;
     
     if (!status_id) {
       await conn.rollback();
@@ -1351,7 +1769,24 @@ router.put('/payments/outward/:id/status', requireAuth, requirePerm('Purchase', 
       UPDATE tbl_payment SET status_id = ? WHERE id = ?
     `, [newStatusId, payment.id]);
     
-    // Add history entry
+    // Add history entry - use REJECTED action if rejecting, otherwise STATUS_CHANGED
+    const action = (oldStatusId === 8 && newStatusId === 2) ? 'REJECTED' : 'STATUS_CHANGED';
+    const historyDetails = (oldStatusId === 8 && newStatusId === 2) 
+      ? JSON.stringify({
+          reason: reason || comment || 'No reason provided.',
+          comment: comment || reason || null,
+          from_status_id: oldStatusId,
+          to_status_id: newStatusId,
+          from_status_name: fromStatusName,
+          to_status_name: toStatusName
+        })
+      : JSON.stringify({
+          from_status_id: oldStatusId,
+          to_status_id: newStatusId,
+          from_status_name: fromStatusName,
+          to_status_name: toStatusName
+        });
+    
     await conn.query(`
       INSERT INTO history (module, module_id, user_id, action, details)
       VALUES (?, ?, ?, ?, ?)
@@ -1359,13 +1794,8 @@ router.put('/payments/outward/:id/status', requireAuth, requirePerm('Purchase', 
       'outward_payment',
       payment.id,
       userId,
-      'STATUS_CHANGED',
-      JSON.stringify({
-        from_status_id: oldStatusId,
-        to_status_id: newStatusId,
-        from_status_name: fromStatusName,
-        to_status_name: toStatusName
-      })
+      action,
+      historyDetails
     ]);
     
     await conn.commit();
@@ -1480,6 +1910,185 @@ router.post('/payments/outward/:id/attachments', requireAuth, requirePerm('Purch
   }
 });
 
+// POST /api/payments/outward/:id/request-edit - Request edit for approved payment
+router.post('/payments/outward/:id/request-edit', requireAuth, async (req, res) => {
+  const conn = await db.promise().getConnection();
+  const userId = req.session?.user?.id;
+
+  try {
+    await conn.beginTransaction();
+
+    const { id } = req.params;
+    const { reason } = req.body;
+
+    if (!userId) {
+      await conn.rollback();
+      return res.status(401).json(errPayload('Authentication required', 'AUTH_ERROR'));
+    }
+
+    if (!reason || !reason.trim()) {
+      await conn.rollback();
+      return res.status(400).json(errPayload('A reason for the edit request is required', 'VALIDATION_ERROR'));
+    }
+
+    const isNumeric = /^\d+$/.test(id);
+    const whereField = isNumeric ? 'id' : 'payment_uniqid';
+
+    // Get payment
+    const [payments] = await conn.query(`
+      SELECT id, status_id, edit_request_status 
+      FROM tbl_payment 
+      WHERE ${whereField} = ? AND direction = 'OUT' AND party_type = 'SUPPLIER'
+    `, [id]);
+
+    if (payments.length === 0) {
+      await conn.rollback();
+      return res.status(404).json(errPayload('Payment not found', 'NOT_FOUND'));
+    }
+
+    const payment = payments[0];
+
+    // Only allow edit requests for APPROVED payments (status_id = 1)
+    if (payment.status_id !== 1) {
+      await conn.rollback();
+      return res.status(400).json(errPayload('Only approved payments can have edit requests', 'VALIDATION_ERROR'));
+    }
+
+    // Prevent new requests if one is already pending (3)
+    if (payment.edit_request_status === 3) {
+      await conn.rollback();
+      return res.status(400).json(errPayload('An edit request is already pending for this payment', 'VALIDATION_ERROR'));
+    }
+
+    // Update payment with edit request
+    await conn.query(`
+      UPDATE tbl_payment SET 
+        edit_request_status = 3,
+        edit_requested_by = ?,
+        edit_requested_at = NOW(),
+        edit_request_reason = ?,
+        edit_approved_by = NULL,
+        edit_approved_at = NULL,
+        edit_rejection_reason = NULL
+      WHERE id = ?
+    `, [userId, reason.trim(), payment.id]);
+
+    // Add history entry
+    await conn.query(`
+      INSERT INTO history (module, module_id, user_id, action, details)
+      VALUES (?, ?, ?, ?, ?)
+    `, [
+      'outward_payment',
+      payment.id,
+      userId,
+      'EDIT_REQUESTED',
+      JSON.stringify({ reason: reason.trim() })
+    ]);
+
+    await conn.commit();
+    res.json({ success: true, message: 'Edit request submitted successfully' });
+  } catch (e) {
+    await conn.rollback();
+    console.error('Error requesting edit for payment:', e);
+    res.status(500).json(errPayload('Failed to submit edit request', 'DB_ERROR', e.message));
+  } finally {
+    conn.release();
+  }
+});
+
+// POST /api/payments/outward/:id/decide-edit-request - Approve/reject edit request
+router.post('/payments/outward/:id/decide-edit-request', requireAuth, requirePerm('SUPPLIER_PAYMENT', 'approve'), async (req, res) => {
+  const conn = await db.promise().getConnection();
+  const userId = req.session?.user?.id;
+
+  try {
+    await conn.beginTransaction();
+
+    const { id } = req.params;
+    const { decision, reason } = req.body;
+
+    if (!userId) {
+      await conn.rollback();
+      return res.status(401).json(errPayload('Authentication required', 'AUTH_ERROR'));
+    }
+
+    if (!decision || !['approve', 'reject'].includes(decision)) {
+      await conn.rollback();
+      return res.status(400).json(errPayload('Decision must be \"approve\" or \"reject\"', 'VALIDATION_ERROR'));
+    }
+
+    const isNumeric = /^\d+$/.test(id);
+    const whereField = isNumeric ? 'id' : 'payment_uniqid';
+
+    // Get payment with pending edit request
+    const [payments] = await conn.query(`
+      SELECT id, status_id, edit_request_status 
+      FROM tbl_payment 
+      WHERE ${whereField} = ? AND direction = 'OUT' AND party_type = 'SUPPLIER' AND edit_request_status = 3
+    `, [id]);
+
+    if (payments.length === 0) {
+      await conn.rollback();
+      return res.status(404).json(errPayload('No pending edit request found for this payment', 'NOT_FOUND'));
+    }
+
+    const payment = payments[0];
+
+    if (decision === 'approve') {
+      // Approve edit request - set status to DRAFT (3) to allow editing
+      await conn.query(`
+        UPDATE tbl_payment SET 
+          status_id = 3,
+          edit_request_status = 1,
+          edit_approved_by = ?,
+          edit_approved_at = NOW()
+        WHERE id = ?
+      `, [userId, payment.id]);
+
+      // Add history entry
+      await conn.query(`
+        INSERT INTO history (module, module_id, user_id, action, details)
+        VALUES (?, ?, ?, ?, ?)
+      `, [
+        'outward_payment',
+        payment.id,
+        userId,
+        'EDIT_REQUEST_APPROVED',
+        JSON.stringify({ comment: reason || 'Edit request approved' })
+      ]);
+    } else {
+      // Reject edit request
+      await conn.query(`
+        UPDATE tbl_payment SET 
+          edit_request_status = 2,
+          edit_rejection_reason = ?
+        WHERE id = ?
+      `, [reason || 'Edit request rejected', payment.id]);
+
+      // Add history entry
+      await conn.query(`
+        INSERT INTO history (module, module_id, user_id, action, details)
+        VALUES (?, ?, ?, ?, ?)
+      `, [
+        'outward_payment',
+        payment.id,
+        userId,
+        'EDIT_REQUEST_REJECTED',
+        JSON.stringify({ reason: reason || 'Edit request rejected' })
+      ]);
+    }
+
+    await conn.commit();
+    res.json({ success: true, message: `Edit request ${decision}d successfully` });
+  } catch (e) {
+    await conn.rollback();
+    console.error('Error deciding payment edit request:', e);
+    res.status(500).json(errPayload('Failed to process edit request', 'DB_ERROR', e.message));
+  } finally {
+    conn.release();
+  }
+});
+
 // GET /api/payments/outward/:id/history - Get payment history
 router.get('/payments/outward/:id/history', requireAuth, async (req, res) => {
   try {
@@ -1574,6 +2183,62 @@ router.delete('/payments/outward/:id/attachments/:attachmentId', requireAuth, re
     res.status(500).json(errPayload('Failed to delete attachment', 'DB_ERROR', e.message));
   } finally {
     conn.release();
+  }
+});
+
+// GET /api/payments/outward/:id/journal-entries - Get GL journal entries for payment
+router.get('/payments/outward/:id/journal-entries', requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const isNumeric = /^\d+$/.test(id);
+    const whereField = isNumeric ? 'id' : 'payment_uniqid';
+    
+    // Get payment ID
+    const [payments] = await db.promise().query(`
+      SELECT id FROM tbl_payment 
+      WHERE ${whereField} = ? AND direction = 'OUT' AND party_type = 'SUPPLIER' AND (is_deleted = 0 OR is_deleted IS NULL)
+    `, [id]);
+    
+    if (payments.length === 0) {
+      return res.status(404).json(errPayload('Payment not found', 'NOT_FOUND'));
+    }
+    
+    const paymentId = payments[0].id;
+    
+    // Fetch GL journal entries for this payment
+    const [journalEntries] = await db.promise().query(`
+      SELECT 
+        gj.id as journal_id,
+        gj.journal_number,
+        gj.journal_date,
+        gj.memo,
+        gj.currency_id,
+        gj.exchange_rate,
+        gj.foreign_amount,
+        gj.total_amount,
+        gj.source_name,
+        gj.source_date,
+        gjl.id as line_id,
+        gjl.account_id,
+        gjl.debit,
+        gjl.credit,
+        gjl.description as line_description,
+        gjl.buyer_id,
+        gjl.product_id,
+        aca.name as account_name,
+        aca.id as account_id
+      FROM gl_journals gj
+      INNER JOIN gl_journal_lines gjl ON gjl.journal_id = gj.id
+      LEFT JOIN acc_chart_accounts aca ON aca.id = gjl.account_id
+      WHERE gj.source_type = 'OUTWARD_PAYMENT' AND gj.source_id = ?
+      AND (gj.is_deleted = 0 OR gj.is_deleted IS NULL)
+      ORDER BY gj.journal_date DESC, gj.id DESC, gjl.id ASC
+    `, [paymentId]);
+    
+    res.json({ data: journalEntries || [] });
+  } catch (e) {
+    console.error('Error fetching journal entries:', e);
+    res.status(500).json(errPayload('Failed to fetch journal entries', 'DB_ERROR', e.message));
   }
 });
 

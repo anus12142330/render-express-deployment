@@ -254,6 +254,8 @@ router.get("/", async (req, res) => {
         const createdBy = req.query.created_by;
         const statusId = req.query.status_id;
         const editRequestStatus = req.query.edit_request_status;
+        const currencyId = req.query.currency_id;
+        const vendorId = req.query.vendor_id;
         const params = [];
         let where = "WHERE 1=1";
         if (search) {
@@ -263,17 +265,19 @@ router.get("/", async (req, res) => {
         if (editRequestStatus) { where += " AND po.edit_request_status = ?"; params.push(editRequestStatus); }
         if (createdBy) { where += " AND po.created_by = ?"; params.push(createdBy); }
         if (statusId) { where += " AND po.status_id = ?"; params.push(statusId); }
+        if (currencyId) { where += " AND po.currency_id = ?"; params.push(parseInt(currencyId)); }
+        if (vendorId) { where += " AND po.vendor_id = ?"; params.push(parseInt(vendorId)); }
 
         const [rows] = await db.promise().query(
             `SELECT
          po.id, po.po_number, po.po_uniqid, po.reference_no, po.vendor_id,
          po.trade_type_id, tt.name AS trade_type_name,
          DATE(po.po_date) AS po_date, DATE(po.delivery_date) AS delivery_date, po.subtotal, po.discount_percent,
-         po.total, po.status_id, s.name AS status_name, s.bg_colour, s.colour, po.created_at, po.updated_at,
+         po.total, po.open_balance, po.status_id, s.name AS status_name, s.bg_colour, s.colour, po.created_at, po.updated_at,
          u_creator.name as created_by_name, u_approver.name as approved_by_name, po.approval_comment, po.edit_request_reason,
          edit_req_user.name as edit_requested_by_name, po.edit_requested_at,
          v.display_name AS vendor_name,
-         c.name AS currency_code
+         po.currency_id, c.name AS currency_code
        FROM purchase_orders po
        LEFT JOIN vendor v ON v.id = po.vendor_id
        LEFT JOIN status s ON s.id = po.status_id

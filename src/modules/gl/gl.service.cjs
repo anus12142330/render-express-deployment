@@ -113,13 +113,16 @@ async function createJournal(conn, params) {
                 lineForeignAmount,
                 lineTotalAmount,
                 line.buyer_id || null,
-                line.product_id || null
+                line.product_id || null,
+                line.is_advance !== undefined ? (line.is_advance ? 1 : 0) : 0,
+                line.supplier_id || null,
+                line.invoice_id || null
             ];
         });
 
         await conn.query(`
             INSERT INTO gl_journal_lines 
-            (journal_id, line_no, account_id, debit, credit, entity_type, entity_id, description, currency_id, foreign_amount, total_amount, buyer_id, product_id)
+            (journal_id, line_no, account_id, debit, credit, entity_type, entity_id, description, currency_id, foreign_amount, total_amount, buyer_id, product_id, is_advance, supplier_id, invoice_id)
             VALUES ?
         `, [lineValues]);
     }
