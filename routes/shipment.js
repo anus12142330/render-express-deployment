@@ -1378,9 +1378,8 @@ router.get("/:shipUniqid", async (req, res) => {
            cs.country AS company_country,
            ct.name AS container_type_name, 
            cl.name AS container_load_name,
-           -- Linked AP Purchase Bill (if any)
-           s.purchase_bill_id,
-           ab.bill_number AS purchase_bill_number
+           -- Linked AP Purchase Bill (comma-separated IDs)
+           s.purchase_bill_id
       FROM shipment s
       JOIN purchase_orders po ON po.id = s.po_id      
       LEFT JOIN mode_of_shipment ms ON ms.id = po.mode_shipment_id
@@ -1397,9 +1396,25 @@ router.get("/:shipUniqid", async (req, res) => {
       LEFT JOIN company_settings cs ON cs.id = po.company_id
       LEFT JOIN currency curr ON curr.id = s.freight_amount_currency_id
       LEFT JOIN container_load cl ON cl.id = po.container_load_id
-      LEFT JOIN ap_bills ab ON ab.id = s.purchase_bill_id
      WHERE s.ship_uniqid = ? LIMIT 1`, [id]);
     if (!row) return res.status(404).json({ error: { message: "Not found" } });
+
+    // Fetch purchase bill numbers for comma-separated IDs
+    let purchase_bill_number = null;
+    if (row.purchase_bill_id && row.purchase_bill_id.trim() !== '') {
+        const billIds = row.purchase_bill_id.split(',').map(id => id.trim()).filter(id => id && /^\d+$/.test(id));
+        if (billIds.length > 0) {
+            const placeholders = billIds.map(() => '?').join(',');
+            const [bills] = await db.promise().query(
+                `SELECT bill_number FROM ap_bills WHERE id IN (${placeholders}) ORDER BY id`,
+                billIds
+            );
+            if (bills && bills.length > 0) {
+                purchase_bill_number = bills.map(b => b.bill_number).join(', ');
+            }
+        }
+    }
+    row.purchase_bill_number = purchase_bill_number;
 
     // Fetch PO documents
     const [poDocuments] = await db.promise().query(`
@@ -3368,8 +3383,18 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
         }
 
         // --- 2. Update Shipment with Confirmed Details ---
-        // Coerce purchase_bill_id to integer or null (expects shipment.purchase_bill_id column to exist)
-        const parsedPurchaseBillId = purchase_bill_id ? parseInt(purchase_bill_id, 10) || null : null;
+        // Handle purchase_bill_id as comma-separated string (e.g., "1,2,3")
+        // Validate that all IDs are valid integers if provided
+        let parsedPurchaseBillId = null;
+        if (purchase_bill_id && purchase_bill_id.trim() !== '') {
+            const ids = purchase_bill_id.split(',').map(id => id.trim()).filter(id => id);
+            // Validate all IDs are numeric
+            const validIds = ids.filter(id => /^\d+$/.test(id));
+            if (validIds.length !== ids.length) {
+                return res.status(400).json(errPayload("Invalid purchase bill IDs. All IDs must be numeric."));
+            }
+            parsedPurchaseBillId = validIds.join(',');
+        }
 
         if (isAir) {
             await conn.query(

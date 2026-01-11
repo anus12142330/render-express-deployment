@@ -4345,7 +4345,18 @@ const updatePurchaseBillInventoryFromQCDecision = async (conn, {
     return;
   }
 
-  const purchaseBillId = lotShipment[0].purchase_bill_id;
+  // Handle multiple purchase bills (comma-separated IDs)
+  const purchaseBillIdsStr = String(lotShipment[0].purchase_bill_id || '').trim();
+  if (!purchaseBillIdsStr) {
+    return;
+  }
+  
+  // Parse comma-separated purchase bill IDs
+  const purchaseBillIds = purchaseBillIdsStr.split(',').map(id => id.trim()).filter(id => id && /^\d+$/.test(id));
+  
+  if (purchaseBillIds.length === 0) {
+    return;
+  }
 
   // Get lot item's declared quantity (loaded quantity for this lot)
   const [[lotItem]] = await conn.query(`
@@ -4369,32 +4380,41 @@ const updatePurchaseBillInventoryFromQCDecision = async (conn, {
     return;
   }
 
-  // Get purchase bill transactions for this product that are IN TRANSIT
-  // We need to:
-  // 1. Use as reference for cost, warehouse, batch, etc. to create lot transaction
-  // 2. Reduce quantity to reflect remaining PO quantity (stays IN TRANSIT)
-  const [pbTransactions] = await conn.query(`
-    SELECT it.*, abl.id as bill_line_id, ab.bill_date, ab.currency_id as bill_currency_id
+  // Process each purchase bill - distribute lot quantity across all purchase bills
+  // First, collect all IN TRANSIT transactions from all purchase bills
+  const placeholders = purchaseBillIds.map(() => '?').join(',');
+  const [allPbTransactions] = await conn.query(`
+    SELECT it.*, abl.id as bill_line_id, ab.bill_date, ab.currency_id as bill_currency_id, ab.id as purchase_bill_id
     FROM inventory_transactions it
     LEFT JOIN ap_bill_lines abl ON abl.id = it.source_line_id
     LEFT JOIN ap_bills ab ON ab.id = it.source_id
     WHERE it.source_type = 'AP_BILL'
-      AND it.source_id = ?
+      AND it.source_id IN (${placeholders})
       AND it.product_id = ?
       AND it.movement_type_id = 3
       AND (it.is_deleted = 0 OR it.is_deleted IS NULL)
       AND it.qc_lot_id IS NULL
-    ORDER BY it.id ASC
-  `, [purchaseBillId, product_id]);
+    ORDER BY it.source_id ASC, it.id ASC
+  `, [...purchaseBillIds, product_id]);
 
-  if (pbTransactions.length === 0) {
+  if (allPbTransactions.length === 0) {
     // No IN TRANSIT transactions found - cannot get reference data
-    console.warn(`No purchase bill IN TRANSIT transaction found for bill ${purchaseBillId}, product ${product_id}`);
+    console.warn(`No purchase bill IN TRANSIT transaction found for bills [${purchaseBillIds.join(', ')}], product ${product_id}`);
     return;
   }
 
-  // Calculate total PO quantity in transit
-  const totalPOQty = pbTransactions.reduce((sum, txn) => sum + parseFloat(txn.qty || 0), 0);
+  // Calculate total PO quantity in transit across all purchase bills
+  const totalPOQty = allPbTransactions.reduce((sum, txn) => sum + parseFloat(txn.qty || 0), 0);
+  
+  // Group transactions by purchase bill ID for easier processing
+  const transactionsByBill = {};
+  for (const txn of allPbTransactions) {
+    const billId = String(txn.purchase_bill_id || txn.source_id);
+    if (!transactionsByBill[billId]) {
+      transactionsByBill[billId] = [];
+    }
+    transactionsByBill[billId].push(txn);
+  }
 
   // Special handling for REGRADE:
   // Split declared quantity into sellable (IN) and discard (DISCARD) immediately at inspection approval time.
@@ -4412,109 +4432,115 @@ const updatePurchaseBillInventoryFromQCDecision = async (conn, {
     // Ensure we don't consume more than available IN TRANSIT quantity
     const totalToProcess = Math.min(totalRequested, totalPOQty);
 
-    // Use first PB transaction as reference for cost / currency
-    const refTxn = pbTransactions[0];
-    const txnDate = refTxn.txn_date || new Date().toISOString().split('T')[0];
-    const unitCost = parseFloat(refTxn.unit_cost) || 0;
-    const exchangeRate = parseFloat(refTxn.exchange_rate) || 1;
+    // Process sellable and discard quantities across all purchase bills
+    let remainingSellableQty = Math.min(sellableQty, totalToProcess);
+    let remainingDiscardQty = Math.min(discardQty, totalToProcess);
+    let remainingToReduce = totalToProcess;
 
-    // --- Sellable portion: IN (Regular Stock), movement_type_id = 1, txn_type = 'QC_REGRADE_SELL'
-    if (sellableQty > 0) {
-      const sellQty = Math.min(sellableQty, totalToProcess);
-      const sellAmount = sellQty * unitCost;
-      const sellForeignAmount = sellAmount;
-      const sellTotalAmount = exchangeRate > 0 ? sellAmount * exchangeRate : sellAmount;
-
-      await conn.query(`
-        INSERT INTO inventory_transactions 
-        (txn_date, movement, txn_type, source_type, source_id, source_line_id,
-         product_id, warehouse_id, batch_id, qty, unit_cost, amount,
-         currency_id, exchange_rate, foreign_amount, total_amount, uom_id, movement_type_id,
-         qc_lot_id, qc_inspection_id, qc_posting_type, is_posted)
-        VALUES (?, 'IN', 'QC_REGRADE_SELL', 'AP_BILL', ?, ?,
-                ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?,
-                ?, ?, 'REGRADE_SELL', 1)
-      `, [
-        txnDate, purchaseBillId, refTxn.source_line_id || null,
-        product_id, warehouse_id || refTxn.warehouse_id, refTxn.batch_id, sellQty, unitCost, sellAmount,
-        refTxn.currency_id, exchangeRate, sellForeignAmount, sellTotalAmount, lotUomId || refTxn.uom_id, 1, // REGULAR_IN
-        qc_lot_id, qc_inspection_id || null
-      ]);
-
-      // Update inventory_stock_batches for sellable quantity (stock on hand)
-      await inventoryService.updateInventoryStock(
-        conn,
-        product_id,
-        warehouse_id || refTxn.warehouse_id,
-        refTxn.batch_id,
-        sellQty,
-        unitCost,
-        true,
-        refTxn.currency_id,
-        lotUomId || refTxn.uom_id
-      );
-    }
-
-    // --- Discard portion: DISCARD, movement_type_id = 5, txn_type = 'QC_REGRADE_DISCARD'
-    if (discardQty > 0) {
-      const discQty = Math.min(discardQty, totalToProcess);
-      const discAmount = discQty * unitCost;
-      const discForeignAmount = discAmount;
-      const discTotalAmount = exchangeRate > 0 ? discAmount * exchangeRate : discAmount;
-
-      await conn.query(`
-        INSERT INTO inventory_transactions 
-        (txn_date, movement, txn_type, source_type, source_id, source_line_id,
-         product_id, warehouse_id, batch_id, qty, unit_cost, amount,
-         currency_id, exchange_rate, foreign_amount, total_amount, uom_id, movement_type_id,
-         qc_lot_id, qc_inspection_id, qc_posting_type, is_posted)
-        VALUES (?, 'DISCARD', 'QC_REGRADE_DISCARD', 'AP_BILL', ?, ?,
-                ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?,
-                ?, ?, 'REGRADE_DISCARD', 1)
-      `, [
-        txnDate, purchaseBillId, refTxn.source_line_id || null,
-        product_id, warehouse_id || refTxn.warehouse_id, refTxn.batch_id, discQty, unitCost, discAmount,
-        refTxn.currency_id, exchangeRate, discForeignAmount, discTotalAmount, lotUomId || refTxn.uom_id, 5, // DISCARD
-        qc_lot_id, qc_inspection_id || null
-      ]);
-      // NOTE: DISCARD does NOT change inventory_stock_batches (waste)
-    }
-
-    // Reduce purchase bill IN TRANSIT quantity by totalToProcess (sellable + discard)
-    let remainingLotQty = totalToProcess;
-    for (const txn of pbTransactions) {
-      if (remainingLotQty <= 0) break;
+    // Process transactions sequentially across all purchase bills
+    for (const txn of allPbTransactions) {
+      if (remainingToReduce <= 0) break;
 
       const txnQty = parseFloat(txn.qty) || 0;
       const txnUnitCost = parseFloat(txn.unit_cost) || 0;
       const txnExchangeRate = parseFloat(txn.exchange_rate) || 1;
-      const qtyToReduce = Math.min(remainingLotQty, txnQty);
+      const txnDate = txn.txn_date || new Date().toISOString().split('T')[0];
+      const purchaseBillId = String(txn.purchase_bill_id || txn.source_id);
+      const qtyToReduce = Math.min(remainingToReduce, txnQty);
 
-      if (qtyToReduce > 0) {
-        const newQty = txnQty - qtyToReduce;
+      if (qtyToReduce <= 0) continue;
 
-        if (newQty > 0) {
-          const newAmount = newQty * txnUnitCost;
-          const newForeignAmount = newAmount;
-          const newTotalAmount = txnExchangeRate > 0 ? newAmount * txnExchangeRate : newAmount;
+      // Calculate proportions for sellable and discard
+      const sellablePortion = remainingSellableQty > 0 ? Math.min(remainingSellableQty, qtyToReduce) : 0;
+      const discardPortion = remainingDiscardQty > 0 ? Math.min(remainingDiscardQty, qtyToReduce - sellablePortion) : 0;
 
-          await conn.query(`
-            UPDATE inventory_transactions
-            SET qty = ?, amount = ?, foreign_amount = ?, total_amount = ?
-            WHERE id = ?
-          `, [newQty, newAmount, newForeignAmount, newTotalAmount, txn.id]);
-        } else {
-          await conn.query(`
-            UPDATE inventory_transactions
-            SET qty = 0, amount = 0, foreign_amount = 0, total_amount = 0, is_deleted = 1
-            WHERE id = ?
-          `, [txn.id]);
-        }
+      // --- Sellable portion: IN (Regular Stock), movement_type_id = 1, txn_type = 'QC_REGRADE_SELL'
+      if (sellablePortion > 0) {
+        const sellAmount = sellablePortion * txnUnitCost;
+        const sellForeignAmount = sellAmount;
+        const sellTotalAmount = txnExchangeRate > 0 ? sellAmount * txnExchangeRate : sellAmount;
 
-        remainingLotQty -= qtyToReduce;
+        await conn.query(`
+          INSERT INTO inventory_transactions 
+          (txn_date, movement, txn_type, source_type, source_id, source_line_id,
+           product_id, warehouse_id, batch_id, qty, unit_cost, amount,
+           currency_id, exchange_rate, foreign_amount, total_amount, uom_id, movement_type_id,
+           qc_lot_id, qc_inspection_id, qc_posting_type, is_posted)
+          VALUES (?, 'IN', 'QC_REGRADE_SELL', 'AP_BILL', ?, ?,
+                  ?, ?, ?, ?, ?, ?,
+                  ?, ?, ?, ?, ?, ?,
+                  ?, ?, 'REGRADE_SELL', 1)
+        `, [
+          txnDate, purchaseBillId, txn.source_line_id || null,
+          product_id, warehouse_id || txn.warehouse_id, txn.batch_id, sellablePortion, txnUnitCost, sellAmount,
+          txn.currency_id, txnExchangeRate, sellForeignAmount, sellTotalAmount, lotUomId || txn.uom_id, 1, // REGULAR_IN
+          qc_lot_id, qc_inspection_id || null
+        ]);
+
+        // Update inventory_stock_batches for sellable quantity (stock on hand)
+        await inventoryService.updateInventoryStock(
+          conn,
+          product_id,
+          warehouse_id || txn.warehouse_id,
+          txn.batch_id,
+          sellablePortion,
+          txnUnitCost,
+          true,
+          txn.currency_id,
+          lotUomId || txn.uom_id
+        );
+
+        remainingSellableQty -= sellablePortion;
       }
+
+      // --- Discard portion: DISCARD, movement_type_id = 5, txn_type = 'QC_REGRADE_DISCARD'
+      if (discardPortion > 0) {
+        const discAmount = discardPortion * txnUnitCost;
+        const discForeignAmount = discAmount;
+        const discTotalAmount = txnExchangeRate > 0 ? discAmount * txnExchangeRate : discAmount;
+
+        await conn.query(`
+          INSERT INTO inventory_transactions 
+          (txn_date, movement, txn_type, source_type, source_id, source_line_id,
+           product_id, warehouse_id, batch_id, qty, unit_cost, amount,
+           currency_id, exchange_rate, foreign_amount, total_amount, uom_id, movement_type_id,
+           qc_lot_id, qc_inspection_id, qc_posting_type, is_posted)
+          VALUES (?, 'DISCARD', 'QC_REGRADE_DISCARD', 'AP_BILL', ?, ?,
+                  ?, ?, ?, ?, ?, ?,
+                  ?, ?, ?, ?, ?, ?,
+                  ?, ?, 'REGRADE_DISCARD', 1)
+        `, [
+          txnDate, purchaseBillId, txn.source_line_id || null,
+          product_id, warehouse_id || txn.warehouse_id, txn.batch_id, discardPortion, txnUnitCost, discAmount,
+          txn.currency_id, txnExchangeRate, discForeignAmount, discTotalAmount, lotUomId || txn.uom_id, 5, // DISCARD
+          qc_lot_id, qc_inspection_id || null
+        ]);
+        // NOTE: DISCARD does NOT change inventory_stock_batches (waste)
+
+        remainingDiscardQty -= discardPortion;
+      }
+
+      // Reduce purchase bill IN TRANSIT quantity
+      const newQty = txnQty - qtyToReduce;
+      if (newQty > 0) {
+        const newAmount = newQty * txnUnitCost;
+        const newForeignAmount = newAmount;
+        const newTotalAmount = txnExchangeRate > 0 ? newAmount * txnExchangeRate : newAmount;
+
+        await conn.query(`
+          UPDATE inventory_transactions
+          SET qty = ?, amount = ?, foreign_amount = ?, total_amount = ?
+          WHERE id = ?
+        `, [newQty, newAmount, newForeignAmount, newTotalAmount, txn.id]);
+      } else {
+        await conn.query(`
+          UPDATE inventory_transactions
+          SET qty = 0, amount = 0, foreign_amount = 0, total_amount = 0, is_deleted = 1
+          WHERE id = ?
+        `, [txn.id]);
+      }
+
+      remainingToReduce -= qtyToReduce;
     }
 
     return; // REGRADE handled completely here
@@ -4555,100 +4581,96 @@ const updatePurchaseBillInventoryFromQCDecision = async (conn, {
   // Ensure lot quantity doesn't exceed available PO quantity
   lotQtyToProcess = Math.min(lotQtyToProcess, totalPOQty);
 
-  // Create new inventory transaction for lot quantity (shipment loaded quantity) with qc_lot_id
-  // Use purchase bill transaction as reference for cost, warehouse, batch, etc.
-  const refTxn = pbTransactions[0];
-  const txnDate = refTxn.txn_date || new Date().toISOString().split('T')[0];
-  const unitCost = parseFloat(refTxn.unit_cost) || 0;
-  const exchangeRate = parseFloat(refTxn.exchange_rate) || 1;
-  
-  // Calculate amounts correctly based on lot quantity
-  const amount = lotQtyToProcess * unitCost; // qty * unit_cost = amount
-  const foreignAmount = amount; // Foreign amount is same as amount (in transaction currency)
-  const totalAmount = exchangeRate > 0 ? amount * exchangeRate : amount; // Convert to AED using exchange rate
-  
-  const finalWarehouseId = warehouse_id || refTxn.warehouse_id;
-
-  // Create lot-based inventory transaction (shipment loaded quantity)
-  // source_id and source_line_id reference purchase bill (AP_BILL)
-  // qc_lot_id is kept separately to track which QC lot this transaction belongs to
-  await conn.query(`
-    INSERT INTO inventory_transactions 
-    (txn_date, movement, txn_type, source_type, source_id, source_line_id,
-     product_id, warehouse_id, batch_id, qty, unit_cost, amount,
-     currency_id, exchange_rate, foreign_amount, total_amount, uom_id, movement_type_id,
-     qc_lot_id, qc_inspection_id, qc_posting_type, is_posted)
-    VALUES (?, ?, ?, 'AP_BILL', ?, ?,
-            ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, 1)
-  `, [
-    txnDate, movement, txnType, purchaseBillId, refTxn.source_line_id || null,
-    product_id, finalWarehouseId, refTxn.batch_id, lotQtyToProcess, unitCost, amount,
-    refTxn.currency_id, exchangeRate, foreignAmount, totalAmount, lotUomId || refTxn.uom_id, movementTypeId,
-    qc_lot_id, qc_inspection_id || null, decision
-  ]);
-
-  // Update inventory stock only for REGULAR_IN movements (ACCEPT or SELL_RECHECK decisions)
-  // DISCARD (REJECT) should NOT add to regular stock on hand - it's waste/discarded stock
-  // REGRADE stays in IN TRANSIT, so it doesn't affect stock on hand yet
-  if (movementTypeId === 1) {
-    // ACCEPT and SELL_RECHECK (REGULAR_IN) add to inventory_stock_batches
-    await inventoryService.updateInventoryStock(
-      conn,
-      product_id,
-      finalWarehouseId,
-      refTxn.batch_id,
-      lotQtyToProcess,
-      unitCost,
-      true, // isIn = true (adds to regular stock)
-      refTxn.currency_id,
-      lotUomId || refTxn.uom_id
-    );
-  }
-  // DISCARD (movementTypeId === 5) creates transaction record but does NOT update inventory_stock_batches
-  // The transaction is tracked for reporting but doesn't affect available stock
-
-  // Reduce purchase bill transaction quantity by lot quantity
-  // Remaining PO quantity stays in IN TRANSIT (without qc_lot_id)
-  // Also recalculate amounts (amount, foreign_amount, total_amount) based on remaining quantity
+  // Process lot quantity across all purchase bills sequentially
   let remainingLotQty = lotQtyToProcess;
   
-  for (const txn of pbTransactions) {
+  for (const txn of allPbTransactions) {
     if (remainingLotQty <= 0) break;
     
     const txnQty = parseFloat(txn.qty) || 0;
     const txnUnitCost = parseFloat(txn.unit_cost) || 0;
     const txnExchangeRate = parseFloat(txn.exchange_rate) || 1;
-    const qtyToReduce = Math.min(remainingLotQty, txnQty);
+    const txnDate = txn.txn_date || new Date().toISOString().split('T')[0];
+    const purchaseBillId = String(txn.purchase_bill_id || txn.source_id);
+    const qtyToProcess = Math.min(remainingLotQty, txnQty);
     
-    if (qtyToReduce > 0) {
-      // Reduce quantity from purchase bill transaction
-      const newQty = txnQty - qtyToReduce;
-      
-      if (newQty > 0) {
-        // Recalculate amounts based on remaining quantity
-        const newAmount = newQty * txnUnitCost; // qty * unit_cost = amount
-        const newForeignAmount = newAmount; // Foreign amount is same as amount (in transaction currency)
-        const newTotalAmount = txnExchangeRate > 0 ? newAmount * txnExchangeRate : newAmount; // Convert to AED
-        
-        // Update transaction quantity and amounts (remaining stays IN TRANSIT)
-        await conn.query(`
-          UPDATE inventory_transactions
-          SET qty = ?, amount = ?, foreign_amount = ?, total_amount = ?
-          WHERE id = ?
-        `, [newQty, newAmount, newForeignAmount, newTotalAmount, txn.id]);
-      } else {
-        // Mark transaction as deleted (fully consumed by lot)
-        await conn.query(`
-          UPDATE inventory_transactions
-          SET qty = 0, amount = 0, foreign_amount = 0, total_amount = 0, is_deleted = 1
-          WHERE id = ?
-        `, [txn.id]);
-      }
+    if (qtyToProcess <= 0) continue;
+    
+    // Calculate amounts correctly based on quantity to process
+    const amount = qtyToProcess * txnUnitCost; // qty * unit_cost = amount
+    const foreignAmount = amount; // Foreign amount is same as amount (in transaction currency)
+    const totalAmount = txnExchangeRate > 0 ? amount * txnExchangeRate : amount; // Convert to AED using exchange rate
+    
+    const finalWarehouseId = warehouse_id || txn.warehouse_id;
 
-      remainingLotQty -= qtyToReduce;
+    // Create lot-based inventory transaction (shipment loaded quantity)
+    // source_id and source_line_id reference purchase bill (AP_BILL)
+    // qc_lot_id is kept separately to track which QC lot this transaction belongs to
+    // Ensure txn_type is always set (not NULL)
+    await conn.query(`
+      INSERT INTO inventory_transactions 
+      (txn_date, movement, txn_type, source_type, source_id, source_line_id,
+       product_id, warehouse_id, batch_id, qty, unit_cost, amount,
+       currency_id, exchange_rate, foreign_amount, total_amount, uom_id, movement_type_id,
+       qc_lot_id, qc_inspection_id, qc_posting_type, is_posted)
+      VALUES (?, ?, ?, 'AP_BILL', ?, ?,
+              ?, ?, ?, ?, ?, ?,
+              ?, ?, ?, ?, ?, ?,
+              ?, ?, ?, 1)
+    `, [
+      txnDate, movement, txnType, purchaseBillId, txn.source_line_id || null,
+      product_id, finalWarehouseId, txn.batch_id, qtyToProcess, txnUnitCost, amount,
+      txn.currency_id, txnExchangeRate, foreignAmount, totalAmount, lotUomId || txn.uom_id, movementTypeId,
+      qc_lot_id, qc_inspection_id || null, decision
+    ]);
+
+    // Update inventory stock only for REGULAR_IN movements (ACCEPT or SELL_RECHECK decisions)
+    // DISCARD (REJECT) should NOT add to regular stock on hand - it's waste/discarded stock
+    // REGRADE stays in IN TRANSIT, so it doesn't affect stock on hand yet
+    if (movementTypeId === 1) {
+      // ACCEPT and SELL_RECHECK (REGULAR_IN) add to inventory_stock_batches
+      await inventoryService.updateInventoryStock(
+        conn,
+        product_id,
+        finalWarehouseId,
+        txn.batch_id,
+        qtyToProcess,
+        txnUnitCost,
+        true, // isIn = true (adds to regular stock)
+        txn.currency_id,
+        lotUomId || txn.uom_id
+      );
     }
+    // DISCARD (movementTypeId === 5) creates transaction record but does NOT update inventory_stock_batches
+    // The transaction is tracked for reporting but doesn't affect available stock
+    
+    // Reduce purchase bill transaction quantity by processed quantity
+    // Remaining PO quantity stays in IN TRANSIT (without qc_lot_id)
+    // Also recalculate amounts (amount, foreign_amount, total_amount) based on remaining quantity
+    const newQty = txnQty - qtyToProcess;
+    
+    if (newQty > 0) {
+      // Recalculate amounts based on remaining quantity
+      const newAmount = newQty * txnUnitCost; // qty * unit_cost = amount
+      const newForeignAmount = newAmount; // Foreign amount is same as amount (in transaction currency)
+      const newTotalAmount = txnExchangeRate > 0 ? newAmount * txnExchangeRate : newAmount; // Convert to AED
+      
+      // Update transaction quantity and amounts (remaining stays IN TRANSIT)
+      await conn.query(`
+        UPDATE inventory_transactions
+        SET qty = ?, amount = ?, foreign_amount = ?, total_amount = ?
+        WHERE id = ?
+      `, [newQty, newAmount, newForeignAmount, newTotalAmount, txn.id]);
+    } else {
+      // Mark transaction as deleted (fully consumed by lot)
+      await conn.query(`
+        UPDATE inventory_transactions
+        SET qty = 0, amount = 0, foreign_amount = 0, total_amount = 0, is_deleted = 1
+        WHERE id = ?
+      `, [txn.id]);
+    }
+    
+    remainingLotQty -= qtyToProcess;
   }
 };
 
