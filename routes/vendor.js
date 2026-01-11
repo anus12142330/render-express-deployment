@@ -362,7 +362,7 @@ router.get('/:uniqid/full', async (req, res) => {
         const [usageResult] = await db.promise().query(
             `SELECT (
                 (SELECT 1 FROM purchase_orders WHERE vendor_id = ? LIMIT 1) IS NOT NULL OR
-                (SELECT 1 FROM ap_bills WHERE vendor_id = ? LIMIT 1) IS NOT NULL
+                (SELECT 1 FROM ap_bills WHERE supplier_id = ? LIMIT 1) IS NOT NULL
             ) AS in_use`,
             [vendor.id, vendor.id]
         );
@@ -936,7 +936,7 @@ router.put('/:id/soft-delete', async (req, res) => {
         const [usageResult] = await conn.query(
             `SELECT (
                 (SELECT 1 FROM purchase_orders WHERE vendor_id = ? LIMIT 1) IS NOT NULL OR
-                (SELECT 1 FROM ap_bills WHERE vendor_id = ? LIMIT 1) IS NOT NULL
+                (SELECT 1 FROM ap_bills WHERE supplier_id = ? LIMIT 1) IS NOT NULL
             ) AS in_use`,
             [id, id]
         );
