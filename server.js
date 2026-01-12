@@ -166,9 +166,9 @@ const likeWrap = (s = '') => `%${s || ''}%`;
 
 
 
-// ✅ HEALTH CHECK
+// ✅ HEALTH CHECK (Root endpoint for Render)
 app.get('/', (req, res) => {
-  res.json({ success: true, message: 'API running' });
+  res.json({ success: true, message: 'API running', timestamp: new Date().toISOString() });
 });
 
 app.use("/api/purchaseorder", purchaseorderRoutes);
@@ -576,11 +576,14 @@ app.get('/api/products/metadata', (req, res) => {
 });
 
 
-// (optional) quick health check
+// Health check endpoint (used by Render)
 app.get('/api/health', (req, res) => {
     db.query('SELECT 1', (err) => {
-        if (err) return res.status(500).json({ ok: false, message: err.message });
-        res.json({ ok: true });
+        if (err) {
+            console.error('Health check DB error:', err.message);
+            return res.status(500).json({ ok: false, message: err.message });
+        }
+        res.json({ ok: true, timestamp: new Date().toISOString() });
     });
 });
 
@@ -1366,4 +1369,31 @@ app.get('/api/product-interests', async (req, res) => {
 // ✅ START SERVER
 // server/server.js (Render)
 const PORT = process.env.PORT || 5700;
-app.listen(PORT, '0.0.0.0', () => console.log('API on', PORT));
+
+// Add error handlers to prevent crashes
+process.on('uncaughtException', (err) => {
+  console.error('❌ Uncaught Exception:', err);
+  // Don't exit in production - let Render handle it
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+  // Don't exit in production - let Render handle it
+});
+
+// Test database connection before starting server
+db.getConnection((err, connection) => {
+  if (err) {
+    console.error('❌ Database connection error:', err.message);
+    // Don't exit - let the server start and handle errors gracefully
+  } else {
+    console.log('✅ Database connection successful');
+    connection.release();
+  }
+});
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`✅ Server started successfully on port ${PORT}`);
+  console.log(`✅ Health check available at: http://0.0.0.0:${PORT}/`);
+  console.log(`✅ API health check at: http://0.0.0.0:${PORT}/api/health`);
+});
