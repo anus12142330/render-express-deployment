@@ -1471,4 +1471,97 @@ router.get('/:id/latest-credit-request', async (req, res) => {
     }
 });
 
+/* ================================
+   GET /api/customers/:id/invoice-payments
+   Get customer invoices that have payments allocated to them (from customer receivables)
+================================ */
+router.get('/:id/invoice-payments', async (req, res, next) => {
+    try {
+        const customerId = parseInt(req.params.id, 10);
+        if (!customerId || !Number.isFinite(customerId)) {
+            return res.status(400).json(errPayload('Invalid customer ID'));
+        }
+
+        // Get invoices that have payment allocations
+        const [invoicePayments] = await db.promise().query(`
+            SELECT DISTINCT
+                ai.id,
+                ai.invoice_uniqid,
+                ai.invoice_number,
+                ai.invoice_date,
+                ai.total,
+                ai.currency_id,
+                c.name as currency_code,
+                s.name as status_name,
+                SUM(CASE 
+                    WHEN p.currency_id = ai.currency_id THEN pa.amount_bank
+                    ELSE pa.amount_base
+                END) as total_paid,
+                COUNT(DISTINCT p.id) as payment_count
+            FROM ar_invoices ai
+            INNER JOIN tbl_payment_allocation pa ON pa.reference_id = ai.id AND pa.alloc_type = 'invoice'
+            INNER JOIN tbl_payment p ON p.id = pa.payment_id
+            LEFT JOIN currency c ON c.id = ai.currency_id
+            LEFT JOIN status s ON s.id = ai.status_id
+            WHERE ai.customer_id = ?
+              AND (p.is_deleted = 0 OR p.is_deleted IS NULL)
+            GROUP BY ai.id, ai.invoice_uniqid, ai.invoice_number, ai.invoice_date, ai.total, ai.currency_id, c.name, s.name
+            ORDER BY ai.invoice_date DESC, ai.id DESC
+        `, [customerId]);
+
+        res.json({ data: invoicePayments || [] });
+    } catch (e) {
+        console.error('Error fetching invoice payments:', e);
+        next(e);
+    }
+});
+
+/* ================================
+   GET /api/customers/:id/proforma-receives
+   Get customer receivables that have proforma invoices allocated to them
+================================ */
+router.get('/:id/proforma-receives', async (req, res, next) => {
+    try {
+        const customerId = parseInt(req.params.id, 10);
+        if (!customerId || !Number.isFinite(customerId)) {
+            return res.status(400).json(errPayload('Invalid customer ID'));
+        }
+
+        // Get customer receivables that have proforma invoice allocations (advance payments)
+        const [proformaReceives] = await db.promise().query(`
+            SELECT DISTINCT
+                p.id,
+                p.payment_uniqid,
+                p.payment_number,
+                p.transaction_date,
+                p.currency_id,
+                c.name as currency_code,
+                s.name as status_name,
+                pt.name as payment_type_name,
+                SUM(CASE 
+                    WHEN p.currency_id = pi.currency_sale THEN pa.amount_bank
+                    ELSE pa.amount_base
+                END) as total_allocated,
+                COUNT(DISTINCT pi.id) as proforma_count,
+                GROUP_CONCAT(DISTINCT pi.proforma_invoice_no ORDER BY pi.proforma_invoice_no SEPARATOR ', ') as proforma_numbers
+            FROM tbl_payment p
+            INNER JOIN tbl_payment_allocation pa ON pa.payment_id = p.id AND pa.alloc_type = 'advance'
+            INNER JOIN proforma_invoice pi ON pi.id = pa.reference_id
+            LEFT JOIN currency c ON c.id = p.currency_id
+            LEFT JOIN status s ON s.id = p.status_id
+            LEFT JOIN payment_type pt ON pt.id = p.payment_type_id
+            WHERE p.party_id = ?
+              AND p.is_customer_payment = 1
+              AND (p.is_deleted = 0 OR p.is_deleted IS NULL)
+            GROUP BY p.id, p.payment_uniqid, p.payment_number, p.transaction_date, p.currency_id, c.name, s.name, pt.name
+            ORDER BY p.transaction_date DESC, p.id DESC
+        `, [customerId]);
+
+        res.json({ data: proformaReceives || [] });
+    } catch (e) {
+        console.error('Error fetching proforma receives:', e);
+        next(e);
+    }
+});
+
 export default router;

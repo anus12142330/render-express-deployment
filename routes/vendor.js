@@ -781,13 +781,24 @@ router.post('/attachment/:id/update', uploadVendor.single('file'), async (req, r
         // The main create/update routes do. If thumbnail is needed here,
         // sharp.js logic would be added.
     }
-    // Only push expiry_date if it's actually provided in the body
+    
+    // Only push expiry_date if it's actually provided in the body (even if empty string, allow null)
     if (expiry_date !== undefined) {
         updates.push('expiry_date = ?');
+        values.push(expiry_date || null);
     }
-    updates.push('document_type_id = ?');
-    values.push(expiry_date || null);
-    values.push(document_type_id || null);
+    
+    // Only push document_type_id if it's provided
+    if (document_type_id !== undefined) {
+        updates.push('document_type_id = ?');
+        values.push(document_type_id || null);
+    }
+    
+    // If no updates, return error
+    if (updates.length === 0) {
+        return res.status(400).json(errPayload('No fields to update', 'VALIDATION_ERROR'));
+    }
+    
     values.push(id);
 
     try {
@@ -1146,6 +1157,99 @@ router.get('/:id/statement', async (req, res, next) => {
     } catch (err) {
         console.error('vendors/:id/statement:', err);
         next(err);
+    }
+});
+
+/* ================================
+   GET /api/vendors/:id/bill-payments
+   Get bills that have payments allocated to them (from supplier payments)
+================================ */
+router.get('/:id/bill-payments', async (req, res, next) => {
+    try {
+        const vendorId = parseInt(req.params.id, 10);
+        if (!vendorId || !Number.isFinite(vendorId)) {
+            return res.status(400).json(errPayload('Invalid vendor ID'));
+        }
+
+        // Get bills that have payment allocations
+        const [billPayments] = await db.promise().query(`
+            SELECT DISTINCT
+                ab.id,
+                ab.bill_uniqid,
+                ab.bill_number,
+                ab.bill_date,
+                ab.total,
+                ab.currency_id,
+                c.name as currency_code,
+                s.name as status_name,
+                SUM(CASE 
+                    WHEN p.currency_id = ab.currency_id THEN pa.amount_bank
+                    ELSE pa.amount_base
+                END) as total_paid,
+                COUNT(DISTINCT p.id) as payment_count
+            FROM ap_bills ab
+            INNER JOIN tbl_payment_allocation pa ON pa.bill_id = ab.id AND pa.alloc_type = 'bill'
+            INNER JOIN tbl_payment p ON p.id = pa.payment_id
+            LEFT JOIN currency c ON c.id = ab.currency_id
+            LEFT JOIN status s ON s.id = ab.status_id
+            WHERE ab.supplier_id = ?
+              AND (p.is_deleted = 0 OR p.is_deleted IS NULL)
+            GROUP BY ab.id, ab.bill_uniqid, ab.bill_number, ab.bill_date, ab.total, ab.currency_id, c.name, s.name
+            ORDER BY ab.bill_date DESC, ab.id DESC
+        `, [vendorId]);
+
+        res.json({ data: billPayments || [] });
+    } catch (e) {
+        console.error('Error fetching bill payments:', e);
+        next(e);
+    }
+});
+
+/* ================================
+   GET /api/vendors/:id/purchase-receives
+   Get supplier payments that have purchase orders allocated to them
+================================ */
+router.get('/:id/purchase-receives', async (req, res, next) => {
+    try {
+        const vendorId = parseInt(req.params.id, 10);
+        if (!vendorId || !Number.isFinite(vendorId)) {
+            return res.status(400).json(errPayload('Invalid vendor ID'));
+        }
+
+        // Get supplier payments that have PO allocations (advance payments)
+        const [purchaseReceives] = await db.promise().query(`
+            SELECT DISTINCT
+                p.id,
+                p.payment_uniqid,
+                p.payment_number,
+                p.transaction_date,
+                p.currency_id,
+                c.name as currency_code,
+                s.name as status_name,
+                pt.name as payment_type_name,
+                SUM(CASE 
+                    WHEN p.currency_id = po.currency_id THEN pa.amount_bank
+                    ELSE pa.amount_base
+                END) as total_allocated,
+                COUNT(DISTINCT po.id) as po_count,
+                GROUP_CONCAT(DISTINCT po.po_number ORDER BY po.po_number SEPARATOR ', ') as po_numbers
+            FROM tbl_payment p
+            INNER JOIN tbl_payment_allocation pa ON pa.payment_id = p.id AND pa.alloc_type = 'advance'
+            INNER JOIN purchase_orders po ON po.id = pa.po_id
+            LEFT JOIN currency c ON c.id = p.currency_id
+            LEFT JOIN status s ON s.id = p.status_id
+            LEFT JOIN payment_type pt ON pt.id = p.payment_type_id
+            WHERE p.party_id = ?
+              AND p.is_customer_payment = 0
+              AND (p.is_deleted = 0 OR p.is_deleted IS NULL)
+            GROUP BY p.id, p.payment_uniqid, p.payment_number, p.transaction_date, p.currency_id, c.name, s.name, pt.name
+            ORDER BY p.transaction_date DESC, p.id DESC
+        `, [vendorId]);
+
+        res.json({ data: purchaseReceives || [] });
+    } catch (e) {
+        console.error('Error fetching purchase receives:', e);
+        next(e);
     }
 });
 

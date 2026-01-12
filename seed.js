@@ -36,7 +36,7 @@ const MODULES = [
   { key_name: 'QualityCheck', group_name: 'Operations', display_name: 'Quality Check', sort_order: 30 },
 
   // --- Accountant ---
-  // As per your request, this group is currently empty.
+  { key_name: 'InternalFundTransfer', group_name: 'Accountant', display_name: 'Internal Fund Transfer', sort_order: 10 },
 
   // --- Settings ---
   { key_name: 'OrganisationUsersRoles', group_name: 'Settings', display_name: 'Profile', sort_order: 10 },

@@ -1301,6 +1301,90 @@ async function getBillJournalEntries(req, res, next) {
     }
 }
 
+async function getBillPaymentAllocations(req, res, next) {
+    try {
+        const { id } = req.params;
+        const isNumeric = /^\d+$/.test(id);
+        const whereField = isNumeric ? 'ab.id' : 'ab.bill_uniqid';
+        
+        // Get bill info
+        const [[bill]] = await pool.query(`
+            SELECT ab.id, ab.bill_uniqid, ab.bill_number, ab.total, ab.currency_id, ab.bill_date,
+                   c.name as currency_code, v.display_name as supplier_name
+            FROM ap_bills ab
+            LEFT JOIN currency c ON c.id = ab.currency_id
+            LEFT JOIN vendor v ON v.id = ab.supplier_id
+            WHERE ${whereField} = ?
+        `, [id]);
+        
+        if (!bill) {
+            return res.status(404).json({ error: 'Bill not found' });
+        }
+        
+        // Get payment allocations for this bill
+        const [allocations] = await pool.query(`
+            SELECT 
+                pa.id,
+                pa.amount_bank,
+                pa.amount_base,
+                p.id as payment_id,
+                p.payment_uniqid,
+                p.payment_number,
+                p.transaction_date,
+                p.payment_type,
+                p.status_id,
+                p.currency_id as payment_currency_id,
+                p.currency_code as payment_currency_code,
+                s.name as payment_status_name,
+                pt.name as payment_type_name
+            FROM tbl_payment_allocation pa
+            INNER JOIN tbl_payment p ON p.id = pa.payment_id
+            LEFT JOIN status s ON s.id = p.status_id
+            LEFT JOIN payment_type pt ON pt.id = p.payment_type_id
+            WHERE pa.bill_id = ?
+              AND pa.alloc_type = 'bill'
+              AND (p.is_deleted = 0 OR p.is_deleted IS NULL)
+            ORDER BY p.transaction_date DESC, p.id DESC
+        `, [bill.id]);
+        
+        // Calculate totals
+        const totalAmount = parseFloat(bill.total || 0);
+        const totalAdjusted = allocations.reduce((sum, alloc) => {
+            // Use amount_bank if payment currency matches bill currency, otherwise amount_base
+            const billCurrencyId = bill.currency_id;
+            const paymentCurrencyId = alloc.payment_currency_id;
+            const amount = (billCurrencyId && paymentCurrencyId && billCurrencyId === paymentCurrencyId) 
+                ? parseFloat(alloc.amount_bank || 0) 
+                : parseFloat(alloc.amount_base || 0);
+            return sum + amount;
+        }, 0);
+        const outstanding = totalAmount - totalAdjusted;
+        
+        res.json({
+            bill: {
+                id: bill.id,
+                bill_uniqid: bill.bill_uniqid,
+                bill_number: bill.bill_number,
+                bill_date: bill.bill_date,
+                total: totalAmount,
+                currency_id: bill.currency_id,
+                currency_code: bill.currency_code,
+                supplier_name: bill.supplier_name
+            },
+            allocations: allocations || [],
+            summary: {
+                total_amount: totalAmount,
+                total_adjusted: totalAdjusted,
+                outstanding: outstanding,
+                currency_code: bill.currency_code
+            }
+        });
+    } catch (e) {
+        console.error('Error fetching payment allocations:', e);
+        next(e);
+    }
+}
+
 module.exports = {
     listBills,
     getBill,
@@ -1317,6 +1401,7 @@ module.exports = {
     addAttachment,
     deleteAttachment,
     getBillJournalEntries,
+    getBillPaymentAllocations,
     billUpload // Export multer middleware for routes
 };
 

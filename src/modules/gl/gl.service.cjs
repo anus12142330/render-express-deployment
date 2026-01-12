@@ -20,6 +20,8 @@ async function createJournal(conn, params) {
         total_amount = null,
         source_name = null,
         source_date = null,
+        reconcile_date = null,
+        reconcile_number = null,
         is_deleted = 0,
         lines = []
     } = params;
@@ -70,10 +72,10 @@ async function createJournal(conn, params) {
     const [journalResult] = await conn.query(`
         INSERT INTO gl_journals 
         (journal_number, journal_date, source_type, source_id, memo, created_by,
-         currency_id, exchange_rate, foreign_amount, total_amount, source_name, source_date, is_deleted)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         currency_id, exchange_rate, foreign_amount, total_amount, source_name, source_date, reconcile_date, reconcile_number, is_deleted)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [journalNumber, journal_date, source_type, source_id, memo, created_by,
-        currency_id, exchange_rate, journalForeignAmount, journalTotalAmount, source_name, source_date, is_deleted]);
+        currency_id, exchange_rate, journalForeignAmount, journalTotalAmount, source_name, source_date, reconcile_date, reconcile_number, is_deleted]);
 
     const journalId = journalResult.insertId;
 
@@ -89,14 +91,17 @@ async function createJournal(conn, params) {
             let lineForeignAmount = null;
             let lineTotalAmount = null;
             
-            if (currency_id && exchange_rate && exchange_rate > 0) {
+            // Check if it's default currency (exchange_rate === 1.0 or no exchange_rate)
+            const isDefaultCurrency = !exchange_rate || parseFloat(exchange_rate) === 1.0;
+            
+            if (currency_id && exchange_rate && exchange_rate > 0 && !isDefaultCurrency) {
                 // Journal has foreign currency - convert line amounts
                 lineForeignAmount = lineAmount; // Line amount is in foreign currency
                 lineTotalAmount = lineAmount * parseFloat(exchange_rate); // Convert to default currency
             } else {
-                // No foreign currency - line amount is already in default currency
-                lineCurrencyId = null;
-                lineForeignAmount = null;
+                // Default currency (AED) - always save currency_id and set foreign_amount = total_amount
+                lineCurrencyId = currency_id; // Keep currency_id even for default currency
+                lineForeignAmount = lineAmount; // For default currency, foreign_amount = total_amount
                 lineTotalAmount = lineAmount;
             }
             

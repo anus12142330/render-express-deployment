@@ -97,12 +97,16 @@ const autoCreateQCLot = async (conn, shipmentId, poId, userId) => {
             WHERE shipment_id = ?
         `, [shipmentId]);
 
-        // Fetch container items (products)
+        // Fetch container items grouped by container + product
+        // This will create multiple qc_lot_items - one for each container+product combination
         const containerIds = containers.map(c => c.id);
-        let items = [];
+        let containerProductGroups = [];
         if (containerIds.length > 0) {
+            // Group by container_id AND product_id to create separate items for each combination
             const [containerItems] = await conn.query(`
-                SELECT DISTINCT
+                SELECT 
+                    sci.container_id,
+                    sc.container_no,
                     sci.product_id,
                     sci.product_name,
                     pd.variety,
@@ -112,40 +116,50 @@ const autoCreateQCLot = async (conn, shipmentId, poId, userId) => {
                     SUM(sci.gross_weight) as total_gross_weight,
                     i.uom_id
                 FROM shipment_container_item sci
+                LEFT JOIN shipment_container sc ON sc.id = sci.container_id
                 LEFT JOIN product_details pd ON pd.product_id = sci.product_id
                 LEFT JOIN purchase_order_items i ON i.item_id = sci.product_id AND i.purchase_order_id = ?
                 WHERE sci.container_id IN (?)
-                GROUP BY sci.product_id, sci.product_name, pd.variety, sci.package_type, i.uom_id
+                GROUP BY sci.container_id, sc.container_no, sci.product_id, sci.product_name, pd.variety, sci.package_type, i.uom_id
+                ORDER BY sci.container_id, sci.product_id
             `, [poId, containerIds]);
-            items = containerItems;
+            containerProductGroups = containerItems;
         }
 
-        // If no container items, try to get from PO items
-        if (items.length === 0 && poId) {
+        // If no container items, try to get from PO items (fallback - create one lot per product)
+        if (containerProductGroups.length === 0 && poId) {
             const [poItems] = await conn.query(`
                 SELECT 
+                    NULL as container_id,
+                    NULL as container_no,
                     i.item_id as product_id,
                     i.item_name as product_name,
                     pd.variety,
+                    NULL as package_type,
                     i.quantity as total_package_count,
+                    NULL as total_net_weight,
+                    NULL as total_gross_weight,
                     i.uom_id
                 FROM purchase_order_items i
                 LEFT JOIN product_details pd ON pd.product_id = i.item_id
                 WHERE i.purchase_order_id = ?
             `, [poId]);
-            items = poItems;
+            containerProductGroups = poItems;
         }
 
-        // Generate lot number
-        const lotNumber = await generateQCLotNumber(conn);
-
-        // Get origin info (could be from vendor or shipment)
-        const containerNumber = containers.length > 0 ? containers.map(c => c.container_no).join(', ') : null;
         const arrivalDateTime = shipment.arrival_date && shipment.arrival_time
             ? `${shipment.arrival_date} ${shipment.arrival_time}`
             : shipment.arrival_date || null;
 
-        // Insert QC lot
+        // Generate single lot number for this shipment
+        const lotNumber = await generateQCLotNumber(conn);
+
+        // Get container numbers (comma-separated for the lot)
+        const containerNumber = containers.length > 0 
+            ? containers.map(c => c.container_no).filter(Boolean).join(', ') 
+            : null;
+
+        // Insert single QC lot for this shipment
         const [lotResult] = await conn.query(`
             INSERT INTO qc_lots (
                 lot_number, shipment_id, container_number,
@@ -164,22 +178,24 @@ const autoCreateQCLot = async (conn, shipmentId, poId, userId) => {
 
         const qcLotId = lotResult.insertId;
 
-        // Insert lot items
-        if (items.length > 0) {
-            const itemValues = items.map(item => [
+        // Insert multiple lot items - one for each container + product combination
+        if (containerProductGroups.length > 0) {
+            const itemValues = containerProductGroups.map(group => [
                 qcLotId,
-                item.product_id || null,
-                item.product_name || 'Unknown Product',
-                item.variety || null,
-                item.package_type || null,
-                item.total_package_count || null,
-                item.total_net_weight || null,
-                item.uom_id || null
+                group.container_id || null,
+                group.container_no || null,
+                group.product_id || null,
+                group.product_name || 'Unknown Product',
+                group.variety || null,
+                group.package_type || null,
+                group.total_package_count || null,
+                group.total_net_weight || null,
+                group.uom_id || null
             ]);
 
             await conn.query(`
                 INSERT INTO qc_lot_items (
-                    qc_lot_id, product_id, product_name, variety, packaging_type,
+                    qc_lot_id, container_id, container_no, product_id, product_name, variety, packaging_type,
                     declared_quantity_units, declared_quantity_net_weight, uom_id
                 ) VALUES ?
             `, [itemValues]);
@@ -191,7 +207,7 @@ const autoCreateQCLot = async (conn, shipmentId, poId, userId) => {
             moduleId: shipmentId,
             userId,
             action: 'QC_LOT_AUTO_CREATED',
-            details: { qc_lot_id: qcLotId, lot_number: lotNumber }
+            details: { qc_lot_id: qcLotId, lot_number: lotNumber, items_count: containerProductGroups.length }
         });
 
     } catch (error) {
@@ -675,6 +691,7 @@ router.get("/board", async (req, res) => {
         s.arrival_time,
         s.lot_number,
         s.parent_shipment_id,
+        s.purchase_bill_id,
         po.po_number,
         po.trade_type_id,
         po.mode_shipment_id,

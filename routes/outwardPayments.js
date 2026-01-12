@@ -570,10 +570,10 @@ router.post('/payments/outward', requireAuth, requirePerm('Purchase', 'create'),
         payment_uniqid, payment_number, transaction_date, payment_type, payment_type_id,
         bank_account_id, cash_account_id, cheque_no, cheque_date,
         tt_ref_no, value_date, reference_no,
-        direction, party_type, party_id,
+        direction, is_customer_payment, party_type, party_id,
         currency_id, currency_code, total_amount_bank, total_amount_base, fx_rate,
         notes, status_id, user_id, created_by, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OUT', 'SUPPLIER', ?, ?, ?, ?, ?, ?, ?, 3, ?, ?, NOW())
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OUT', 0, 'SUPPLIER', ?, ?, ?, ?, ?, ?, ?, 3, ?, ?, NOW())
     `, [
       paymentUniqid, paymentNumber, transaction_date, paymentTypeCode, payment_type_id || null,
       bank_account_id || null, cash_account_id || null,
@@ -1368,7 +1368,7 @@ router.post('/payments/outward/:id/approve', requireAuth, requirePerm('SUPPLIER_
     await conn.beginTransaction();
     
     const { id } = req.params;
-    const { comment } = req.body;
+    const { comment, reconcile_date, reconcile_number } = req.body;
     const isNumeric = /^\d+$/.test(id);
     const whereField = isNumeric ? 'id' : 'payment_uniqid';
     
@@ -1627,17 +1627,21 @@ router.post('/payments/outward/:id/approve', requireAuth, requirePerm('SUPPLIER_
       total_amount: journalTotalAmount,
       source_name: payment.payment_number,
       source_date: payment.transaction_date,
+      reconcile_date: reconcile_date || null,
+      reconcile_number: reconcile_number || null,
       lines: journalLines
     });
     
     // Update payment status to APPROVED (1)
     // Reset edit_request_status to 0 when approving
+    // Save reconcile_date and reconcile_number
     // Do NOT modify notes; store approval comment only in history
     await conn.query(`
       UPDATE tbl_payment 
-      SET status_id = 1, approved_by = ?, approved_at = NOW(), edit_request_status = 0
+      SET status_id = 1, approved_by = ?, approved_at = NOW(), edit_request_status = 0,
+          reconcile_date = ?, reconcile_number = ?
       WHERE id = ?
-    `, [userId, payment.id]);
+    `, [userId, reconcile_date, reconcile_number.trim(), payment.id]);
     
     // Add history entry with approval comment
     await conn.query(`

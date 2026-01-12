@@ -202,7 +202,12 @@ router.get('/lots/:id', requireAuth, async (req, res) => {
     const [items] = await db.promise().query(`
       SELECT 
         qli.*,
-        um.name as uom_name
+        um.name as uom_name,
+        (SELECT pd.packing_alias
+         FROM product_details pd
+         WHERE pd.product_id = qli.product_id
+         ORDER BY pd.id ASC
+         LIMIT 1) as packing_alias
       FROM qc_lot_items qli
       LEFT JOIN uom_master um ON um.id = qli.uom_id
       WHERE qli.qc_lot_id = ?
@@ -267,6 +272,8 @@ router.post('/lots', requireAuth, requirePerm('QualityCheck', 'create'), async (
     if (items && Array.isArray(items) && items.length > 0) {
       const itemValues = items.map(item => [
         qcLotId,
+        item.container_id || null,
+        item.container_no || null,
         item.product_id || null,
         item.product_name || '',
         item.variety || null,
@@ -278,7 +285,7 @@ router.post('/lots', requireAuth, requirePerm('QualityCheck', 'create'), async (
 
       await conn.query(`
         INSERT INTO qc_lot_items (
-          qc_lot_id, product_id, product_name, variety, packaging_type,
+          qc_lot_id, container_id, container_no, product_id, product_name, variety, packaging_type,
           declared_quantity_units, declared_quantity_net_weight, uom_id
         ) VALUES ?
       `, [itemValues]);
@@ -491,6 +498,11 @@ router.get('/inspections', requireAuth, async (req, res) => {
         qli.product_id as lot_item_product_id,
         qli.declared_quantity_units as lot_item_declared_units,
         qli.declared_quantity_net_weight as lot_item_declared_weight,
+        (SELECT pd.packing_alias
+         FROM product_details pd
+         WHERE pd.product_id = qli.product_id
+         ORDER BY pd.id ASC
+         LIMIT 1) as lot_item_packing_alias,
         s.name as status_name,
         COUNT(DISTINCT qm.id) as media_count,
         rj.status as regrade_job_status,
@@ -539,10 +551,17 @@ router.get('/inspections/:id', requireAuth, async (req, res) => {
         ql.lot_number,
         ql.container_number,
         qli.id as qc_lot_item_id,
+        qli.container_id as lot_item_container_id,
+        qli.container_no as lot_item_container_no,
         qli.product_name as lot_item_product_name,
         qli.product_id as lot_item_product_id,
         qli.declared_quantity_units as lot_item_declared_units,
         qli.declared_quantity_net_weight as lot_item_declared_weight,
+        (SELECT pd.packing_alias
+         FROM product_details pd
+         WHERE pd.product_id = qli.product_id
+         ORDER BY pd.id ASC
+         LIMIT 1) as lot_item_packing_alias,
         s.name as status_name
       FROM qc_inspections qi
       LEFT JOIN qc_lots ql ON ql.id = qi.qc_lot_id

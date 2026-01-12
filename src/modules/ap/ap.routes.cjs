@@ -6,6 +6,7 @@ const apPaymentsController = require('./apPayments.controller.cjs');
 
 router.get('/bills', apBillsController.listBills);
 router.get('/bills/source-pos', apBillsController.getSourcePOs); // Must be before /bills/:id
+router.get('/bills/:id/payment-allocations', apBillsController.getBillPaymentAllocations); // Must be before /bills/:id
 router.get('/bills/:id/journal-entries', apBillsController.getBillJournalEntries); // Must be before /bills/:id
 router.get('/bills/:id', apBillsController.getBill);
 router.post('/bills', apBillsController.billUpload, apBillsController.createBill);
