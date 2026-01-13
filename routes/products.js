@@ -903,8 +903,29 @@ function getChangedFields(oldValues, newValues) {
             const oldNum = (oldValue === null || oldValue === undefined || String(oldValue).trim() === '') ? null : parseFloat(oldValue);
             const newNum = (newValue === null || newValue === undefined || String(newValue).trim() === '') ? null : parseFloat(newValue);
 
-            if (oldNum !== newNum) {
-                changes.push({ field: key, from: oldValue, to: newValue });
+            // Use a tolerance-based comparison to handle floating point precision issues
+            // For tolerance fields (qc_tolerance_min, qc_tolerance_max), round to 2 decimal places
+            // For other numeric fields, use a small epsilon for comparison
+            if (key === 'qc_tolerance_min' || key === 'qc_tolerance_max') {
+                const oldRounded = oldNum === null ? null : Math.round(oldNum * 100) / 100;
+                const newRounded = newNum === null ? null : Math.round(newNum * 100) / 100;
+                if (oldRounded !== newRounded) {
+                    changes.push({ field: key, from: oldValue, to: newValue });
+                }
+            } else {
+                // For other numeric fields, use epsilon comparison to handle floating point precision
+                if (oldNum === null && newNum === null) {
+                    // Both null, no change
+                } else if (oldNum === null || newNum === null) {
+                    // One is null, other is not - this is a change
+                    changes.push({ field: key, from: oldValue, to: newValue });
+                } else {
+                    // Both are numbers, compare with small epsilon
+                    const epsilon = 0.0001;
+                    if (Math.abs(oldNum - newNum) > epsilon) {
+                        changes.push({ field: key, from: oldValue, to: newValue });
+                    }
+                }
             }
         } else {
             // For all other fields (strings, FK IDs), compare as strings.
