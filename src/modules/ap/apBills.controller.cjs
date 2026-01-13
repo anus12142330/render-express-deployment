@@ -207,7 +207,8 @@ async function getBill(req, res, next) {
                 st.bg_colour,
                 st.colour,
                 edit_req_user.name as edit_requested_by_name,
-                po.company_id as po_company_id
+                po.company_id as po_company_id,
+                po.po_number as purchase_order_number
             FROM ap_bills ab
             LEFT JOIN vendor v ON v.id = ab.supplier_id
             LEFT JOIN vendor_address va ON va.vendor_id = v.id

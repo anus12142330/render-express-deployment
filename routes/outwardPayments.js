@@ -1595,9 +1595,10 @@ router.post('/payments/outward/:id/approve', requireAuth, requirePerm('SUPPLIER_
         debit: allocForeignAmount,
         credit: 0,
         description: allocDescription,
+        entity_type: 'SUPPLIER',
+        entity_id: payment.party_id,
         buyer_id: payment.party_id,
         is_advance: allocIsAdvance,
-        supplier_id: payment.party_id, // Save supplier_id (vendor_id)
         invoice_id: invoiceId // Save bill_id or po_id as invoice_id
       });
       
@@ -1607,9 +1608,10 @@ router.post('/payments/outward/:id/approve', requireAuth, requirePerm('SUPPLIER_
         debit: 0,
         credit: allocForeignAmount,
         description: allocDescription,
+        entity_type: 'SUPPLIER',
+        entity_id: payment.party_id,
         buyer_id: payment.party_id,
         is_advance: allocIsAdvance,
-        supplier_id: payment.party_id, // Save supplier_id (vendor_id)
         invoice_id: invoiceId // Save bill_id or po_id as invoice_id
       });
     }

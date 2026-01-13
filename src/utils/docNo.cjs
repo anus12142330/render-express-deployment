@@ -82,12 +82,22 @@ async function generateGLJournalNumber(conn, year = new Date().getFullYear()) {
     });
 }
 
+async function generateOpeningBalanceBatchNumber(conn, year = new Date().getFullYear()) {
+    return generateNextDocNumber(conn, 'OB', {
+        table: 'opening_balance_batch',
+        column: 'batch_no',
+        year,
+        width: 6
+    });
+}
+
 module.exports = {
     generateNextDocNumber,
     generateAPBillNumber,
     generateAPPaymentNumber,
     generateARInvoiceNumber,
     generateARReceiptNumber,
-    generateGLJournalNumber
+    generateGLJournalNumber,
+    generateOpeningBalanceBatchNumber
 };
 

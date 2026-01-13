@@ -37,6 +37,7 @@ const MODULES = [
 
   // --- Accountant ---
   { key_name: 'InternalFundTransfer', group_name: 'Accountant', display_name: 'Internal Fund Transfer', sort_order: 10 },
+  { key_name: 'OpeningBalance', group_name: 'Accountant', display_name: 'Opening Balances', sort_order: 20 },
 
   // --- Settings ---
   { key_name: 'OrganisationUsersRoles', group_name: 'Settings', display_name: 'Profile', sort_order: 10 },

@@ -20,5 +20,11 @@ router.get('/profit-and-loss', glController.getProfitAndLoss);
 // Detailed Profit and Loss Statement endpoint
 router.get('/profit-and-loss-detailed', glController.getProfitAndLossDetailed);
 
+// Entity Ledger Balance endpoint
+router.get('/entities/:type/:id/balance', glController.getEntityBalanceEndpoint);
+
+// Rebuild Entity Balances endpoint (admin)
+router.post('/admin/rebuild-entity-balances', glController.rebuildEntityBalancesEndpoint);
+
 module.exports = router;
 

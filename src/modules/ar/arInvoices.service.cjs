@@ -324,7 +324,10 @@ async function postInvoice(conn, invoiceId, userId) {
             debit: invoiceTotal, // Total amount customer owes (subtotal + tax)
             credit: 0,
             description: `Accounts Receivable for Invoice ${invoice.invoice_number}`,
-            buyer_id: customerId
+            entity_type: 'CUSTOMER',
+            entity_id: customerId,
+            buyer_id: customerId,
+            invoice_id: invoiceId
         }
     ];
 
@@ -339,7 +342,10 @@ async function postInvoice(conn, invoiceId, userId) {
                 debit: 0,
                 credit: roundedAmount,
                 description: `Sales Revenue (${salesAccountNames[accountId]}) from Invoice ${invoice.invoice_number}`,
-                buyer_id: customerId
+                entity_type: 'CUSTOMER',
+                entity_id: customerId,
+                buyer_id: customerId,
+                invoice_id: invoiceId
             });
         }
     }
@@ -376,7 +382,10 @@ async function postInvoice(conn, invoiceId, userId) {
             debit: discountAmount,
             credit: 0,
             description: `Sales Discount from Invoice ${invoice.invoice_number}`,
-            buyer_id: customerId
+            entity_type: 'CUSTOMER',
+            entity_id: customerId,
+            buyer_id: customerId,
+            invoice_id: invoiceId
         });
     }
 
@@ -390,7 +399,10 @@ async function postInvoice(conn, invoiceId, userId) {
             debit: 0,
             credit: invoiceTaxTotal,
             description: `VAT Output from Invoice ${invoice.invoice_number}`,
-            buyer_id: customerId
+            entity_type: 'CUSTOMER',
+            entity_id: customerId,
+            buyer_id: customerId,
+            invoice_id: invoiceId
         });
     }
 
@@ -414,16 +426,22 @@ async function postInvoice(conn, invoiceId, userId) {
                     debit: cogsData.amount,
                     credit: 0,
                     description: `COGS for ${cogsData.item_name} from Invoice ${invoice.invoice_number}`,
+                    entity_type: 'CUSTOMER',
+                    entity_id: customerId,
                     buyer_id: customerId,
-                    product_id: parseInt(productId)
+                    product_id: parseInt(productId),
+                    invoice_id: invoiceId
                 });
                 journalLines.push({
                     account_id: inventoryAccountId,
                     debit: 0,
                     credit: cogsData.amount,
                     description: `Inventory reduction for ${cogsData.item_name} from Invoice ${invoice.invoice_number}`,
+                    entity_type: 'CUSTOMER',
+                    entity_id: customerId,
                     buyer_id: customerId,
-                    product_id: parseInt(productId)
+                    product_id: parseInt(productId),
+                    invoice_id: invoiceId
                 });
             }
         }

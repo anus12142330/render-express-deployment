@@ -394,8 +394,11 @@ async function postBill(conn, billId, userId) {
             debit: productLine.amount,
             credit: 0,
             description: `${productLine.item_name} from Bill ${bill.bill_number}`,
+            entity_type: 'SUPPLIER',
+            entity_id: supplierId,
             buyer_id: supplierId,
-            product_id: productLine.product_id
+            product_id: productLine.product_id,
+            invoice_id: billId
             });
     }
 
@@ -416,7 +419,10 @@ async function postBill(conn, billId, userId) {
                 debit: billTaxTotal,
                 credit: 0,
                 description: `RC Input (Reverse Tax) from Bill ${bill.bill_number}`,
-                buyer_id: supplierId
+                entity_type: 'SUPPLIER',
+                entity_id: supplierId,
+                buyer_id: supplierId,
+                invoice_id: billId
             });
             
             // RC Output (account ID 21): Buyer pays output tax (credit)
@@ -429,7 +435,10 @@ async function postBill(conn, billId, userId) {
                 debit: 0,
                 credit: billTaxTotal,
                 description: `RC Output (Reverse Tax) from Bill ${bill.bill_number}`,
-                buyer_id: supplierId
+                entity_type: 'SUPPLIER',
+                entity_id: supplierId,
+                buyer_id: supplierId,
+                invoice_id: billId
             });
         } else {
             // Normal tax: Buyer receives input tax, debits Taxes account (account ID 7)
@@ -442,7 +451,10 @@ async function postBill(conn, billId, userId) {
                 debit: billTaxTotal,
                 credit: 0,
                 description: `Tax Input from Bill ${bill.bill_number}`,
-                buyer_id: supplierId
+                entity_type: 'SUPPLIER',
+                entity_id: supplierId,
+                buyer_id: supplierId,
+                invoice_id: billId
             });
         }
     }
@@ -456,7 +468,10 @@ async function postBill(conn, billId, userId) {
         debit: 0,
         credit: apCreditAmount,
         description: `Accounts Payable for Bill ${bill.bill_number}`,
-        buyer_id: supplierId
+        entity_type: 'SUPPLIER',
+        entity_id: supplierId,
+        buyer_id: supplierId,
+        invoice_id: billId
     });
 
     // Verify journal balances (double-entry accounting)

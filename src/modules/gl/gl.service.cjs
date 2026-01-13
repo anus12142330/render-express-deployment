@@ -3,9 +3,22 @@
 
 const { tx } = require('../../db/tx.cjs');
 const { generateGLJournalNumber } = require('../../utils/docNo.cjs');
+const { validateEntityRequired } = require('../../utils/ledgerEntityHelper.cjs');
+const { updateEntityBalances } = require('./entityBalance.service.cjs');
 
 /**
- * Create a GL journal entry
+ * Create a GL journal entry with automatic entity balance updates
+ * This is the main function to use for posting journals
+ * @param {Object} conn - Database connection (must be in transaction)
+ * @param {Object} params - Journal parameters
+ * @param {string} params.source_type - Source type (e.g., 'AR_INVOICE', 'AP_BILL')
+ * @param {number} params.source_id - Source document ID
+ * @param {Date} params.journal_date - Journal date
+ * @param {string} params.memo - Journal memo
+ * @param {number} params.created_by - User ID who created the journal
+ * @param {number} [params.company_id=1] - Company ID (defaults to 1)
+ * @param {Array} params.lines - Array of journal lines
+ * @returns {Promise<number>} - Journal ID
  */
 async function createJournal(conn, params) {
     const {
@@ -14,6 +27,7 @@ async function createJournal(conn, params) {
         journal_date = new Date(),
         memo = null,
         created_by,
+        company_id = 1,
         currency_id = null,
         exchange_rate = null,
         foreign_amount = null,
@@ -81,6 +95,11 @@ async function createJournal(conn, params) {
 
     // Insert journal lines
     if (lines.length > 0) {
+        // Validate entity requirements for all lines before inserting
+        for (const line of lines) {
+            await validateEntityRequired(conn, line, source_type);
+        }
+
         const lineValues = lines.map((line, index) => {
             const lineDebit = parseFloat(line.debit || 0);
             const lineCredit = parseFloat(line.credit || 0);
@@ -120,16 +139,18 @@ async function createJournal(conn, params) {
                 line.buyer_id || null,
                 line.product_id || null,
                 line.is_advance !== undefined ? (line.is_advance ? 1 : 0) : 0,
-                line.supplier_id || null,
                 line.invoice_id || null
             ];
         });
 
         await conn.query(`
             INSERT INTO gl_journal_lines 
-            (journal_id, line_no, account_id, debit, credit, entity_type, entity_id, description, currency_id, foreign_amount, total_amount, buyer_id, product_id, is_advance, supplier_id, invoice_id)
+            (journal_id, line_no, account_id, debit, credit, entity_type, entity_id, description, currency_id, foreign_amount, total_amount, buyer_id, product_id, is_advance, invoice_id)
             VALUES ?
         `, [lineValues]);
+
+        // Update entity ledger balances for lines with entity_type and entity_id
+        await updateEntityBalances(conn, company_id, lines);
     }
 
     return journalId;

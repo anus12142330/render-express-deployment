@@ -149,14 +149,21 @@ router.get('/lots', requireAuth, async (req, res) => {
         ql.created_at,
         ql.updated_at,
         s.ship_uniqid,
+        s.arrival_date,
+        s.confirm_arrival_date,
+        s.eta_date,
+        po.mode_shipment_id,
         v.display_name as vendor_name,
         COUNT(DISTINCT qli.id) as item_count,
         SUM(qli.declared_quantity_units) as total_quantity_units,
-        SUM(qli.declared_quantity_net_weight) as total_quantity_net_weight
+        SUM(qli.declared_quantity_net_weight) as total_quantity_net_weight,
+        GROUP_CONCAT(DISTINCT p.product_name ORDER BY p.product_name SEPARATOR ', ') as products
       FROM qc_lots ql
       LEFT JOIN shipment s ON s.id = ql.shipment_id
+      LEFT JOIN purchase_orders po ON po.id = s.po_id
       LEFT JOIN vendor v ON v.id = s.vendor_id
       LEFT JOIN qc_lot_items qli ON qli.qc_lot_id = ql.id
+      LEFT JOIN products p ON p.id = qli.product_id
       WHERE ${whereClauses.join(' AND ')}
       GROUP BY ql.id
       ORDER BY ql.created_at DESC
@@ -184,11 +191,16 @@ router.get('/lots/:id', requireAuth, async (req, res) => {
       SELECT 
         ql.*,
         s.ship_uniqid,
+        s.arrival_date,
+        s.confirm_arrival_date,
+        s.eta_date,
+        po.mode_shipment_id,
         v.display_name as vendor_name,
         u1.name as created_by_name,
         u2.name as updated_by_name
       FROM qc_lots ql
       LEFT JOIN shipment s ON s.id = ql.shipment_id
+      LEFT JOIN purchase_orders po ON po.id = s.po_id
       LEFT JOIN vendor v ON v.id = s.vendor_id
       LEFT JOIN \`user\` u1 ON u1.id = ql.created_by
       LEFT JOIN \`user\` u2 ON u2.id = ql.updated_by
@@ -788,6 +800,8 @@ router.post('/inspections', requireAuth, requirePerm('QualityCheck', 'create'), 
     const photos = [];
     const videos = [];
     const defectMedia = {}; // { defectTypeId: { photos: [], videos: [] } }
+    let temperatureLoggerFile = null;
+    let temperatureLoggerFilePath = req.body.temperature_logger_file_path || null;
 
     if (req.files && Array.isArray(req.files)) {
       req.files.forEach(file => {
@@ -810,6 +824,10 @@ router.post('/inspections', requireAuth, requirePerm('QualityCheck', 'create'), 
           photos.push(file);
         } else if (file.fieldname === 'videos') {
           videos.push(file);
+        } else if (file.fieldname === 'temperature_logger_file') {
+          temperatureLoggerFile = file;
+          // Save file path
+          temperatureLoggerFilePath = `uploads/quality-check/${file.filename}`;
         }
       });
     }
@@ -872,6 +890,9 @@ router.post('/inspections', requireAuth, requirePerm('QualityCheck', 'create'), 
       }
     }
 
+    // Get temperature logger received value
+    const temperatureLoggerReceived = req.body.temperature_logger_received === '1' || req.body.temperature_logger_received === 1 || req.body.temperature_logger_received === true ? 1 : (req.body.temperature_logger_received === '0' || req.body.temperature_logger_received === 0 || req.body.temperature_logger_received === false ? 0 : null);
+
     // Insert inspection - now linked to QC lot item
     const [inspectionResult] = await conn.query(`
       INSERT INTO qc_inspections (
@@ -884,8 +905,9 @@ router.post('/inspections', requireAuth, requirePerm('QualityCheck', 'create'), 
         checklist_size_consistency, checklist_packaging_integrity,
         checklist_odor, checklist_foreign_matter, checklist_moisture,
         defects_json,
+        temperature_logger_received, temperature_logger_file_path,
         created_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       qc_lot_id,
       qcLotItemIdInt,
@@ -910,6 +932,8 @@ router.post('/inspections', requireAuth, requirePerm('QualityCheck', 'create'), 
       checklist_foreign_matter === 'true' || checklist_foreign_matter === true || checklist_foreign_matter === '1' ? 1 : 0,
       checklist_moisture === 'true' || checklist_moisture === true || checklist_moisture === '1' ? 1 : 0,
       defectsJson,
+      temperatureLoggerReceived,
+      temperatureLoggerFilePath,
       userId
     ]);
 
@@ -1733,6 +1757,26 @@ router.put('/inspections/:id', requireAuth, requirePerm('QualityCheck', 'edit'),
     if (defectsJson !== undefined) {
       updateFields.push('defects_json = ?');
       updateValues.push(defectsJson);
+    }
+    
+    // Handle temperature logger fields
+    if (req.body.temperature_logger_received !== undefined) {
+      const tempLoggerReceived = req.body.temperature_logger_received === '1' || req.body.temperature_logger_received === 1 || req.body.temperature_logger_received === true ? 1 : (req.body.temperature_logger_received === '0' || req.body.temperature_logger_received === 0 || req.body.temperature_logger_received === false ? 0 : null);
+      updateFields.push('temperature_logger_received = ?');
+      updateValues.push(tempLoggerReceived);
+    }
+    
+    // Handle temperature logger file upload
+    let temperatureLoggerFilePath = req.body.temperature_logger_file_path || null;
+    if (req.files && Array.isArray(req.files)) {
+      const tempLoggerFile = req.files.find(f => f.fieldname === 'temperature_logger_file');
+      if (tempLoggerFile) {
+        temperatureLoggerFilePath = `uploads/quality-check/${tempLoggerFile.filename}`;
+      }
+    }
+    if (temperatureLoggerFilePath !== undefined) {
+      updateFields.push('temperature_logger_file_path = ?');
+      updateValues.push(temperatureLoggerFilePath);
     }
     
     updateFields.push('updated_by = ?');

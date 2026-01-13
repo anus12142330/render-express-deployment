@@ -51,6 +51,9 @@ async function postPayment(conn, paymentId, userId) {
         throw new Error('Required accounts not found in Chart of Accounts');
     }
 
+    // Get supplier_id from payment
+    const supplierId = payment.supplier_id;
+
     await glService.createJournal(conn, {
         source_type: 'AP_PAYMENT',
         source_id: paymentId,
@@ -62,13 +65,19 @@ async function postPayment(conn, paymentId, userId) {
                 account_id: apAccountId,
                 debit: parseFloat(payment.total_amount),
                 credit: 0,
-                description: `Accounts Payable payment ${payment.payment_number}`
+                description: `Accounts Payable payment ${payment.payment_number}`,
+                entity_type: 'SUPPLIER',
+                entity_id: supplierId,
+                buyer_id: supplierId
             },
             {
                 account_id: bankAccountId,
                 debit: 0,
                 credit: parseFloat(payment.total_amount),
-                description: `Bank payment ${payment.payment_number}`
+                description: `Bank payment ${payment.payment_number}`,
+                entity_type: 'SUPPLIER',
+                entity_id: supplierId,
+                buyer_id: supplierId
             }
         ]
     });

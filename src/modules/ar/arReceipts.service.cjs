@@ -65,6 +65,8 @@ async function postReceipt(conn, receiptId, userId) {
                 debit: parseFloat(receipt.total_amount),
                 credit: 0,
                 description: `Bank receipt ${receipt.receipt_number}`,
+                entity_type: 'CUSTOMER',
+                entity_id: buyerId,
                 buyer_id: buyerId
             },
             {
@@ -72,6 +74,8 @@ async function postReceipt(conn, receiptId, userId) {
                 debit: 0,
                 credit: parseFloat(receipt.total_amount),
                 description: `Accounts Receivable receipt ${receipt.receipt_number}`,
+                entity_type: 'CUSTOMER',
+                entity_id: buyerId,
                 buyer_id: buyerId
             }
         ]

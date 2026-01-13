@@ -1,5 +1,6 @@
 const glService = require('./gl.service.cjs');
 const { pool } = require('../../db/tx.cjs');
+const { getEntityBalance, rebuildEntityBalances } = require('./entityBalance.service.cjs');
 
 /**
  * Get Trial Balance
@@ -548,12 +549,100 @@ async function getProfitAndLossDetailed(req, res, next) {
     }
 }
 
+/**
+ * Get Entity Ledger Balance
+ * GET /api/gl/entities/:type/:id/balance
+ * Returns the cached ledger balance for a customer or supplier
+ */
+async function getEntityBalanceEndpoint(req, res, next) {
+    try {
+        const { type, id } = req.params;
+        const companyId = parseInt(req.query.company_id || '1', 10);
+
+        if (!type || !id) {
+            return res.status(400).json({ error: 'Entity type and ID are required' });
+        }
+
+        if (type !== 'CUSTOMER' && type !== 'SUPPLIER') {
+            return res.status(400).json({ error: 'Entity type must be CUSTOMER or SUPPLIER' });
+        }
+
+        const balance = await getEntityBalance(pool, type.toUpperCase(), parseInt(id, 10), companyId);
+
+        // Calculate derived values
+        let outstanding = 0;
+        let credit = 0;
+        let payable = 0;
+        let debit = 0;
+
+        if (type === 'CUSTOMER') {
+            outstanding = Math.max(balance, 0);
+            credit = Math.max(-balance, 0);
+        } else {
+            payable = Math.max(-balance, 0);
+            debit = Math.max(balance, 0);
+        }
+
+        res.json({
+            success: true,
+            data: {
+                entity_type: type.toUpperCase(),
+                entity_id: parseInt(id, 10),
+                balance: balance,
+                outstanding: outstanding,
+                credit_balance: credit,
+                payable: payable,
+                supplier_debit: debit
+            }
+        });
+    } catch (error) {
+        next(error);
+    }
+}
+
+/**
+ * Rebuild Entity Ledger Balances
+ * POST /api/admin/rebuild-entity-balances
+ * Admin endpoint to rebuild all cached balances from gl_journal_lines
+ */
+async function rebuildEntityBalancesEndpoint(req, res, next) {
+    try {
+        // TODO: Add admin permission check here
+        // if (!req.user || !req.user.permissions.includes('admin')) {
+        //     return res.status(403).json({ error: 'Admin access required' });
+        // }
+
+        const companyId = parseInt(req.body.company_id || '1', 10);
+        const conn = await pool.getConnection();
+
+        try {
+            await conn.beginTransaction();
+            await rebuildEntityBalances(conn, companyId);
+            await conn.commit();
+
+            res.json({
+                success: true,
+                message: `Entity ledger balances rebuilt successfully for company ${companyId}`
+            });
+        } catch (error) {
+            await conn.rollback();
+            throw error;
+        } finally {
+            conn.release();
+        }
+    } catch (error) {
+        next(error);
+    }
+}
+
 module.exports = {
     getTrialBalance,
     getAccountJournalEntries,
     getAccountInfo,
     getChartOfAccounts,
     getProfitAndLoss,
-    getProfitAndLossDetailed
+    getProfitAndLossDetailed,
+    getEntityBalanceEndpoint,
+    rebuildEntityBalancesEndpoint
 };
 
