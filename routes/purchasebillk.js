@@ -68,19 +68,21 @@ router.get('/', async (req, res, next) => {
         }
 
         const [countResult] = await db.promise().query(
-            `SELECT COUNT(*) as total FROM purchase_bills pb ${whereClause}`, params
+            `SELECT COUNT(*) as total FROM ap_bills pb ${whereClause}`, params
         );
         const totalRows = countResult[0]?.total || 0;
 
         const [rows] = await db.promise().query(`
             SELECT 
                 pb.id, pb.bill_uniqid, pb.bill_number, pb.bill_date, pb.total, pb.status_id, 
-                s.name as status, v.display_name as vendor_name, c.name as currency_code,
+                s.name as status_name, v.display_name as vendor_name, c.name as currency_code,
+                po.po_number as purchase_order_number,
                 (SELECT COUNT(*) FROM purchase_bill_attachments pba WHERE pba.purchase_bill_id = pb.id) as attachment_count
-            FROM purchase_bills pb
+            FROM ap_bills pb
             LEFT JOIN vendor v ON v.id = pb.vendor_id
             LEFT JOIN currency c ON c.id = pb.currency_id
             LEFT JOIN status s ON s.id = pb.status_id
+            LEFT JOIN purchase_orders po ON po.id = pb.purchase_order_id
             ${whereClause}
             ORDER BY pb.bill_date DESC, pb.id DESC
             LIMIT ? OFFSET ?`,
@@ -205,8 +207,9 @@ router.get('/:id', async (req, res, next) => {
                 vs.name as vendor_state,
                 vc.name as vendor_country,
                 va.bill_zip_code as vendor_postal_code,
-                po.company_id as po_company_id
-            FROM purchase_bills pb
+                po.company_id as po_company_id,
+                po.po_number as purchase_order_number
+            FROM ap_bills pb
             LEFT JOIN vendor v ON v.id = pb.vendor_id
             LEFT JOIN vendor_address va ON va.vendor_id = v.id
             LEFT JOIN state vs ON vs.id = va.bill_state_id

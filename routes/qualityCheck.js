@@ -574,6 +574,11 @@ router.get('/inspections/:id', requireAuth, async (req, res) => {
          WHERE pd.product_id = qli.product_id
          ORDER BY pd.id ASC
          LIMIT 1) as lot_item_packing_alias,
+        (SELECT pd.packing_alias
+         FROM product_details pd
+         WHERE pd.product_id = qli.product_id
+         ORDER BY pd.id ASC
+         LIMIT 1) as product_packing_alias,
         s.name as status_name
       FROM qc_inspections qi
       LEFT JOIN qc_lots ql ON ql.id = qi.qc_lot_id

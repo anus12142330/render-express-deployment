@@ -161,6 +161,7 @@ async function listBills(req, res, next) {
                 u.name as created_by_name,
                 ua.name as approved_by_name,
                 edit_req_user.name as edit_requested_by_name,
+                po.po_number as purchase_order_number,
                 (SELECT COALESCE(SUM(pa.amount_bank), 0) 
                  FROM tbl_payment_allocation pa 
                  WHERE pa.bill_id = ab.id AND pa.alloc_type = 'bill') as paid_amount,
@@ -172,6 +173,7 @@ async function listBills(req, res, next) {
             LEFT JOIN user u ON u.id = ab.user_id
             LEFT JOIN user ua ON ua.id = ab.approved_by
             LEFT JOIN user edit_req_user ON edit_req_user.id = ab.edit_requested_by
+            LEFT JOIN purchase_orders po ON po.id = ab.purchase_order_id
             ${whereClause}
             ORDER BY ab.bill_date DESC, ab.id DESC
             LIMIT ? OFFSET ?
