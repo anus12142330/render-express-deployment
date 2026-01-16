@@ -63,6 +63,25 @@ const MASTER_CONFIG = {
         ]
     },
 
+    service_category: {
+        table: 'service_categories',
+        id: 'id',
+        fields: [
+            { name: 'name', type: 'string', required: true },
+            { name: 'parent_id', type: 'number', lookup: 'service_category' }
+        ],
+        listSelect: `
+            c.id, c.name, c.parent_id,
+            p.name AS parent_name
+        `,
+        listFrom: `
+            service_categories c
+            LEFT JOIN service_categories p ON p.id = c.parent_id
+        `,
+        listSearchIn: ['c.name', 'p.name'],
+        listOrderBy: 'c.name'
+    },
+
     tax_treatment: {
         table: 'tax_treatment',
         id: 'id',
@@ -530,10 +549,15 @@ router.get('/:type', async (req, res, next) => {
         const sortOrder = (req.query.sort_order || 'desc').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
 
-        if (type === 'category') {
+        if (type === 'category' || type === 'service_category') {
             try {
-                const [allCategories] = await db.promise().query(`SELECT c.id, c.name, c.parent_id, p.name AS parent_name FROM categories c LEFT JOIN categories p ON p.id = c.parent_id ORDER BY c.name ASC`);
-                const [usedCategories] = await db.promise().query(`SELECT DISTINCT category_id FROM products WHERE category_id IS NOT NULL`);
+                const table = type === 'service_category' ? 'service_categories' : 'categories';
+                const [allCategories] = await db.promise().query(
+                    `SELECT c.id, c.name, c.parent_id, p.name AS parent_name FROM ${table} c LEFT JOIN ${table} p ON p.id = c.parent_id ORDER BY c.name ASC`
+                );
+                const [usedCategories] = await db.promise().query(
+                    `SELECT DISTINCT category_id FROM products WHERE category_id IS NOT NULL AND (${type === 'service_category' ? 'item_id = 1' : '(item_id IS NULL OR item_id = 0)'})`
+                );
                 const usedIds = new Set(usedCategories.map(c => c.category_id));
 
                 const categoryMap = {};

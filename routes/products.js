@@ -152,7 +152,10 @@ router.get('/', async (req, res) => {
                     p.item_type,
                     COALESCE(p.product_name, '') AS name,
                     p.category_id,
-                    c.name as category_name,
+                    CASE
+                        WHEN p.item_type = 'Service' OR p.item_id = 1 THEN sc.name
+                        ELSE c.name
+                    END as category_name,
                     p.reorder_point,
                     p.inventory_account_id,
                     p.purchase_account_id,
@@ -202,6 +205,7 @@ router.get('/', async (req, res) => {
  -- pk.name AS packing_name
                 FROM products p
                 LEFT JOIN categories c ON c.id = p.category_id
+                LEFT JOIN service_categories sc ON sc.id = p.category_id
                     ${whereSql}        -- <- WHERE should come AFTER joins
                 ORDER BY ${sortField} ${sortOrder}
                 LIMIT ? OFFSET ?
@@ -210,7 +214,7 @@ router.get('/', async (req, res) => {
         );
 
         const totalRows = (await q(
-            `SELECT COUNT(DISTINCT p.id) AS c FROM products p LEFT JOIN categories c ON c.id = p.category_id ${whereSql}`,
+            `SELECT COUNT(DISTINCT p.id) AS c FROM products p LEFT JOIN categories c ON c.id = p.category_id LEFT JOIN service_categories sc ON sc.id = p.category_id ${whereSql}`,
             params
         ))[0]?.c || 0;
 
@@ -316,7 +320,10 @@ router.get('/:identifier', async (req, res) => {
             `
       SELECT
         p.*,
-        cat.name AS category_name,
+        CASE
+            WHEN p.item_type = 'Service' OR p.item_id = 1 THEN sc.name
+            ELSE cat.name
+        END AS category_name,
         sales_acc.name AS sales_account_name,
         p.is_active,
         purch_acc.name AS purchase_account_name,
@@ -326,6 +333,7 @@ router.get('/:identifier', async (req, res) => {
         creator.name   AS created_by_name
       FROM products p
       LEFT JOIN categories cat ON cat.id = p.category_id
+      LEFT JOIN service_categories sc ON sc.id = p.category_id
       LEFT JOIN acc_chart_accounts sales_acc ON sales_acc.id = p.sales_account_id
       LEFT JOIN acc_chart_accounts purch_acc ON purch_acc.id = p.purchase_account_id
       LEFT JOIN acc_chart_accounts inv_acc ON inv_acc.id = p.inventory_account_id
