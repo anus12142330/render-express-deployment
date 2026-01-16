@@ -52,7 +52,7 @@ function formatValueForDisplay(value, field) {
 // Helper to get changed fields between old and new values
 function getChangedFields(oldValues, newValues) {
     const changes = [];
-    const fields = ['bill_number', 'bill_date', 'due_date', 'supplier_id', 'warehouse_id', 'currency_id', 'subtotal', 'tax_total', 'total', 'notes', 'purchase_order_id'];
+    const fields = ['bill_number', 'bill_date', 'due_date', 'supplier_id', 'company_id', 'shipment_id', 'warehouse_id', 'currency_id', 'subtotal', 'tax_total', 'total', 'notes', 'purchase_order_id'];
     
     fields.forEach(field => {
         const oldVal = oldValues[field];
@@ -120,6 +120,7 @@ async function listBills(req, res, next) {
         const supplierId = req.query.supplier_id ? parseInt(req.query.supplier_id, 10) : null;
         const statusId = req.query.status_id ? parseInt(req.query.status_id, 10) : null;
         const editRequestStatus = req.query.edit_request_status ? parseInt(req.query.edit_request_status, 10) : null;
+        const isServiceFilter = req.query.is_service !== undefined ? Number(req.query.is_service) : null;
 
         let whereClause = 'WHERE 1=1';
         const params = [];
@@ -135,6 +136,10 @@ async function listBills(req, res, next) {
         if (editRequestStatus) {
             whereClause += ' AND ab.edit_request_status = ?';
             params.push(editRequestStatus);
+        }
+        if (Number.isFinite(isServiceFilter)) {
+            whereClause += ' AND ab.is_service = ?';
+            params.push(isServiceFilter);
         }
         if (search) {
             whereClause += ' AND (ab.bill_number LIKE ? OR v.display_name LIKE ?)';
@@ -162,6 +167,7 @@ async function listBills(req, res, next) {
                 ua.name as approved_by_name,
                 edit_req_user.name as edit_requested_by_name,
                 po.po_number as purchase_order_number,
+                po.mode_shipment_id as po_mode_of_shipment_id,
                 (SELECT COALESCE(SUM(pa.amount_bank), 0) 
                  FROM tbl_payment_allocation pa 
                  WHERE pa.bill_id = ab.id AND pa.alloc_type = 'bill') as paid_amount,
@@ -210,7 +216,12 @@ async function getBill(req, res, next) {
                 st.colour,
                 edit_req_user.name as edit_requested_by_name,
                 po.company_id as po_company_id,
-                po.po_number as purchase_order_number
+                po.po_number as purchase_order_number,
+                s.ship_uniqid as shipment_uniqid,
+                s.lot_number as shipment_lot_number,
+                s.total_lots as shipment_total_lots,
+                s.shipment_stage_id as shipment_stage_id,
+                po_ship.po_number as shipment_po_number
             FROM ap_bills ab
             LEFT JOIN vendor v ON v.id = ab.supplier_id
             LEFT JOIN vendor_address va ON va.vendor_id = v.id
@@ -220,6 +231,8 @@ async function getBill(req, res, next) {
             LEFT JOIN status st ON st.id = ab.status_id
             LEFT JOIN user edit_req_user ON edit_req_user.id = ab.edit_requested_by
             LEFT JOIN purchase_orders po ON po.id = ab.purchase_order_id
+            LEFT JOIN shipment s ON s.id = ab.shipment_id
+            LEFT JOIN purchase_orders po_ship ON po_ship.id = s.po_id
             WHERE ${whereField} = ?
         `, [id]);
 
@@ -234,12 +247,17 @@ async function getBill(req, res, next) {
             SELECT 
                 abl.*, 
                 um.name as uom_name,
+                p.item_type,
+                p.item_id,
+                p.inventory_account_id,
+                p.purchase_account_id,
                 COALESCE(
                     (SELECT pi.thumbnail_path FROM product_images pi WHERE pi.product_id = abl.product_id AND pi.is_primary = 1 LIMIT 1),
                     (SELECT pi.thumbnail_path FROM product_images pi WHERE pi.product_id = abl.product_id ORDER BY pi.id ASC LIMIT 1)
                 ) as product_image_url
             FROM ap_bill_lines abl
             LEFT JOIN uom_master um ON um.id = abl.uom_id
+            LEFT JOIN products p ON p.id = abl.product_id
             WHERE abl.bill_id = ?
             ORDER BY abl.line_no
         `, [billId]);
@@ -313,6 +331,8 @@ async function createBill(req, res, next) {
                 bill_date,
                 due_date,
                 supplier_id,
+                company_id,
+                shipment_id,
                 warehouse_id,
                 currency_id,
                 subtotal,
@@ -320,11 +340,14 @@ async function createBill(req, res, next) {
                 total,
                 notes,
                 purchase_order_id,
-                is_reverse_tax
+                is_reverse_tax,
+                is_service
             } = req.body;
 
             // Parse numeric/boolean fields if they come from FormData (strings)
             const parsedSupplierId = typeof supplier_id === 'string' ? parseInt(supplier_id) : supplier_id;
+            const parsedCompanyId = typeof company_id === 'string' ? parseInt(company_id) : company_id;
+            const parsedShipmentId = typeof shipment_id === 'string' ? parseInt(shipment_id) : shipment_id;
             const parsedWarehouseId = typeof warehouse_id === 'string' ? parseInt(warehouse_id) : warehouse_id;
             const parsedCurrencyId = typeof currency_id === 'string' ? parseInt(currency_id) : currency_id;
             const parsedSubtotal = typeof subtotal === 'string' ? parseFloat(subtotal) : subtotal;
@@ -336,6 +359,15 @@ async function createBill(req, res, next) {
                 is_reverse_tax === true ||
                 is_reverse_tax === '1' ||
                 is_reverse_tax === 'true';
+            const parsedIsService =
+                is_service === 1 ||
+                is_service === true ||
+                is_service === '1' ||
+                is_service === 'true';
+
+            if (!parsedShipmentId) {
+                return res.status(400).json({ error: 'Shipment is required' });
+            }
 
             let finalBillNumber = bill_number;
             if (!finalBillNumber) {
@@ -354,13 +386,23 @@ async function createBill(req, res, next) {
 
             const [billResult] = await conn.query(`
                 INSERT INTO ap_bills 
-                (bill_uniqid, bill_number, bill_date, due_date, supplier_id, purchase_order_id, warehouse_id, 
-                 currency_id, subtotal, tax_total, total, notes, is_reverse_tax, user_id, status_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3)
-            `, [billUniqid, finalBillNumber, bill_date, due_date, parsedSupplierId, parsedPoId, parsedWarehouseId,
-                parsedCurrencyId, parsedSubtotal, parsedTaxTotal, parsedTotal, notes, (parsedIsReverseTax ? 1 : 0), userId]);
+                (bill_uniqid, bill_number, bill_date, due_date, supplier_id, purchase_order_id, company_id, shipment_id, warehouse_id, 
+                 currency_id, subtotal, tax_total, total, notes, is_reverse_tax, is_service, user_id, status_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3)
+            `, [billUniqid, finalBillNumber, bill_date, due_date, parsedSupplierId, parsedPoId, parsedCompanyId, parsedShipmentId, parsedWarehouseId,
+                parsedCurrencyId, parsedSubtotal, parsedTaxTotal, parsedTotal, notes, (parsedIsReverseTax ? 1 : 0), (parsedIsService ? 1 : 0), userId]);
 
             const billId = billResult.insertId;
+
+            const productIds = [...new Set(lines.map(l => Number(l.product_id)).filter(Boolean))];
+            let productTypeMap = new Map();
+            if (productIds.length > 0) {
+                const [prodRows] = await conn.query(
+                    `SELECT id, item_type, item_id FROM products WHERE id IN (?)`,
+                    [productIds]
+                );
+                productTypeMap = new Map(prodRows.map(r => [Number(r.id), r]));
+            }
 
             for (let i = 0; i < lines.length; i++) {
                 const line = lines[i];
@@ -382,7 +424,10 @@ async function createBill(req, res, next) {
 
                 const lineId = lineResult.insertId;
 
-                if (line.batches && Array.isArray(line.batches)) {
+                const pinfo = parsedProductId ? productTypeMap.get(Number(parsedProductId)) : null;
+                const isServiceLine = (String(pinfo?.item_type || '').toLowerCase() === 'service') || Number(pinfo?.item_id) === 1;
+
+                if (!isServiceLine && line.batches && Array.isArray(line.batches)) {
                     for (const batch of line.batches) {
                         // Parse numeric fields if they come from FormData (strings)
                         const parsedBatchId = typeof batch.batch_id === 'string' ? parseInt(batch.batch_id) : (batch.batch_id || null);
@@ -514,6 +559,8 @@ async function updateBill(req, res, next) {
                 bill_date,
                 due_date,
                 supplier_id,
+                company_id,
+                shipment_id,
                 warehouse_id,
                 currency_id,
                 subtotal,
@@ -521,11 +568,14 @@ async function updateBill(req, res, next) {
                 total,
                 notes,
                 purchase_order_id,
-                is_reverse_tax
+                is_reverse_tax,
+                is_service
             } = req.body;
 
             // Parse numeric/boolean fields if they come from FormData (strings)
             const parsedSupplierId = typeof supplier_id === 'string' ? parseInt(supplier_id) : supplier_id;
+            const parsedCompanyId = typeof company_id === 'string' ? parseInt(company_id) : company_id;
+            const parsedShipmentId = typeof shipment_id === 'string' ? parseInt(shipment_id) : shipment_id;
             const parsedWarehouseId = typeof warehouse_id === 'string' ? parseInt(warehouse_id) : warehouse_id;
             const parsedCurrencyId = typeof currency_id === 'string' ? parseInt(currency_id) : currency_id;
             const parsedSubtotal = typeof subtotal === 'string' ? parseFloat(subtotal) : subtotal;
@@ -537,6 +587,15 @@ async function updateBill(req, res, next) {
                 is_reverse_tax === true ||
                 is_reverse_tax === '1' ||
                 is_reverse_tax === 'true';
+            const parsedIsService =
+                is_service === 1 ||
+                is_service === true ||
+                is_service === '1' ||
+                is_service === 'true';
+
+            if (!parsedShipmentId) {
+                return res.status(400).json({ error: 'Shipment is required' });
+            }
 
             // Check if bill_number is being changed and if the new number already exists (excluding current bill)
             if (bill_number && bill_number !== bill.bill_number) {
@@ -560,6 +619,8 @@ async function updateBill(req, res, next) {
                 bill_date: bill.bill_date ? String(bill.bill_date).split('T')[0] : '',
                 due_date: bill.due_date ? String(bill.due_date).split('T')[0] : '',
                 supplier_id: oldSupplier[0]?.display_name || String(bill.supplier_id || ''),
+                company_id: bill.company_id ? String(bill.company_id) : '',
+                shipment_id: bill.shipment_id ? String(bill.shipment_id) : '',
                 warehouse_id: oldWarehouse[0]?.warehouse_name || String(bill.warehouse_id || ''),
                 currency_id: oldCurrency[0]?.name || String(bill.currency_id || ''),
                 subtotal: bill.subtotal || 0,
@@ -580,6 +641,8 @@ async function updateBill(req, res, next) {
                 bill_date: bill_date ? String(bill_date).split('T')[0] : '',
                 due_date: due_date ? String(due_date).split('T')[0] : '',
                 supplier_id: newSupplier[0]?.display_name || (parsedSupplierId ? String(parsedSupplierId) : ''),
+                company_id: parsedCompanyId ? String(parsedCompanyId) : '',
+                shipment_id: parsedShipmentId ? String(parsedShipmentId) : '',
                 warehouse_id: newWarehouse[0]?.warehouse_name || (parsedWarehouseId ? String(parsedWarehouseId) : ''),
                 currency_id: newCurrency[0]?.name || (parsedCurrencyId ? String(parsedCurrencyId) : ''),
                 subtotal: parsedSubtotal || 0,
@@ -601,15 +664,25 @@ async function updateBill(req, res, next) {
             // Clear edit_request_status when bill is edited (request has been fulfilled)
             await conn.query(`
                 UPDATE ap_bills 
-                SET bill_number = ?, bill_date = ?, due_date = ?, supplier_id = ?, purchase_order_id = ?, warehouse_id = ?,
-                    currency_id = ?, subtotal = ?, tax_total = ?, total = ?, notes = ?, is_reverse_tax = ?, status_id = ?,
+                SET bill_number = ?, bill_date = ?, due_date = ?, supplier_id = ?, purchase_order_id = ?, company_id = ?, shipment_id = ?, warehouse_id = ?,
+                    currency_id = ?, subtotal = ?, tax_total = ?, total = ?, notes = ?, is_reverse_tax = ?, is_service = ?, status_id = ?,
                     edit_request_status = NULL, edit_approved_by = NULL, edit_approved_at = NULL
                 WHERE id = ?
-            `, [bill_number, bill_date, due_date, parsedSupplierId, parsedPoId, parsedWarehouseId,
-                parsedCurrencyId, parsedSubtotal, parsedTaxTotal, parsedTotal, notes, (parsedIsReverseTax ? 1 : 0), newStatusId, bill.id]);
+            `, [bill_number, bill_date, due_date, parsedSupplierId, parsedPoId, parsedCompanyId, parsedShipmentId, parsedWarehouseId,
+                parsedCurrencyId, parsedSubtotal, parsedTaxTotal, parsedTotal, notes, (parsedIsReverseTax ? 1 : 0), (parsedIsService ? 1 : 0), newStatusId, bill.id]);
 
             await conn.query(`DELETE FROM ap_bill_line_batches WHERE bill_line_id IN (SELECT id FROM ap_bill_lines WHERE bill_id = ?)`, [bill.id]);
             await conn.query(`DELETE FROM ap_bill_lines WHERE bill_id = ?`, [bill.id]);
+
+            const productIds = [...new Set(lines.map(l => Number(l.product_id)).filter(Boolean))];
+            let productTypeMap = new Map();
+            if (productIds.length > 0) {
+                const [prodRows] = await conn.query(
+                    `SELECT id, item_type, item_id FROM products WHERE id IN (?)`,
+                    [productIds]
+                );
+                productTypeMap = new Map(prodRows.map(r => [Number(r.id), r]));
+            }
 
             // Handle new attachments if uploaded
             if (req.files && req.files.length > 0) {
@@ -646,7 +719,10 @@ async function updateBill(req, res, next) {
 
                 const lineId = lineResult.insertId;
 
-                if (line.batches && Array.isArray(line.batches)) {
+                const pinfo = parsedProductId ? productTypeMap.get(Number(parsedProductId)) : null;
+                const isServiceLine = (String(pinfo?.item_type || '').toLowerCase() === 'service') || Number(pinfo?.item_id) === 1;
+
+                if (!isServiceLine && line.batches && Array.isArray(line.batches)) {
                     for (const batch of line.batches) {
                         // Parse numeric fields if they come from FormData (strings)
                         const parsedBatchId = typeof batch.batch_id === 'string' ? parseInt(batch.batch_id) : (batch.batch_id || null);

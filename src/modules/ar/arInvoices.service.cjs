@@ -93,7 +93,9 @@ async function postInvoice(conn, invoiceId, userId) {
             ail.*,
             p.sales_account_id,
             p.purchase_account_id,
-            p.inventory_account_id
+            p.inventory_account_id,
+            p.item_type,
+            p.item_id
         FROM ar_invoice_lines ail
         LEFT JOIN products p ON p.id = ail.product_id
         WHERE ail.invoice_id = ? 
@@ -122,16 +124,23 @@ async function postInvoice(conn, invoiceId, userId) {
 
     for (const line of lines) {
         if (!line.product_id) continue;
+        const isServiceLine = String(line.item_type || '').toLowerCase() === 'service' || Number(line.item_id) === 1;
 
         // Validate that product has required accounts
         if (!line.sales_account_id) {
             throw new Error(`Product "${line.item_name}" (Line ${line.line_no}) does not have a sales_account_id. Please set the sales account for this product.`);
         }
-        if (!line.inventory_account_id) {
-            throw new Error(`Product "${line.item_name}" (Line ${line.line_no}) does not have an inventory_account_id. Please set the inventory account for this product.`);
+        if (!isServiceLine) {
+            if (!line.inventory_account_id) {
+                throw new Error(`Product "${line.item_name}" (Line ${line.line_no}) does not have an inventory_account_id. Please set the inventory account for this product.`);
+            }
+            if (!line.purchase_account_id) {
+                throw new Error(`Product "${line.item_name}" (Line ${line.line_no}) does not have a purchase_account_id. Please set the purchase account for this product.`);
+            }
         }
-        if (!line.purchase_account_id) {
-            throw new Error(`Product "${line.item_name}" (Line ${line.line_no}) does not have a purchase_account_id. Please set the purchase account for this product.`);
+
+        if (isServiceLine) {
+            continue;
         }
 
         const [batchAllocs] = await conn.query(`

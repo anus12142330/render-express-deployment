@@ -487,6 +487,73 @@ router.get("/stages", async (req, res) => {
     }
 });
 
+// --- lot options for bills (exclude archive stage)
+router.get("/lot-options", async (req, res) => {
+    try {
+        const poId = req.query.po_id ? Number(req.query.po_id) : null;
+        const vendorId = req.query.vendor_id ? Number(req.query.vendor_id) : null;
+
+        if (!poId && !vendorId) {
+            return res.json([]);
+        }
+
+        const where = ['s.is_inactive = 0', 's.shipment_stage_id <> 7', 's.lot_number IS NOT NULL'];
+        const params = [];
+
+        if (poId) {
+            where.push('s.po_id = ?');
+            params.push(poId);
+        } else if (vendorId) {
+            where.push('s.vendor_id = ?');
+            params.push(vendorId);
+        }
+
+        const [rows] = await db.promise().query(
+            `
+            SELECT
+                s.id AS shipment_id,
+                s.ship_uniqid,
+                s.po_id,
+                s.vendor_id,
+                s.lot_number,
+                s.total_lots,
+                s.shipment_stage_id,
+                po.po_number,
+                v.display_name as vendor_name
+            FROM shipment s
+            LEFT JOIN purchase_orders po ON po.id = s.po_id
+            LEFT JOIN vendor v ON v.id = s.vendor_id
+            WHERE ${where.join(' AND ')}
+            ORDER BY s.lot_number DESC, s.id DESC
+            `,
+            params
+        );
+
+        const data = (rows || []).map((row) => {
+            const lotLabel = row.total_lots > 1
+                ? `Lot ${row.lot_number}/${row.total_lots}`
+                : `Lot ${row.lot_number}`;
+            const poPart = row.po_number ? `${row.po_number} — ` : '';
+            return {
+                shipment_id: row.shipment_id,
+                shipment_uniqid: row.ship_uniqid,
+                po_id: row.po_id,
+                vendor_id: row.vendor_id,
+                lot_number: row.lot_number,
+                total_lots: row.total_lots,
+                stage_id: row.shipment_stage_id,
+                po_number: row.po_number || null,
+                vendor_name: row.vendor_name || null,
+                lot_label: `${poPart}${lotLabel}`
+            };
+        });
+
+        res.json(data);
+    } catch (e) {
+        res.status(500).json(errPayload("Failed to load shipment lots.", "DB_ERROR", e.message));
+    }
+});
+
 // --- board: all shipments with their current stage (from purchase_orders.shipment_stage_id)
 router.get("/board", async (req, res) => {
     try {

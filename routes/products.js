@@ -52,6 +52,7 @@ router.get('/', async (req, res) => {
         const categoryFilterId = req.query.category ? Number(req.query.category) : null;
         const inStockOnly = ['1', 'true', 1, true].includes(req.query.in_stock_only);
         const isActiveFilter = req.query.is_active;
+        const itemIdFilter = req.query.item_id !== undefined ? Number(req.query.item_id) : null;
 
         const asInt = (v, def, min = 0, max = 1000000000) => {
             const n = Number.parseInt(v, 10);
@@ -118,6 +119,11 @@ router.get('/', async (req, res) => {
             params.push(idsToFilter);
         }
 
+        if (Number.isFinite(itemIdFilter)) {
+            conds.push(`p.item_id = ?`);
+            params.push(itemIdFilter);
+        }
+
         const userId = req.query.user_id;
         if (userId) {
             conds.push(`p.created_by = ?`);
@@ -142,10 +148,15 @@ router.get('/', async (req, res) => {
                 SELECT
                     p.id,
                     p.pdt_uniqid AS uniqid,
+                    p.item_id,
+                    p.item_type,
                     COALESCE(p.product_name, '') AS name,
                     p.category_id,
                     c.name as category_name,
                     p.reorder_point,
+                    p.inventory_account_id,
+                    p.purchase_account_id,
+                    p.having_duty,
                     COALESCE(p.hscode, '') AS hscode,
                     0 AS unit_price,
                     COALESCE((SELECT SUM(s2.qty) FROM product_opening_stock s2 WHERE s2.product_id = p.id), 0) AS stock,
@@ -209,6 +220,7 @@ router.get('/', async (req, res) => {
                 uniqid: r.uniqid || null,
                 name: r.name,
                 packing_text: r.packing_text || null,
+                item_id: r.item_id ?? 0,
                 item_type: r.item_type || 'Goods',
                 packing_alias: r.packing_alias || null,
                 category: r.category_name || '',
@@ -222,7 +234,10 @@ router.get('/', async (req, res) => {
                 variety: r.variety || null,
                 grade_and_size_code: r.grade_and_size_code || null,
                 uom: r.uom || '',
-                uom_id: r.uom_id || null
+                uom_id: r.uom_id || null,
+                having_duty: r.having_duty ?? 0,
+                inventory_account_id: r.inventory_account_id || null,
+                purchase_account_id: r.purchase_account_id || null
             })),
             totalRows
         });
@@ -630,52 +645,56 @@ router.post('/', uploadFields, async (req, res) => {
         const purchase_tax_id = await fkOrNull(conn, 'taxes', p.purchase_tax_id);
 
         const pdt_uniqid = `pdt_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+        const itemIdRaw = readNum(p, ['item_id'], req.query?.item_id ?? 0);
+        let itemTypeRaw = read(p, ['item_type'], req.query?.item_type ?? 'Goods');
+        itemTypeRaw = String(itemTypeRaw || '').toLowerCase() === 'service' ? 'Service' : 'Goods';
+        let item_id = itemIdRaw;
+        let item_type = itemTypeRaw;
+        if (item_type === 'Service') item_id = 1;
+        if (Number(item_id) === 1) item_type = 'Service';
 
+        const productValues = [
+            pdt_uniqid, item_id, item_type, category_id, readBool01(p, ['is_taxable']), mode_of_shipment_id,
+            read(p, ['product_name']),
+            read(p, ['hscode'], null),
+            created_by_id,
+            readBool01(p, ['returnable']),
+            readBool01(p, ['excise']),
+            readBool01(p, ['having_duty']),
+            readBool01(p, ['enable_sales']),
+            selling_currency_id,
+            readNum(p, ['selling_price'], null),
+            sales_account_id,
+            read(p, ['sales_description'], null),
+            sales_tax_id,
+            readBool01(p, ['enable_purchase']),
+            cost_currency_id,
+            readNum(p, ['cost_price'], null),
+            purchase_account_id,
+            purchase_tax_id,
+            read(p, ['purchase_description'], null),
+            preferred_vendor_id,
+            readBool01(p, ['track_inventory']),
+            readBool01(p, ['track_batches']),
+            valuation_method_id,
+            inventory_account_id,
+            readNum(p, ['reorder_point'], null),
+            read(p, ['description'], null),
+            readNum(p, ['qc_tolerance_min'], 0),
+            readNum(p, ['qc_tolerance_max'], 3),
+        ];
+        const productPlaceholders = productValues.map(() => '?').join(', ');
         const [r1] = await conn.query(
             `INSERT INTO products
-       (pdt_uniqid, category_id, is_taxable, mode_of_shipment_id, product_name, hscode, created_by,
-        returnable, excise,
+       (pdt_uniqid, item_id, item_type, category_id, is_taxable, mode_of_shipment_id, product_name, hscode, created_by,
+        returnable, excise, having_duty,
         enable_sales, selling_currency_id, selling_price, sales_account_id, sales_description, sales_tax_id,
         enable_purchase, cost_currency_id, cost_price, purchase_account_id, purchase_tax_id, purchase_description, preferred_vendor_id,
         track_inventory, track_batches, valuation_method_id, inventory_account_id, reorder_point,
         description, qc_tolerance_min, qc_tolerance_max, created_at, updated_at)
        VALUES
-       (?,?,?, ?, ?,?,?,  ?,?,  ?,?,?,?,?, ?,?,  ?,?,?,?,?,?, ?,?,  ?,?,?,?, ?, ?, NOW(), NOW())`,
-            [
-                pdt_uniqid, category_id, readBool01(p, ['is_taxable']), mode_of_shipment_id,
-
-                read(p, ['product_name']),
-                read(p, ['hscode'], null),
-                created_by_id,
-
-                readBool01(p, ['returnable']),
-                readBool01(p, ['excise']),
-
-                readBool01(p, ['enable_sales']),
-                selling_currency_id,
-                readNum(p, ['selling_price'], null),
-                sales_account_id,
-                read(p, ['sales_description'], null),
-                sales_tax_id,
-
-                readBool01(p, ['enable_purchase']),
-                cost_currency_id,
-                readNum(p, ['cost_price'], null),
-                purchase_account_id,
-                purchase_tax_id,
-                read(p, ['purchase_description'], null),
-                preferred_vendor_id,
-
-                readBool01(p, ['track_inventory']),
-                readBool01(p, ['track_batches']),
-                valuation_method_id,
-                inventory_account_id,
-                readNum(p, ['reorder_point'], null),
-
-                read(p, ['description'], null),
-                readNum(p, ['qc_tolerance_min'], 0),
-                readNum(p, ['qc_tolerance_max'], 3),
-            ]
+       (${productPlaceholders}, NOW(), NOW())`,
+            productValues
         );
 
         const productId = r1.insertId;
@@ -689,12 +708,13 @@ router.post('/', uploadFields, async (req, res) => {
         // ---- product_details ----
         // ---- product_details ----
         const rows = parseJSON(p, 'dimension_rows', []);
-        if (!Array.isArray(rows) || rows.length === 0 || !rows[0].uom_id) {
+        const isService = item_type === 'Service' || Number(item_id) === 1;
+        if (!isService && (!Array.isArray(rows) || rows.length === 0 || !rows[0].uom_id)) {
             await conn.rollback();
             return res.status(400).json({ ok: false, error: 'VALIDATION_ERROR', error_details: { message: 'UOM (Unit of Measure) is a required field.' } });
         }
 
-        const values = rows.map((r) => {
+        const values = Array.isArray(rows) ? rows.map((r) => {
             // which file (if any) belongs to this row?
             const idx = Number.isFinite(Number(r.image_upload_index)) ? Number(r.image_upload_index) : -1;
             const pack_image_path =
@@ -721,17 +741,19 @@ router.post('/', uploadFields, async (req, res) => {
                 r.grade_and_size_code || null,
                 r.packing_alias || null
             ];
-        });
+        }) : [];
 
-        await conn.query(
-            `INSERT INTO product_details
+        if (values.length) {
+            await conn.query(
+                `INSERT INTO product_details
   (product_id, origin_id, packing_text, dimensions, dim_unit,
    net_wt, gross_wt, wt_unit, brand_id,
    mpn, isbn, upc, ean, uom_id, pack_image_path,
    variety, grade_and_size_code, packing_alias)
  VALUES ?`,
-            [values]
-        );
+                [values]
+            );
+        }
 
 
         // ---- product_opening_stock ----
@@ -881,7 +903,7 @@ function getChangedFields(oldValues, newValues) {
     const keysToCompare = Object.keys(newValues);
 
     const numericFields = ['selling_price', 'cost_price', 'reorder_point', 'qc_tolerance_min', 'qc_tolerance_max'];
-    const booleanFields = ['returnable', 'excise', 'is_taxable', 'enable_sales', 'enable_purchase', 'track_inventory', 'track_batches'];
+    const booleanFields = ['returnable', 'excise', 'having_duty', 'is_taxable', 'enable_sales', 'enable_purchase', 'track_inventory', 'track_batches'];
 
     for (const key of keysToCompare) {
         const oldValue = oldValues[key];
@@ -990,6 +1012,7 @@ router.put('/:id', uploadFields, async (req, res) => {
             mode_of_shipment_id,
             returnable: readBool01(p, ['returnable']),
             excise: readBool01(p, ['excise']),
+            having_duty: readBool01(p, ['having_duty']),
             is_taxable: readBool01(p, ['is_taxable']),
             enable_sales: readBool01(p, ['enable_sales']),
             selling_currency_id,
@@ -1025,6 +1048,7 @@ router.put('/:id', uploadFields, async (req, res) => {
         hscode=?,
         returnable=?,
         excise=?,
+        having_duty=?,
         is_taxable=?,
         enable_sales=?,
         selling_currency_id=?,
@@ -1057,6 +1081,7 @@ router.put('/:id', uploadFields, async (req, res) => {
 
                 readBool01(p, ['returnable']),
                 readBool01(p, ['excise']),
+                readBool01(p, ['having_duty']),
                 readBool01(p, ['is_taxable']),
 
                 readBool01(p, ['enable_sales']),
@@ -1139,18 +1164,19 @@ router.put('/:id', uploadFields, async (req, res) => {
         // ----- product_details: Smarter update to preserve IDs -----
         const rowFiles = (req.files?.['row_images[]'] || []);
         const incomingRows = parseJSON(p, 'dimension_rows', []);
-        if (!Array.isArray(incomingRows) || incomingRows.length === 0 || !incomingRows[0].uom_id) {
+        const isService = String(oldProduct?.item_type || '').toLowerCase() === 'service' || Number(oldProduct?.item_id) === 1;
+        if (!isService && (!Array.isArray(incomingRows) || incomingRows.length === 0 || !incomingRows[0].uom_id)) {
             await conn.rollback();
             return res.status(400).json({ ok: false, error: 'VALIDATION_ERROR', error_details: { message: 'UOM (Unit of Measure) is a required field.' } });
         }
 
-        // 1. Get existing detail IDs for this product to compare against
-        const [existingDetailRows] = await conn.query('SELECT id FROM product_details WHERE product_id=?', [productId]);
-        const existingDetailIds = existingDetailRows.map(r => r.id);
-        const idsToKeep = [];
-
-        // 2. Process incoming rows: update existing, insert new
         if (Array.isArray(incomingRows) && incomingRows.length) {
+            // 1. Get existing detail IDs for this product to compare against
+            const [existingDetailRows] = await conn.query('SELECT id FROM product_details WHERE product_id=?', [productId]);
+            const existingDetailIds = existingDetailRows.map(r => r.id);
+            const idsToKeep = [];
+
+            // 2. Process incoming rows: update existing, insert new
             for (const r of incomingRows) {
                 const idx = Number.isFinite(Number(r.image_upload_index)) ? Number(r.image_upload_index) : -1;
                 const pack_image_path =
@@ -1202,12 +1228,13 @@ router.put('/:id', uploadFields, async (req, res) => {
                     );
                 }
             }
-        }
-
-        // 3. Delete rows from DB that were removed in the UI
-        const idsToDelete = existingDetailIds.filter(id => !idsToKeep.includes(id));
-        if (idsToDelete.length > 0) {
-            await conn.query(`DELETE FROM product_details WHERE id IN (?)`, [idsToDelete]);
+            // 3. Delete rows from DB that were removed in the UI
+            const idsToDelete = existingDetailIds.filter(id => !idsToKeep.includes(id));
+            if (idsToDelete.length > 0) {
+                await conn.query(`DELETE FROM product_details WHERE id IN (?)`, [idsToDelete]);
+            }
+        } else if (isService) {
+            await conn.query('DELETE FROM product_details WHERE product_id=?', [productId]);
         }
 
         // ----- product_opening_stock: replace-all strategy -----

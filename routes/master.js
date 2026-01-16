@@ -423,6 +423,19 @@ chart_of_accounts: {
         listOrderBy: 'name'
     },
 
+    shipment_calculator_master: {
+        table: 'shipment_calculator_master',
+        id: 'id',
+        fields: [
+            { name: 'location_code', type: 'string', required: true },
+            { name: 'clearance_charges', type: 'number', required: true },
+            { name: 'loading_charges', type: 'number', required: true },
+            { name: 'transportation', type: 'number', required: true },
+            { name: 'is_active', type: 'boolean', default: true }
+        ],
+        listOrderBy: 'location_code'
+    },
+
     status: {
         table: 'status',
         id: 'id',

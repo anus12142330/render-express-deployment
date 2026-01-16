@@ -27,9 +27,10 @@ async function postBill(conn, billId, userId) {
     }
 
     const bill = bills[0];
+    const isServiceBill = bill.is_service === 1 || bill.is_service === true;
 
     // Validate required bill data
-    if (!bill.warehouse_id) {
+    if (!isServiceBill && !bill.warehouse_id) {
         throw new Error('Bill must have a warehouse assigned');
     }
     if (!bill.bill_date) {
@@ -177,7 +178,10 @@ async function postBill(conn, billId, userId) {
 
     // Get bill lines
     const [lines] = await conn.query(`
-        SELECT * FROM ap_bill_lines WHERE bill_id = ? ORDER BY line_no
+        SELECT abl.*, p.item_type, p.item_id
+        FROM ap_bill_lines abl
+        LEFT JOIN products p ON p.id = abl.product_id
+        WHERE abl.bill_id = ? ORDER BY abl.line_no
     `, [billId]);
 
     if (lines.length === 0) {
@@ -189,6 +193,9 @@ async function postBill(conn, billId, userId) {
     // Process each line with batch splits
     for (const line of lines) {
         if (!line.product_id) continue; // Skip non-inventory items
+        if (String(line.item_type || '').toLowerCase() === 'service' || Number(line.item_id) === 1) {
+            continue; // Skip service lines for inventory transactions
+        }
 
         const [batchSplits] = await conn.query(`
             SELECT * FROM ap_bill_line_batches WHERE bill_line_id = ?
@@ -285,12 +292,15 @@ async function postBill(conn, billId, userId) {
         throw new Error('Accounts Payable account not found in Chart of Accounts. Please ensure account ID 6 exists.');
     }
 
-    // Get bill lines with product inventory_account_id
-    // Group lines by inventory_account_id to create journal lines
+    // Get bill lines with product account IDs
+    // Use inventory_account_id for goods and purchase_account_id for services
     const [linesWithAccounts] = await conn.query(`
         SELECT 
             abl.*,
             p.inventory_account_id,
+            p.purchase_account_id,
+            p.item_type,
+            p.item_id,
             COALESCE(abl.line_total, (abl.quantity * abl.rate)) as line_total_amount
         FROM ap_bill_lines abl
         LEFT JOIN products p ON p.id = abl.product_id
@@ -302,26 +312,27 @@ async function postBill(conn, billId, userId) {
     const billTaxTotal = parseFloat(bill.tax_total || 0);
     const billTotal = parseFloat(bill.total || 0);
 
-    // Group lines by inventory_account_id and product_id to track individual products
+    // Group lines by account_id and product_id to track individual products
     // We'll create journal lines per product to track product_id
     const accountTotals = {};
     const accountNames = {};
     const productLines = []; // Store individual product lines for journal entries
     let calculatedSubtotal = 0;
 
-    // Track lines without inventory_account_id to adjust subtotal validation
+    // Track lines without required account to adjust subtotal validation
     let subtotalWithoutInventoryAccount = 0;
-    const productsWithoutInventoryAccount = []; // Track products missing inventory account for error message
+    const productsWithoutInventoryAccount = []; // Track products missing required account for error message
 
     for (const line of linesWithAccounts) {
-        const inventoryAccountId = line.inventory_account_id;
+        const isServiceLine = String(line.item_type || '').toLowerCase() === 'service' || Number(line.item_id) === 1;
+        const accountId = isServiceLine ? line.purchase_account_id : line.inventory_account_id;
         const lineTotal = parseFloat(line.line_total_amount || 0);
         const productId = line.product_id;
         
-        // Skip products without inventory_account_id from GL journal entries
+        // Skip products without required account from GL journal entries
         // These products will still have inventory stock updated (done earlier), but no GL journal entry
         // Note: This may cause accounting imbalance - inventory stock increases but no corresponding GL debit
-        if (!inventoryAccountId) {
+        if (!accountId) {
             productsWithoutInventoryAccount.push({
                 name: line.item_name || 'Unknown',
                 lineNo: line.line_no || 'N/A'
@@ -330,22 +341,22 @@ async function postBill(conn, billId, userId) {
             continue; // Skip this line from GL journal processing
         }
 
-        if (!accountTotals[inventoryAccountId]) {
-            accountTotals[inventoryAccountId] = 0;
+        if (!accountTotals[accountId]) {
+            accountTotals[accountId] = 0;
             // Get account name for description
             const [accountRows] = await conn.query(`
                 SELECT name FROM acc_chart_accounts WHERE id = ?
-            `, [inventoryAccountId]);
-            accountNames[inventoryAccountId] = accountRows.length > 0 ? accountRows[0].name : `Account ${inventoryAccountId}`;
+            `, [accountId]);
+            accountNames[accountId] = accountRows.length > 0 ? accountRows[0].name : `Account ${accountId}`;
         }
 
-        accountTotals[inventoryAccountId] += lineTotal;
+        accountTotals[accountId] += lineTotal;
         calculatedSubtotal += lineTotal;
 
         // Store product line for journal entry
         if (productId && lineTotal > 0) {
             productLines.push({
-                account_id: inventoryAccountId,
+                account_id: accountId,
                 product_id: productId,
                 amount: lineTotal,
                 item_name: line.item_name
@@ -354,10 +365,10 @@ async function postBill(conn, billId, userId) {
     }
 
     // Validate that calculated subtotal matches bill subtotal (with tolerance for rounding)
-    // Note: If products without inventory_account_id were skipped, subtract them from billSubtotal for comparison
+    // Note: If products without required account were skipped, subtract them from billSubtotal for comparison
     const expectedSubtotal = billSubtotal - subtotalWithoutInventoryAccount;
     if (Math.abs(calculatedSubtotal - expectedSubtotal) > 0.01) {
-        throw new Error(`Line totals (${calculatedSubtotal}) do not match bill subtotal (${billSubtotal}${subtotalWithoutInventoryAccount > 0 ? `, excluding ${subtotalWithoutInventoryAccount} from products without inventory accounts` : ''}). Please verify bill line amounts.`);
+        throw new Error(`Line totals (${calculatedSubtotal}) do not match bill subtotal (${billSubtotal}${subtotalWithoutInventoryAccount > 0 ? `, excluding ${subtotalWithoutInventoryAccount} from products without required accounts` : ''}). Please verify bill line amounts.`);
     }
 
     // Validate that subtotal + tax_total = total (with small tolerance for rounding)
@@ -369,22 +380,22 @@ async function postBill(conn, billId, userId) {
     const journalLines = [];
     const supplierId = bill.supplier_id; // supplier_id from ap_bills table saved to buyer_id
     
-    // Check if we have any products with inventory accounts
+    // Check if we have any products with required accounts
     if (productLines.length === 0) {
         const productList = productsWithoutInventoryAccount.length > 0
             ? productsWithoutInventoryAccount.map(p => `"${p.name}" (Line ${p.lineNo})`).join(', ')
             : 'All products';
         throw new Error(
-            `Cannot approve purchase bill: No products have an inventory account configured.\n\n` +
-            `Products missing inventory account:\n${productList}\n\n` +
-            `Please set the inventory account for these products in the Product Master before approving the bill.`
+            `Cannot approve purchase bill: No products have a required account configured.\n\n` +
+            `Products missing required account:\n${productList}\n\n` +
+            `Please set the inventory account for goods or purchase account for services in the Product Master before approving the bill.`
         );
     }
     
-    // If some products are missing inventory accounts, show warning but continue
+    // If some products are missing required accounts, show warning but continue
     if (productsWithoutInventoryAccount.length > 0) {
         const productList = productsWithoutInventoryAccount.map(p => `"${p.name}" (Line ${p.lineNo})`).join(', ');
-        console.warn(`Warning: The following products do not have inventory accounts and will be excluded from GL journal entries: ${productList}`);
+        console.warn(`Warning: The following products do not have required accounts and will be excluded from GL journal entries: ${productList}`);
     }
     
     // Add debit lines for each product
@@ -527,54 +538,57 @@ async function reverseBillTransactions(conn, billId, userId) {
     }
 
     const bill = bills[0];
+    const isServiceBill = bill.is_service === 1 || bill.is_service === true;
 
-    // Get inventory transactions for this bill (only non-deleted)
-    const [txns] = await conn.query(`
-        SELECT * FROM inventory_transactions 
-        WHERE source_type = 'AP_BILL' AND source_id = ?
-        AND txn_type = 'PURCHASE_BILL_RECEIPT'
-        AND (is_deleted = 0 OR is_deleted IS NULL)
-    `, [billId]);
+    if (!isServiceBill) {
+        // Get inventory transactions for this bill (only non-deleted)
+        const [txns] = await conn.query(`
+            SELECT * FROM inventory_transactions 
+            WHERE source_type = 'AP_BILL' AND source_id = ?
+            AND txn_type = 'PURCHASE_BILL_RECEIPT'
+            AND (is_deleted = 0 OR is_deleted IS NULL)
+        `, [billId]);
 
-    // Reverse each transaction
-    for (const txn of txns) {
-        // Reverse stock (OUT movement to reduce stock)
-        // Note: For reversals, we don't update currency_id/uom_id as stock already has it
-        await inventoryService.updateInventoryStock(
-            conn,
-            txn.product_id,
-            txn.warehouse_id,
-            txn.batch_id,
-            txn.qty,
-            txn.unit_cost,
-            false // isIn = false (OUT)
-        );
+        // Reverse each transaction
+        for (const txn of txns) {
+            // Reverse stock (OUT movement to reduce stock)
+            // Note: For reversals, we don't update currency_id/uom_id as stock already has it
+            await inventoryService.updateInventoryStock(
+                conn,
+                txn.product_id,
+                txn.warehouse_id,
+                txn.batch_id,
+                txn.qty,
+                txn.unit_cost,
+                false // isIn = false (OUT)
+            );
 
-        // Calculate reversal amounts
-        const amount = parseFloat(txn.qty || 0) * parseFloat(txn.unit_cost || 0); // Transaction currency amount
-        const aedAmount = txn.exchange_rate && parseFloat(txn.exchange_rate) > 0 
-            ? amount * parseFloat(txn.exchange_rate)
-            : amount; // AED converted amount
+            // Calculate reversal amounts
+            const amount = parseFloat(txn.qty || 0) * parseFloat(txn.unit_cost || 0); // Transaction currency amount
+            const aedAmount = txn.exchange_rate && parseFloat(txn.exchange_rate) > 0 
+                ? amount * parseFloat(txn.exchange_rate)
+                : amount; // AED converted amount
 
-        // Create reversal transaction (preserve currency and exchange rate from original)
-        await inventoryService.insertInventoryTransaction(conn, {
-            txn_date: new Date(),
-            movement: 'OUT',
-            txn_type: 'REVERSAL_OUT',
-            source_type: 'REVERSAL',
-            source_id: billId,
-            source_line_id: txn.source_line_id,
-            product_id: txn.product_id,
-            warehouse_id: txn.warehouse_id,
-            batch_id: txn.batch_id,
-            qty: txn.qty,
-            unit_cost: txn.unit_cost,
-            currency_id: txn.currency_id || null,
-            exchange_rate: txn.exchange_rate || null,
-            foreign_amount: amount, // Transaction currency amount
-            total_amount: aedAmount, // AED converted amount
-            uom_id: txn.uom_id || null
-        });
+            // Create reversal transaction (preserve currency and exchange rate from original)
+            await inventoryService.insertInventoryTransaction(conn, {
+                txn_date: new Date(),
+                movement: 'OUT',
+                txn_type: 'REVERSAL_OUT',
+                source_type: 'REVERSAL',
+                source_id: billId,
+                source_line_id: txn.source_line_id,
+                product_id: txn.product_id,
+                warehouse_id: txn.warehouse_id,
+                batch_id: txn.batch_id,
+                qty: txn.qty,
+                unit_cost: txn.unit_cost,
+                currency_id: txn.currency_id || null,
+                exchange_rate: txn.exchange_rate || null,
+                foreign_amount: amount, // Transaction currency amount
+                total_amount: aedAmount, // AED converted amount
+                uom_id: txn.uom_id || null
+            });
+        }
     }
 
     // Get original journal and create reversal

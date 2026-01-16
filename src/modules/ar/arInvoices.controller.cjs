@@ -245,6 +245,8 @@ async function getInvoice(req, res, next) {
             SELECT 
                 ail.*, 
                 um.name as uom_name,
+                p.item_type,
+                p.item_id,
                 (SELECT pi.file_path 
                  FROM product_images pi 
                  WHERE pi.product_id = ail.product_id 
@@ -252,6 +254,7 @@ async function getInvoice(req, res, next) {
                  LIMIT 1) as product_image
             FROM ar_invoice_lines ail
             LEFT JOIN uom_master um ON um.id = ail.uom_id
+            LEFT JOIN products p ON p.id = ail.product_id
             WHERE ail.invoice_id = ?
             ORDER BY ail.line_no
         `, [invoice.id]);
@@ -416,6 +419,16 @@ async function createInvoice(req, res, next) {
 
             const invoiceId = invoiceResult.insertId;
 
+            const productIds = [...new Set(lines.map(l => Number(l.product_id)).filter(Boolean))];
+            let productTypeMap = new Map();
+            if (productIds.length > 0) {
+                const [prodRows] = await conn.query(
+                    `SELECT id, item_type, item_id FROM products WHERE id IN (?)`,
+                    [productIds]
+                );
+                productTypeMap = new Map(prodRows.map(r => [Number(r.id), r]));
+            }
+
             for (let i = 0; i < lines.length; i++) {
                 const line = lines[i];
                 const [lineResult] = await conn.query(`
@@ -426,7 +439,10 @@ async function createInvoice(req, res, next) {
 
                 const lineId = lineResult.insertId;
 
-                if (line.batches && Array.isArray(line.batches)) {
+                const pinfo = line.product_id ? productTypeMap.get(Number(line.product_id)) : null;
+                const isServiceLine = (String(pinfo?.item_type || '').toLowerCase() === 'service') || Number(pinfo?.item_id) === 1;
+
+                if (!isServiceLine && line.batches && Array.isArray(line.batches)) {
                     for (const batch of line.batches) {
                         await conn.query(`
                             INSERT INTO ar_invoice_line_batches 
@@ -637,6 +653,16 @@ async function updateInvoice(req, res, next) {
             await conn.query(`DELETE FROM ar_invoice_line_batches WHERE invoice_line_id IN (SELECT id FROM ar_invoice_lines WHERE invoice_id = ?)`, [invoice.id]);
             await conn.query(`DELETE FROM ar_invoice_lines WHERE invoice_id = ?`, [invoice.id]);
 
+            const productIds = [...new Set(lines.map(l => Number(l.product_id)).filter(Boolean))];
+            let productTypeMap = new Map();
+            if (productIds.length > 0) {
+                const [prodRows] = await conn.query(
+                    `SELECT id, item_type, item_id FROM products WHERE id IN (?)`,
+                    [productIds]
+                );
+                productTypeMap = new Map(prodRows.map(r => [Number(r.id), r]));
+            }
+
             for (let i = 0; i < lines.length; i++) {
                 const line = lines[i];
                 const [lineResult] = await conn.query(`
@@ -647,7 +673,10 @@ async function updateInvoice(req, res, next) {
 
                 const lineId = lineResult.insertId;
 
-                if (line.batches && Array.isArray(line.batches)) {
+                const pinfo = line.product_id ? productTypeMap.get(Number(line.product_id)) : null;
+                const isServiceLine = (String(pinfo?.item_type || '').toLowerCase() === 'service') || Number(pinfo?.item_id) === 1;
+
+                if (!isServiceLine && line.batches && Array.isArray(line.batches)) {
                     for (const batch of line.batches) {
                         await conn.query(`
                             INSERT INTO ar_invoice_line_batches 
@@ -1031,9 +1060,10 @@ async function approveInvoice(req, res, next) {
             // Validate stock availability before approval
             // Get all invoice lines with batch allocations
             const [invoiceLines] = await conn.query(`
-                SELECT ail.id, ail.product_id, ail.item_name, ail.quantity, ai.warehouse_id
+                SELECT ail.id, ail.product_id, ail.item_name, ail.quantity, ai.warehouse_id, p.item_type, p.item_id
                 FROM ar_invoice_lines ail
                 JOIN ar_invoices ai ON ai.id = ail.invoice_id
+                LEFT JOIN products p ON p.id = ail.product_id
                 WHERE ail.invoice_id = ?
                 ORDER BY ail.line_no
             `, [invoice.id]);
@@ -1042,6 +1072,10 @@ async function approveInvoice(req, res, next) {
 
             for (const line of invoiceLines) {
                 if (!line.product_id) continue;
+                const isServiceLine = String(line.item_type || '').toLowerCase() === 'service' || Number(line.item_id) === 1;
+                if (isServiceLine) {
+                    continue;
+                }
 
                 // Get batch allocations for this line
                 const [batchAllocs] = await conn.query(`
