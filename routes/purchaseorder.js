@@ -418,6 +418,7 @@ router.get("/by-uniqid/:uniqid", async (req, res) => {
                 comp.logo  as company_logo,               
                  dpd.name as discharge_name, dpd.id as port_discharge_id,
                  inco.name as inco_name,
+                 inco.acronyms as inco_acronyms,
                  tax.tax_name,
                  c.display_name as customer_name,
                  cr.name as currency,
