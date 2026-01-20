@@ -1,63 +1,61 @@
-import express from 'express';
-import mysql from 'mysql2';
-import multer from 'multer';
 import cors from 'cors';
-import fs from 'fs';
-import path from 'path';
 import crypto from 'crypto';
+import express from 'express';
 import session from 'express-session';
-import productRoutes from './routes/products.js';
-import customerRoutes from './routes/customer.js';
-import vendorRoutes from './routes/vendor.js';
-import purchaseorderRoutes from './routes/purchaseorder.js';
-import poTimelineRoutes from './routes/poTimeline.js';
-import portRoutes from './routes/port.js';
-import incoRoutes from './routes/inco.js';
-import uomRoutes from './routes/uom.js';
-import statusRoutes from './routes/status.js';
-import termsconditionRoutes from './routes/termscondition.js';
-import taxesRoutes from './routes/taxes.js'; 
-import purchasebillRoutes from './routes/purchasebillk.js';
-import shipmentRoutes from './routes/shipment.js';
-import proformaRoutes from './routes/proforma.js';
-import salesQuoteRoutes from './routes/salesQuote.js';
-import documentTypeRoutes from './routes/documentType.js';
-import shipmentDocumentsRoutes from './routes/shipmentDocuments.js';
-import shipmentStageRoutes from './routes/shipmentStage.js';
-import modeShipmentRoutes from './routes/modeShipment.js';
+import fs from 'fs';
+import { createRequire } from 'module';
+import multer from 'multer';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import './cronJobs/expireCheck.js';
+import db from "./db.js";
+import { requireAuth } from './middleware/authz.js';
 import bankRoutes from './routes/bank.js';
 import bankAccountRoutes from './routes/bankAccounts.js';
+import brandRoutes from './routes/brand.js';
+import containerLoadRoutes from './routes/containerLoad.js';
+import containerTypeRoutes from './routes/containerType.js';
+import customerRoutes from './routes/customer.js';
+import deliveryOrderRoutes from "./routes/deliveryOrder.js"; // Import the new sales order router
+import documentRoutes from './routes/document.js';
+import documentTemplateRoutes from './routes/documentTemplate.js';
+import documentTypeRoutes from './routes/documentType.js';
+import driverRoutes from './routes/driver.js';
+import fleetRoutes from './routes/fleet.js';
 import fundTransferRoutes from './routes/fundTransfer.js';
+import harvestCalendarRoutes from "./routes/harvestCalendar.js"; // Import the new router
+import incoRoutes from './routes/inco.js';
+import inwardPaymentsRoutes from './routes/inwardPayments.js';
+import manufactureRoutes from './routes/manufacture.js';
+import masterRoutes from "./routes/master.js";
+import modeShipmentRoutes from './routes/modeShipment.js';
 import openingBalanceRoutes from './routes/openingBalance.js';
+import outwardPaymentsRoutes from './routes/outwardPayments.js';
 import partialShipmentRoutes from './routes/partialShipment.js';
 import paymentTermsRoutes from './routes/paymentTerms.js';
-import containerTypeRoutes from './routes/containerType.js';
-import containerLoadRoutes from './routes/containerLoad.js';
-import documentRoutes from './routes/document.js';
-import fleetRoutes from './routes/fleet.js';
-import driverRoutes from './routes/driver.js';
-import brandRoutes from './routes/brand.js';
-import manufactureRoutes from './routes/manufacture.js';
-import './cronJobs/expireCheck.js';
-import masterRoutes from "./routes/master.js";
-import routePlannerRoutes from './routes/routePlanner.js';
-import deliveryOrderRoutes from "./routes/deliveryOrder.js"; // Import the new sales order router
-import harvestCalendarRoutes from "./routes/harvestCalendar.js"; // Import the new router
-import warehousesRoutes from "./routes/warehouses.js";
-import router from "./routes/customer.js"; // ✅ ES module import
-import uploadRoutes from "./routes/upload.js";
+import poTimelineRoutes from './routes/poTimeline.js';
+import portRoutes from './routes/port.js';
+import productRoutes from './routes/products.js';
+import proformaRoutes from './routes/proforma.js';
+import purchasebillRoutes from './routes/purchasebillk.js';
+import purchaseorderRoutes from './routes/purchaseorder.js';
+import qualityCheckRoutes from './routes/qualityCheck.js';
 import rbacRoutes from './routes/rbac.js';
 import roleRoutes from './routes/roles.js';
-import documentTemplateRoutes from './routes/documentTemplate.js';
-import qualityCheckRoutes from './routes/qualityCheck.js';
+import routePlannerRoutes from './routes/routePlanner.js';
+import salesQuoteRoutes from './routes/salesQuote.js';
+import shipmentRoutes from './routes/shipment.js';
+import shipmentDocumentsRoutes from './routes/shipmentDocuments.js';
+import shipmentStageRoutes from './routes/shipmentStage.js';
+import statusRoutes from './routes/status.js';
 import systemSettingsRoutes from './routes/systemSettings.js';
-import outwardPaymentsRoutes from './routes/outwardPayments.js';
-import inwardPaymentsRoutes from './routes/inwardPayments.js';
-import db from "./db.js";
-import { fileURLToPath } from 'url';
+import taxesRoutes from './routes/taxes.js';
+import termsconditionRoutes from './routes/termscondition.js';
+import uomRoutes from './routes/uom.js';
+import uploadRoutes from "./routes/upload.js";
+import vendorRoutes from './routes/vendor.js';
+import warehousesRoutes from "./routes/warehouses.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-import { requireAuth, requirePerm } from './middleware/authz.js';
-import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 
 // Helper function to run queries with promises and return rows
@@ -67,6 +65,7 @@ const q = async (sql, p = []) => (await db.promise().query(sql, p))[0];
 const apRoutes = require('./src/modules/ap/ap.routes.cjs');
 const arRoutes = require('./src/modules/ar/ar.routes.cjs');
 const inventoryRoutes = require('./src/modules/inventory/inventory.routes.cjs');
+const operationsRoutes = require('./routes/operations.cjs');
 
 const app = express();
 app.use(cors());
@@ -221,6 +220,7 @@ app.use('/api/system-settings', systemSettingsRoutes);
 app.use('/api/ap', apRoutes);
 app.use('/api/ar', arRoutes);
 app.use('/api/inventory', inventoryRoutes);
+app.use('/api', operationsRoutes);
 
 // GL (General Ledger) routes
 const glRoutes = require('./src/modules/gl/gl.routes.cjs');
@@ -345,17 +345,47 @@ app.get('/api/login-debug', (req, res) => {
   );
 });
 
+// demo credentials (debug only)
+app.get('/api/login-debug-credential', async (req, res) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(403).json({ success: false, message: 'Not available in production' });
+  }
+  try {
+    const [columns] = await db.promise().query("SHOW COLUMNS FROM `user` LIKE 'user_name'");
+    const hasUserName = columns.length > 0;
+    const [rows] = await db.promise().query(
+      hasUserName
+        ? 'SELECT id, user_name, name, password FROM `user` WHERE id = 1 LIMIT 1'
+        : 'SELECT id, name, password FROM `user` WHERE id = 1 LIMIT 1'
+    );
+    if (!rows.length) {
+      return res.json({ success: false, message: 'User not found' });
+    }
+    const row = rows[0];
+    const username = row.user_name || row.name || '';
+    return res.json({ success: true, user: { id: row.id, username, password: row.password } });
+  } catch (err) {
+    console.error('❌ Debug credential error:', err);
+    return res.status(500).json({ success: false, error: err.message || 'Database error' });
+  }
+});
+
 app.post('/api/login', async (req, res) => {
- 
-  const email = String(req.body?.email ?? '').trim();
+
+  const identifier = String(req.body?.email ?? '').trim();
   const password = String(req.body?.password ?? '').trim();
-  console.log('[LOGIN]', { email, passwordLen: password.length });
+  console.log('[LOGIN]', { identifier, passwordLen: password.length });
 
   try {
-    const [loginRows] = await db.promise().query(
-      'SELECT id, email FROM user WHERE email = ? AND password = ? AND is_inactive = 0',
-      [email, password]
-    );
+    const [columns] = await db.promise().query("SHOW COLUMNS FROM `user` LIKE 'user_name'");
+    const hasUserName = columns.length > 0;
+    const loginSql = hasUserName
+      ? 'SELECT id, email FROM user WHERE (email = ? OR name = ? OR user_name = ?) AND password = ? AND is_inactive = 0'
+      : 'SELECT id, email FROM user WHERE (email = ? OR name = ?) AND password = ? AND is_inactive = 0';
+    const loginParams = hasUserName
+      ? [identifier, identifier, identifier, password]
+      : [identifier, identifier, password];
+    const [loginRows] = await db.promise().query(loginSql, loginParams);
 
     if (loginRows.length === 0) {
       return res.json({ success: false, message: 'Invalid credentials' });

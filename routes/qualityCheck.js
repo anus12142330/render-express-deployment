@@ -236,6 +236,236 @@ router.get('/lots/:id', requireAuth, async (req, res) => {
   }
 });
 
+// GET /api/quality-check/lots/:id/logger-details - Get shipment logger details + QC logger attachments
+router.get('/lots/:id/logger-details', requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const [[lot]] = await db.promise().query(
+      'SELECT id, shipment_id FROM qc_lots WHERE id = ?',
+      [id]
+    );
+
+    if (!lot) {
+      return res.status(404).json(errPayload('QC lot not found', 'NOT_FOUND'));
+    }
+
+    if (!lot.shipment_id) {
+      return res.json({ enabled: false });
+    }
+
+    const [[shipment]] = await db.promise().query(
+      'SELECT id, ship_uniqid, supplier_logger_installed, logger_count FROM shipment WHERE id = ?',
+      [lot.shipment_id]
+    );
+
+    if (!shipment || shipment.supplier_logger_installed !== 'YES') {
+      return res.json({
+        enabled: false,
+        supplier_logger_installed: shipment?.supplier_logger_installed || null
+      });
+    }
+
+    const [loggers] = await db.promise().query(
+      'SELECT id, serial_no, installation_place FROM shipment_temperature_loggers WHERE shipment_id = ? ORDER BY id ASC',
+      [shipment.id]
+    );
+
+    const [containers] = await db.promise().query(
+      'SELECT DISTINCT container_id, container_no FROM qc_lot_items WHERE qc_lot_id = ? ORDER BY container_no',
+      [lot.id]
+    );
+
+    const [files] = await db.promise().query(
+      `SELECT id, shipment_logger_id, container_id, file_name, file_path, mime_type, size_bytes, created_at
+       FROM qc_lot_logger_files
+       WHERE qc_lot_id = ?
+       ORDER BY created_at DESC`,
+      [lot.id]
+    );
+
+    const [photos] = await db.promise().query(
+      `SELECT id, shipment_logger_id, container_id, file_name, file_path, mime_type, size_bytes, created_at
+       FROM qc_lot_logger_photos
+       WHERE qc_lot_id = ?
+       ORDER BY created_at DESC`,
+      [lot.id]
+    );
+
+    res.json({
+      enabled: true,
+      shipment_id: shipment.id,
+      qc_lot_id: lot.id,
+      supplier_logger_installed: shipment.supplier_logger_installed,
+      logger_count: shipment.logger_count,
+      loggers: loggers || [],
+      containers: containers || [],
+      files: files || [],
+      photos: photos || []
+    });
+  } catch (e) {
+    console.error('Error fetching logger details:', e);
+    res.status(500).json(errPayload('Failed to load logger details', 'DB_ERROR', e.message));
+  }
+});
+
+const loggerUploads = upload.fields([
+  { name: 'tds_file', maxCount: 1 },
+  { name: 'photos', maxCount: 20 }
+]);
+
+// POST /api/quality-check/lots/:id/logger-attachments - Upload logger TDS + photos
+router.post('/lots/:id/logger-attachments', requireAuth, requirePerm('QualityCheck', 'edit'), loggerUploads, async (req, res) => {
+  const userId = req.session?.user?.id;
+  const conn = await db.promise().getConnection();
+
+  try {
+    const { id } = req.params;
+    const { shipment_logger_id, container_id } = req.body;
+
+    const loggerId = shipment_logger_id ? parseInt(shipment_logger_id, 10) : null;
+    const containerId = container_id ? parseInt(container_id, 10) : null;
+
+    const [[lot]] = await conn.query(
+      'SELECT id, shipment_id FROM qc_lots WHERE id = ?',
+      [id]
+    );
+
+    if (!lot) {
+      return res.status(404).json(errPayload('QC lot not found', 'NOT_FOUND'));
+    }
+
+    if (!lot.shipment_id) {
+      return res.status(400).json(errPayload('Shipment not linked to this lot', 'VALIDATION_ERROR'));
+    }
+
+    if (loggerId) {
+      const [[loggerRow]] = await conn.query(
+        'SELECT id FROM shipment_temperature_loggers WHERE id = ? AND shipment_id = ?',
+        [loggerId, lot.shipment_id]
+      );
+      if (!loggerRow) {
+        return res.status(400).json(errPayload('Invalid shipment logger', 'VALIDATION_ERROR'));
+      }
+    }
+
+    const tdsFile = req.files?.tds_file?.[0] || null;
+    const photos = req.files?.photos || [];
+
+    if (!tdsFile && photos.length === 0) {
+      return res.status(400).json(errPayload('No files uploaded', 'VALIDATION_ERROR'));
+    }
+
+    await conn.beginTransaction();
+
+    if (tdsFile) {
+      const loggerCondition = loggerId ? 'shipment_logger_id = ?' : 'shipment_logger_id IS NULL';
+      const containerCondition = containerId ? 'container_id = ?' : 'container_id IS NULL';
+      const deleteParams = [id];
+      if (loggerId) deleteParams.push(loggerId);
+      if (containerId) deleteParams.push(containerId);
+
+      await conn.query(
+        `DELETE FROM qc_lot_logger_files WHERE qc_lot_id = ? AND ${loggerCondition} AND ${containerCondition}`,
+        deleteParams
+      );
+
+      await conn.query(
+        `INSERT INTO qc_lot_logger_files (
+          qc_lot_id, shipment_id, shipment_logger_id, container_id,
+          file_name, file_path, mime_type, size_bytes, created_by
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          lot.id,
+          lot.shipment_id,
+          loggerId,
+          containerId,
+          tdsFile.originalname,
+          `uploads/quality-check/${tdsFile.filename}`,
+          tdsFile.mimetype,
+          tdsFile.size,
+          userId || null
+        ]
+      );
+    }
+
+    if (photos.length > 0) {
+      const photoValues = photos.map(file => ([
+        lot.id,
+        lot.shipment_id,
+        loggerId,
+        containerId,
+        file.originalname,
+        `uploads/quality-check/${file.filename}`,
+        file.mimetype,
+        file.size,
+        userId || null
+      ]));
+
+      await conn.query(
+        `INSERT INTO qc_lot_logger_photos (
+          qc_lot_id, shipment_id, shipment_logger_id, container_id,
+          file_name, file_path, mime_type, size_bytes, created_by
+        ) VALUES ?`,
+        [photoValues]
+      );
+    }
+
+    await conn.commit();
+    res.json({ message: 'Logger attachments saved' });
+  } catch (e) {
+    await conn.rollback();
+    console.error('Error saving logger attachments:', e);
+    res.status(500).json(errPayload('Failed to save logger attachments', 'DB_ERROR', e.message));
+  } finally {
+    conn.release();
+  }
+});
+
+// DELETE /api/quality-check/lots/:id/logger-attachments - Delete logger TDS or photo
+router.delete('/lots/:id/logger-attachments', requireAuth, requirePerm('QualityCheck', 'edit'), async (req, res) => {
+  const conn = await db.promise().getConnection();
+  try {
+    const { id } = req.params;
+    const { file_id, photo_id } = req.body || {};
+
+    const [[lot]] = await conn.query(
+      'SELECT id FROM qc_lots WHERE id = ?',
+      [id]
+    );
+    if (!lot) {
+      return res.status(404).json(errPayload('QC lot not found', 'NOT_FOUND'));
+    }
+
+    if (file_id) {
+      const [result] = await conn.query(
+        'DELETE FROM qc_lot_logger_files WHERE id = ? AND qc_lot_id = ?',
+        [file_id, id]
+      );
+      if (result.affectedRows === 0) {
+        return res.status(404).json(errPayload('Logger file not found', 'NOT_FOUND'));
+      }
+    } else if (photo_id) {
+      const [result] = await conn.query(
+        'DELETE FROM qc_lot_logger_photos WHERE id = ? AND qc_lot_id = ?',
+        [photo_id, id]
+      );
+      if (result.affectedRows === 0) {
+        return res.status(404).json(errPayload('Logger photo not found', 'NOT_FOUND'));
+      }
+    } else {
+      return res.status(400).json(errPayload('Missing file_id or photo_id', 'VALIDATION_ERROR'));
+    }
+
+    res.json({ message: 'Logger attachment deleted' });
+  } catch (e) {
+    console.error('Error deleting logger attachment:', e);
+    res.status(500).json(errPayload('Failed to delete logger attachment', 'DB_ERROR', e.message));
+  } finally {
+    conn.release();
+  }
+});
+
 // POST /api/quality-check/lots - Create new QC lot (manual creation)
 router.post('/lots', requireAuth, requirePerm('QualityCheck', 'create'), async (req, res) => {
   const userId = req.session?.user?.id;
@@ -805,9 +1035,6 @@ router.post('/inspections', requireAuth, requirePerm('QualityCheck', 'create'), 
     const photos = [];
     const videos = [];
     const defectMedia = {}; // { defectTypeId: { photos: [], videos: [] } }
-    let temperatureLoggerFile = null;
-    let temperatureLoggerFilePath = req.body.temperature_logger_file_path || null;
-
     if (req.files && Array.isArray(req.files)) {
       req.files.forEach(file => {
         // Check if this is defect-specific media
@@ -829,10 +1056,6 @@ router.post('/inspections', requireAuth, requirePerm('QualityCheck', 'create'), 
           photos.push(file);
         } else if (file.fieldname === 'videos') {
           videos.push(file);
-        } else if (file.fieldname === 'temperature_logger_file') {
-          temperatureLoggerFile = file;
-          // Save file path
-          temperatureLoggerFilePath = `uploads/quality-check/${file.filename}`;
         }
       });
     }
@@ -895,9 +1118,6 @@ router.post('/inspections', requireAuth, requirePerm('QualityCheck', 'create'), 
       }
     }
 
-    // Get temperature logger received value
-    const temperatureLoggerReceived = req.body.temperature_logger_received === '1' || req.body.temperature_logger_received === 1 || req.body.temperature_logger_received === true ? 1 : (req.body.temperature_logger_received === '0' || req.body.temperature_logger_received === 0 || req.body.temperature_logger_received === false ? 0 : null);
-
     // Insert inspection - now linked to QC lot item
     const [inspectionResult] = await conn.query(`
       INSERT INTO qc_inspections (
@@ -910,9 +1130,8 @@ router.post('/inspections', requireAuth, requirePerm('QualityCheck', 'create'), 
         checklist_size_consistency, checklist_packaging_integrity,
         checklist_odor, checklist_foreign_matter, checklist_moisture,
         defects_json,
-        temperature_logger_received, temperature_logger_file_path,
         created_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       qc_lot_id,
       qcLotItemIdInt,
@@ -937,8 +1156,6 @@ router.post('/inspections', requireAuth, requirePerm('QualityCheck', 'create'), 
       checklist_foreign_matter === 'true' || checklist_foreign_matter === true || checklist_foreign_matter === '1' ? 1 : 0,
       checklist_moisture === 'true' || checklist_moisture === true || checklist_moisture === '1' ? 1 : 0,
       defectsJson,
-      temperatureLoggerReceived,
-      temperatureLoggerFilePath,
       userId
     ]);
 
@@ -1762,26 +1979,6 @@ router.put('/inspections/:id', requireAuth, requirePerm('QualityCheck', 'edit'),
     if (defectsJson !== undefined) {
       updateFields.push('defects_json = ?');
       updateValues.push(defectsJson);
-    }
-    
-    // Handle temperature logger fields
-    if (req.body.temperature_logger_received !== undefined) {
-      const tempLoggerReceived = req.body.temperature_logger_received === '1' || req.body.temperature_logger_received === 1 || req.body.temperature_logger_received === true ? 1 : (req.body.temperature_logger_received === '0' || req.body.temperature_logger_received === 0 || req.body.temperature_logger_received === false ? 0 : null);
-      updateFields.push('temperature_logger_received = ?');
-      updateValues.push(tempLoggerReceived);
-    }
-    
-    // Handle temperature logger file upload
-    let temperatureLoggerFilePath = req.body.temperature_logger_file_path || null;
-    if (req.files && Array.isArray(req.files)) {
-      const tempLoggerFile = req.files.find(f => f.fieldname === 'temperature_logger_file');
-      if (tempLoggerFile) {
-        temperatureLoggerFilePath = `uploads/quality-check/${tempLoggerFile.filename}`;
-      }
-    }
-    if (temperatureLoggerFilePath !== undefined) {
-      updateFields.push('temperature_logger_file_path = ?');
-      updateValues.push(temperatureLoggerFilePath);
     }
     
     updateFields.push('updated_by = ?');

@@ -3348,6 +3348,31 @@ router.post("/:shipUniqid/underloading-air", upload.any(), async (req, res) => {
     }
 });
 
+router.get("/:shipUniqid/logger-details", async (req, res) => {
+    const { shipUniqid } = req.params;
+    try {
+        const [[shipment]] = await db.promise().query(
+            'SELECT id, supplier_logger_installed, logger_count FROM shipment WHERE ship_uniqid = ?',
+            [shipUniqid]
+        );
+        if (!shipment) {
+            return res.status(404).json(errPayload("Shipment not found."));
+        }
+        const [rows] = await db.promise().query(
+            'SELECT serial_no, installation_place FROM shipment_temperature_loggers WHERE shipment_id = ? ORDER BY id ASC',
+            [shipment.id]
+        );
+        res.json({
+            success: true,
+            supplier_logger_installed: shipment.supplier_logger_installed,
+            logger_count: shipment.logger_count,
+            loggers: rows || []
+        });
+    } catch (e) {
+        res.status(500).json(errPayload("Failed to load logger details", "DB_ERROR", e.message));
+    }
+});
+
 /* ---------- move to sailed (4) with confirmed details and docs ---------- */
 router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
     const { shipUniqid } = req.params;
@@ -3364,6 +3389,9 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
             confirm_free_time,
             // New: linked AP purchase bill (ap_bills.id)
             purchase_bill_id,
+            supplier_logger_installed,
+            logger_count,
+            loggers,
             is_mofa_required, original_doc_receipt_mode, doc_receipt_person_name, doc_receipt_person_contact,
             doc_receipt_courier_no, doc_receipt_courier_company, doc_receipt_tracking_link,
             documents_meta,
@@ -3398,6 +3426,46 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
         // Validate courier details if mode is 'courier'
         if (original_doc_receipt_mode === 'courier' && (!doc_receipt_courier_no || !doc_receipt_courier_company)) {
             return res.status(400).json(errPayload("Courier No. and Courier Company are required when receipt mode is 'Courier'."));
+        }
+
+        const loggerInstalled = String(supplier_logger_installed || '').trim().toUpperCase();
+        let loggerCountNum = Number(logger_count || 0);
+        let loggerRows = [];
+        if (loggers) {
+            try {
+                loggerRows = typeof loggers === 'string' ? JSON.parse(loggers) : loggers;
+            } catch {
+                return res.status(400).json(errPayload("Invalid logger rows payload."));
+            }
+        }
+        if (loggerInstalled && loggerInstalled !== 'YES' && loggerInstalled !== 'NO') {
+            return res.status(400).json(errPayload("Supplier logger installed must be YES or NO."));
+        }
+        if (!loggerInstalled) {
+            return res.status(400).json(errPayload("Supplier logger installed is required."));
+        }
+        if (loggerInstalled === 'YES') {
+            if (!Number.isFinite(loggerCountNum) || loggerCountNum < 1) {
+                return res.status(400).json(errPayload("Logger count must be greater than 0."));
+            }
+            if (loggerCountNum > 20) {
+                return res.status(400).json(errPayload("Logger count cannot exceed 20."));
+            }
+            if (!Array.isArray(loggerRows) || loggerRows.length !== loggerCountNum) {
+                return res.status(400).json(errPayload("Logger rows must match logger count."));
+            }
+            for (let i = 0; i < loggerRows.length; i += 1) {
+                const row = loggerRows[i] || {};
+                if (!String(row.serial_no || '').trim()) {
+                    return res.status(400).json(errPayload(`Serial No. is required at row ${i + 1}.`));
+                }
+                if (!String(row.installation_place || '').trim()) {
+                    return res.status(400).json(errPayload(`Installation Place is required at row ${i + 1}.`));
+                }
+            }
+        } else if (loggerInstalled === 'NO') {
+            loggerCountNum = 0;
+            loggerRows = [];
         }
 
         // --- 2. Fetch old values for history comparison ---
@@ -3490,7 +3558,9 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
                     is_mofa_required = ?,
                     original_doc_receipt_mode = ?, doc_receipt_person_name = ?, doc_receipt_person_contact = ?,
                     doc_receipt_courier_no = ?, doc_receipt_courier_company = ?, doc_receipt_tracking_link = ?,
-                    purchase_bill_id = ?
+                    purchase_bill_id = ?,
+                    supplier_logger_installed = ?,
+                    logger_count = ?
                  WHERE id = ?`, 
                 [
                     confirm_sailing_date,
@@ -3501,6 +3571,8 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
                     original_doc_receipt_mode || null, doc_receipt_person_name || null, doc_receipt_person_contact || null,
                     doc_receipt_courier_no || null, doc_receipt_courier_company || null, doc_receipt_tracking_link || null,
                     parsedPurchaseBillId,
+                    loggerInstalled || null,
+                    loggerCountNum,
                     shipment.id
                 ]
             );
@@ -3514,7 +3586,9 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
                     is_mofa_required = ?,
                     original_doc_receipt_mode = ?, doc_receipt_person_name = ?, doc_receipt_person_contact = ?,
                     doc_receipt_courier_no = ?, doc_receipt_courier_company = ?, doc_receipt_tracking_link = ?,
-                    purchase_bill_id = ?
+                    purchase_bill_id = ?,
+                    supplier_logger_installed = ?,
+                    logger_count = ?
                  WHERE id = ?`, 
                 [
                     confirm_sailing_date,
@@ -3525,8 +3599,23 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
                     original_doc_receipt_mode || null, doc_receipt_person_name || null, doc_receipt_person_contact || null,
                     doc_receipt_courier_no || null, doc_receipt_courier_company || null, doc_receipt_tracking_link || null,
                     parsedPurchaseBillId,
+                    loggerInstalled || null,
+                    loggerCountNum,
                     shipment.id
                 ]
+            );
+        }
+
+        await conn.query('DELETE FROM shipment_temperature_loggers WHERE shipment_id = ?', [shipment.id]);
+        if (loggerInstalled === 'YES' && Array.isArray(loggerRows) && loggerRows.length > 0) {
+            const values = loggerRows.map(row => ([
+                shipment.id,
+                String(row.serial_no || '').trim(),
+                String(row.installation_place || '').trim()
+            ]));
+            await conn.query(
+                'INSERT INTO shipment_temperature_loggers (shipment_id, serial_no, installation_place) VALUES ?',
+                [values]
             );
         }
 
