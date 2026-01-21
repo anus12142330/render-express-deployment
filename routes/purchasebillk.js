@@ -77,7 +77,7 @@ router.get('/', async (req, res, next) => {
                 pb.id, pb.bill_uniqid, pb.bill_number, pb.bill_date, pb.total, pb.status_id, 
                 s.name as status_name, v.display_name as vendor_name, c.name as currency_code,
                 po.po_number as purchase_order_number,
-                (SELECT COUNT(*) FROM purchase_bill_attachments pba WHERE pba.purchase_bill_id = pb.id) as attachment_count
+                (SELECT COUNT(*) FROM ap_bill_attachments pba WHERE pba.bill_id = pb.id) as attachment_count
             FROM ap_bills pb
             LEFT JOIN vendor v ON v.id = pb.vendor_id
             LEFT JOIN currency c ON c.id = pb.currency_id
@@ -226,7 +226,7 @@ router.get('/:id', async (req, res, next) => {
             LEFT JOIN uom_master um ON um.id = pbi.uom_id            
             WHERE pbi.purchase_bill_id = ?
         `, [billId]);
-        const [attachments] = await db.promise().query('SELECT * FROM purchase_bill_attachments WHERE purchase_bill_id = ?', [billId]);
+        const [attachments] = await db.promise().query('SELECT * FROM ap_bill_attachments WHERE bill_id = ?', [billId]);
 
         const [history] = await db.promise().query(`
             SELECT h.action, h.details, h.created_at, u.name as user_name
@@ -311,7 +311,7 @@ router.post('/', billUpload, async (req, res, next) => {
 
         if (req.files && req.files.length) {
             const attachmentValues = req.files.map(f => [billId, f.originalname, relPath(f), f.mimetype, f.size]);
-            await conn.query('INSERT INTO purchase_bill_attachments (purchase_bill_id, file_name, file_path, mime_type, size_bytes) VALUES ?', [attachmentValues]);
+            await conn.query('INSERT INTO ap_bill_attachments (bill_id, file_name, file_path, mime_type, size_bytes) VALUES ?', [attachmentValues]);
         }
 
         await addHistory(conn, {
@@ -382,7 +382,7 @@ router.put('/:id', billUpload, async (req, res, next) => {
 
         if (req.files && req.files.length) {
             const attachmentValues = req.files.map(f => [billId, f.originalname, relPath(f), f.mimetype, f.size]);
-            await conn.query('INSERT INTO purchase_bill_attachments (purchase_bill_id, file_name, file_path, mime_type, size_bytes) VALUES ?', [attachmentValues]);
+            await conn.query('INSERT INTO ap_bill_attachments (bill_id, file_name, file_path, mime_type, size_bytes) VALUES ?', [attachmentValues]);
         }
 
         // --- Create History Record for Update ---
@@ -436,7 +436,7 @@ router.post('/:id/attachments', billUpload, async (req, res, next) => {
 
         if (req.files && req.files.length) {
             const attachmentValues = req.files.map(f => [billId, f.originalname, relPath(f), f.mimetype, f.size]);
-            await conn.query('INSERT INTO purchase_bill_attachments (purchase_bill_id, file_name, file_path, mime_type, size_bytes) VALUES ?', [attachmentValues]);
+            await conn.query('INSERT INTO ap_bill_attachments (bill_id, file_name, file_path, mime_type, size_bytes) VALUES ?', [attachmentValues]);
         } else {
             await conn.rollback();
             return res.status(400).json({ error: 'No files were uploaded.' });
@@ -461,7 +461,7 @@ router.delete('/:billId/attachments/:attachmentId', async (req, res, next) => {
         const userId = req.session?.user?.id;
 
         const [[attachment]] = await conn.query(
-            'SELECT * FROM purchase_bill_attachments WHERE id = ? AND purchase_bill_id = ?',
+            'SELECT * FROM ap_bill_attachments WHERE id = ? AND bill_id = ?',
             [attachmentId, billId]
         );
 
@@ -477,7 +477,7 @@ router.delete('/:billId/attachments/:attachmentId', async (req, res, next) => {
         }
 
         // Delete record from database
-        await conn.query('DELETE FROM purchase_bill_attachments WHERE id = ?', [attachmentId]);
+        await conn.query('DELETE FROM ap_bill_attachments WHERE id = ?', [attachmentId]);
 
         await addHistory(conn, { module: 'purchase_bill', moduleId: billId, userId: userId, action: 'ATTACHMENT_DELETED', details: { file_name: attachment.file_name } });
         await conn.commit();
