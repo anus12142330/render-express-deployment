@@ -294,10 +294,27 @@ async function getBill(req, res, next) {
 
         // Fetch attachments
         const [attachments] = await pool.query(`
-            SELECT * FROM ap_bill_attachments WHERE bill_id = ? ORDER BY created_at DESC
+            SELECT *, 'ap' as source
+            FROM ap_bill_attachments
+            WHERE bill_id = ?
+            ORDER BY created_at DESC
         `, [billId]);
 
-        bill.attachments = attachments || [];
+        let merged = attachments || [];
+        if (merged.length === 0) {
+            const [legacyAttachments] = await pool.query(
+                `
+                SELECT *, 'legacy' as source
+                FROM purchase_bill_attachments
+                WHERE purchase_bill_id = ?
+                ORDER BY created_at DESC
+                `,
+                [billId]
+            );
+            merged = legacyAttachments || [];
+        }
+
+        bill.attachments = merged;
 
         res.json(bill);
     } catch (error) {

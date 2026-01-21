@@ -55,6 +55,8 @@ import uomRoutes from './routes/uom.js';
 import uploadRoutes from "./routes/upload.js";
 import vendorRoutes from './routes/vendor.js';
 import warehousesRoutes from "./routes/warehouses.js";
+import mobileAuthRoutes from "./routes/mobileAuth.js";
+import mobileQcRoutes from "./routes/mobileQc.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 
@@ -68,7 +70,20 @@ const inventoryRoutes = require('./src/modules/inventory/inventory.routes.cjs');
 const operationsRoutes = require('./routes/operations.cjs');
 
 const app = express();
-app.use(cors());
+const mobileOrigins = [
+  "http://localhost:19006",
+  "http://localhost:19000",
+  "http://10.0.2.2:19006",
+  "http://10.0.2.2:19000"
+];
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true);
+    if (mobileOrigins.includes(origin)) return cb(null, true);
+    return cb(null, true);
+  },
+  credentials: true
+}));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 //app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
@@ -208,6 +223,8 @@ app.use("/api/delivery-orders", deliveryOrderRoutes); // Mount the new sales ord
 app.use("/api/master", masterRoutes);
 app.use("/api/harvest-calendar", harvestCalendarRoutes); // Mount the new router
 app.use("/api/warehouses", warehousesRoutes);
+app.use("/api/mobile", mobileAuthRoutes);
+app.use("/api/mobile", mobileQcRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/rbac', rbacRoutes);
 app.use('/api/paymentTerms', paymentTermsRoutes);
@@ -353,16 +370,19 @@ app.get('/api/login-debug-credential', async (req, res) => {
   try {
     const [columns] = await db.promise().query("SHOW COLUMNS FROM `user` LIKE 'user_name'");
     const hasUserName = columns.length > 0;
-    const [rows] = await db.promise().query(
-      hasUserName
-        ? 'SELECT id, user_name, name, password FROM `user` WHERE id = 1 LIMIT 1'
-        : 'SELECT id, name, password FROM `user` WHERE id = 1 LIMIT 1'
-    );
+    const baseSelect = hasUserName
+      ? "SELECT id, user_name, name, password FROM `user` WHERE is_inactive = 0"
+      : "SELECT id, name, password FROM `user` WHERE is_inactive = 0";
+    const [rows] = await db
+      .promise()
+      .query(
+        `${baseSelect} AND password IS NOT NULL AND password <> '' ORDER BY (id = 1) DESC, id ASC LIMIT 1`
+      );
     if (!rows.length) {
-      return res.json({ success: false, message: 'User not found' });
+      return res.json({ success: false, message: "No active users with passwords found" });
     }
     const row = rows[0];
-    const username = row.user_name || row.name || '';
+    const username = row.user_name || row.name || "";
     return res.json({ success: true, user: { id: row.id, username, password: row.password } });
   } catch (err) {
     console.error('❌ Debug credential error:', err);
