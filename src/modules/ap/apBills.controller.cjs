@@ -481,7 +481,11 @@ async function createBill(req, res, next) {
         } catch (error) {
             throw error;
         }
-    }).catch(next);
+    }).catch((error) => {
+        if (res.headersSent) return next(error);
+        const message = error?.sqlMessage || error?.message || 'Internal Server Error';
+        res.status(500).json({ error: message });
+    });
 }
 
 async function updateBill(req, res, next) {
@@ -784,7 +788,11 @@ async function updateBill(req, res, next) {
         } catch (error) {
             throw error;
         }
-    }).catch(next);
+    }).catch((error) => {
+        if (res.headersSent) return next(error);
+        const message = error?.sqlMessage || error?.message || 'Internal Server Error';
+        res.status(500).json({ error: message });
+    });
 }
 
 async function postBill(req, res, next) {

@@ -1418,6 +1418,25 @@ app.get('/api/product-interests', async (req, res) => {
     } catch (err) { res.status(500).json({ error: 'Failed to load product interests' }); }
 });
 
+// ✅ Global error handler (JSON response for API)
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  const status = err.status || err.statusCode || 500;
+  const message =
+    err.sqlMessage ||
+    err.message ||
+    'Internal Server Error';
+
+  console.error('API Error:', {
+    status,
+    message,
+    path: req.originalUrl,
+    method: req.method
+  });
+
+  res.status(status).json({ error: message });
+});
+
 // ✅ START SERVER
 // server/server.js (Render)
 const PORT = process.env.PORT || 5700;
