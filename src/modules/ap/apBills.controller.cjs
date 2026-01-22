@@ -160,6 +160,8 @@ async function listBills(req, res, next) {
                 ab.*,
                 v.display_name as supplier_name,
                 c.name as currency_code,
+                c.label as currency_label,
+                c.subunit_label as currency_subunit_label,
                 s.name as status_name,
                 s.bg_colour,
                 s.colour,
@@ -211,6 +213,8 @@ async function getBill(req, res, next) {
                 va.bill_phone as vendor_phone,
                 va.bill_fax as vendor_fax,
                 c.name as currency_code,
+                c.label as currency_label,
+                c.subunit_label as currency_subunit_label,
                 st.name as status_name,
                 st.bg_colour,
                 st.colour,
@@ -618,7 +622,7 @@ async function updateBill(req, res, next) {
             // Get old values for comparison (fetch names for IDs) - BEFORE updating
             const [oldSupplier] = await conn.query(`SELECT display_name FROM vendor WHERE id = ?`, [bill.supplier_id]);
             const [oldWarehouse] = await conn.query(`SELECT warehouse_name FROM warehouses WHERE id = ?`, [bill.warehouse_id]);
-            const [oldCurrency] = await conn.query(`SELECT name FROM currency WHERE id = ?`, [bill.currency_id]);
+            const [oldCurrency] = await conn.query(`SELECT label, name FROM currency WHERE id = ?`, [bill.currency_id]);
             const [oldPO] = bill.purchase_order_id ? await conn.query(`SELECT po_number FROM purchase_orders WHERE id = ?`, [bill.purchase_order_id]) : [[]];
 
             const oldValues = {
@@ -629,7 +633,7 @@ async function updateBill(req, res, next) {
                 company_id: bill.company_id ? String(bill.company_id) : '',
                 shipment_id: bill.shipment_id ? String(bill.shipment_id) : '',
                 warehouse_id: oldWarehouse[0]?.warehouse_name || String(bill.warehouse_id || ''),
-                currency_id: oldCurrency[0]?.name || String(bill.currency_id || ''),
+                currency_id: oldCurrency[0]?.label || oldCurrency[0]?.name || String(bill.currency_id || ''),
                 subtotal: bill.subtotal || 0,
                 tax_total: bill.tax_total || 0,
                 total: bill.total || 0,
@@ -640,7 +644,7 @@ async function updateBill(req, res, next) {
             // Get new values (fetch names for IDs)
             const [newSupplier] = parsedSupplierId ? await conn.query(`SELECT display_name FROM vendor WHERE id = ?`, [parsedSupplierId]) : [[]];
             const [newWarehouse] = parsedWarehouseId ? await conn.query(`SELECT warehouse_name FROM warehouses WHERE id = ?`, [parsedWarehouseId]) : [[]];
-            const [newCurrency] = parsedCurrencyId ? await conn.query(`SELECT name FROM currency WHERE id = ?`, [parsedCurrencyId]) : [[]];
+            const [newCurrency] = parsedCurrencyId ? await conn.query(`SELECT label, name FROM currency WHERE id = ?`, [parsedCurrencyId]) : [[]];
             const [newPO] = parsedPoId ? await conn.query(`SELECT po_number FROM purchase_orders WHERE id = ?`, [parsedPoId]) : [[]];
 
             const newValues = {
@@ -651,7 +655,7 @@ async function updateBill(req, res, next) {
                 company_id: parsedCompanyId ? String(parsedCompanyId) : '',
                 shipment_id: parsedShipmentId ? String(parsedShipmentId) : '',
                 warehouse_id: newWarehouse[0]?.warehouse_name || (parsedWarehouseId ? String(parsedWarehouseId) : ''),
-                currency_id: newCurrency[0]?.name || (parsedCurrencyId ? String(parsedCurrencyId) : ''),
+                currency_id: newCurrency[0]?.label || newCurrency[0]?.name || (parsedCurrencyId ? String(parsedCurrencyId) : ''),
                 subtotal: parsedSubtotal || 0,
                 tax_total: parsedTaxTotal || 0,
                 total: parsedTotal || 0,
