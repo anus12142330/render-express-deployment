@@ -730,7 +730,15 @@ router.get("/:id/history", async (req, res) => {
             LEFT JOIN user u ON u.id = h.user_id
             WHERE h.module = 'proforma_invoice' AND h.module_id = ?
             ORDER BY h.created_at DESC`, [pi.id]);
-        res.json((history || []).map(h => ({...h, details: h.details ? JSON.parse(h.details) : {}})));
+        const normalizeDetails = (val) => {
+            if (!val) return {};
+            if (typeof val === "string") {
+                try { return JSON.parse(val); } catch { return {}; }
+            }
+            if (typeof val === "object") return val;
+            return {};
+        };
+        res.json((history || []).map(h => ({ ...h, details: normalizeDetails(h.details) })));
     } catch (e) {
         res.status(500).json({ error: "Failed to fetch history", detail: e.message });
     }
