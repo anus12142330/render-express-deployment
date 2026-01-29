@@ -1,7 +1,7 @@
 // server/routes/lookups.js  (ESM)
 import { Router } from 'express';
 import db from '../db.js';
-import multer from 'multer'; 
+import multer from 'multer';
 
 const upload = multer();
 const router = Router();
@@ -59,7 +59,7 @@ const MASTER_CONFIG = {
         listOrderBy: 'c.name',
         inUseChecks: [
             { table: 'products', field: 'category_id', message: 'in use by products' },
-           // { table: 'categories', field: 'parent_id', message: 'in use as a parent category' }
+            // { table: 'categories', field: 'parent_id', message: 'in use as a parent category' }
         ]
     },
 
@@ -227,7 +227,7 @@ const MASTER_CONFIG = {
         fields: [{ name: 'type_name', type: 'string', required: true }],
         listOrderBy: 'type_name'
     },
-    
+
     payment_type: {
         table: 'payment_type',
         id: 'id',
@@ -241,53 +241,53 @@ const MASTER_CONFIG = {
     },
 
     /* ---------- CHART OF ACCOUNTS – DROPDOWN SOURCES ---------- */
-acc_type: {
-  table: 'acc_type',
-  id: 'id',
-  fields: [{ name: 'acc_type', type: 'string', required: true }],
-  listOrderBy: 'acc_type'
-},
+    acc_type: {
+        table: 'acc_type',
+        id: 'id',
+        fields: [{ name: 'acc_type', type: 'string', required: true }],
+        listOrderBy: 'acc_type'
+    },
 
-acc_detail_type: {
-  table: 'acc_detail_type',
-  id: 'id',
-  fields: [
-    { name: 'acc_type_id',  type: 'number', required: true, lookup: 'acc_type' }, // FK -> acc_type.id
-    { name: 'detail_type',  type: 'string', required: true },
-    { name: 'description',  type: 'string' }
-  ],
-  // Show the parent type name in list view
-  listSelect: `
+    acc_detail_type: {
+        table: 'acc_detail_type',
+        id: 'id',
+        fields: [
+            { name: 'acc_type_id', type: 'number', required: true, lookup: 'acc_type' }, // FK -> acc_type.id
+            { name: 'detail_type', type: 'string', required: true },
+            { name: 'description', type: 'string' }
+        ],
+        // Show the parent type name in list view
+        listSelect: `
     dt.id, dt.acc_type_id, dt.detail_type, dt.description,
     t.acc_type AS acc_type_name
   `,
-  listFrom: `
+        listFrom: `
     acc_detail_type dt
     LEFT JOIN acc_type t ON t.id = dt.acc_type_id
   `,
-  listSearchIn: ['dt.detail_type', 't.acc_type'],
-  listOrderBy: 'dt.detail_type'
-},
+        listSearchIn: ['dt.detail_type', 't.acc_type'],
+        listOrderBy: 'dt.detail_type'
+    },
 
-/* ---------- CHART OF ACCOUNTS (main) ---------- */
-chart_of_accounts: {
-  table: 'acc_chart_accounts',
-  id: 'id',
-  fields: [
-    // keep both IDs separately as you requested
-    { name: 'account_type_id', type: 'number', required: true, lookup: 'account_type' }, // header type -> account_type.id
-    { name: 'acc_type_id',    type: 'number', required: true, lookup: 'acc_type' }, // group type  -> acc_type.id
-    { name: 'acc_detail_id',  type: 'number', required: true, lookup: 'acc_detail_type' }, // -> acc_detail_type.id
-    { name: 'name',           type: 'string', required: true },
-    { name: 'description',    type: 'string', required: true },
-    { name: 'sub_id',         type: 'boolean', default: false }, // "Is sub-account"
-    { name: 'parent_id',      type: 'number', lookup: 'chart_of_accounts' },
-    { name: 'vat_id',         type: 'number', lookup: 'tax' },
-    { name: 'balance',        type: 'number' },
-    { name: 'as_of',          type: 'date' } // yyyy-mm-dd (let UI send a date string)
-  ],
-  // nice listing with joined names for your grid
-  listSelect: `
+    /* ---------- CHART OF ACCOUNTS (main) ---------- */
+    chart_of_accounts: {
+        table: 'acc_chart_accounts',
+        id: 'id',
+        fields: [
+            // keep both IDs separately as you requested
+            { name: 'account_type_id', type: 'number', required: true, lookup: 'account_type' }, // header type -> account_type.id
+            { name: 'acc_type_id', type: 'number', required: true, lookup: 'acc_type' }, // group type  -> acc_type.id
+            { name: 'acc_detail_id', type: 'number', required: true, lookup: 'acc_detail_type' }, // -> acc_detail_type.id
+            { name: 'name', type: 'string', required: true },
+            { name: 'description', type: 'string', required: true },
+            { name: 'sub_id', type: 'boolean', default: false }, // "Is sub-account"
+            { name: 'parent_id', type: 'number', lookup: 'chart_of_accounts' },
+            { name: 'vat_id', type: 'number', lookup: 'tax' },
+            { name: 'balance', type: 'number' },
+            { name: 'as_of', type: 'date' } // yyyy-mm-dd (let UI send a date string)
+        ],
+        // nice listing with joined names for your grid
+        listSelect: `
     cca.id,
     cca.name,
     cca.description,
@@ -303,15 +303,15 @@ chart_of_accounts: {
     atG.acc_type AS group_type_name,
     dt.detail_type AS detail_type_name
   `,
-  listFrom: `
+        listFrom: `
     acc_chart_accounts cca
     LEFT JOIN account_type atH ON atH.id = cca.account_type_id
     LEFT JOIN acc_type atG ON atG.id = cca.acc_type_id
     LEFT JOIN acc_detail_type dt ON dt.id = cca.acc_detail_id
   `,
-  listSearchIn: ['cca.name', 'cca.description', 'atH.type_name', 'atG.acc_type', 'dt.detail_type'],
-  listOrderBy: 'cca.name'
-},
+        listSearchIn: ['cca.name', 'cca.description', 'atH.type_name', 'atG.acc_type', 'dt.detail_type'],
+        listOrderBy: 'cca.name'
+    },
 
     /* ---------- INVENTORY ACCOUNT (accounts table) ---------- */
     inventory_account: {
@@ -342,8 +342,8 @@ chart_of_accounts: {
         table: 'shipment_stage',
         id: 'id',
         fields: [{ name: 'name', type: 'string', required: true }],
-       listOrderBy: 'sort_order'
-  },
+        listOrderBy: 'sort_order'
+    },
 
     document_type: {
         table: 'document_type',
@@ -358,12 +358,12 @@ chart_of_accounts: {
     shipment_document: {
         table: 'shipment_document',
         id: 'id',
-            fields: [
-                    { name: 'shipment_stage', type: 'number', required: true, lookup: 'shipment_stage' },   // FK → shipment_stage.id
-                    { name: 'document_type_id', type: 'number', required: true, lookup: 'document_type' }, // FK → document_type.id
-                    { name: 'is_required', type: 'boolean', default: false }
-                  ],
-          listSelect: `
+        fields: [
+            { name: 'shipment_stage', type: 'number', required: true, lookup: 'shipment_stage' },   // FK → shipment_stage.id
+            { name: 'document_type_id', type: 'number', required: true, lookup: 'document_type' }, // FK → document_type.id
+            { name: 'is_required', type: 'boolean', default: false }
+        ],
+        listSelect: `
                  sd.id,
                  sd.shipment_stage,
                  sd.document_type_id,
@@ -371,14 +371,14 @@ chart_of_accounts: {
                  ss.name AS shipment_stage_name,
                  dt.name AS document_type_name
               `,
-                  listFrom: `
+        listFrom: `
                  shipment_document sd
                  LEFT JOIN shipment_stage ss ON ss.id = sd.shipment_stage
                   LEFT JOIN document_type dt ON dt.id = sd.document_type_id`,
-                   listSearchIn: ['ss.name', 'dt.name'],
-                   listOrderBy: 'ss.name'
-            },
-   
+        listSearchIn: ['ss.name', 'dt.name'],
+        listOrderBy: 'ss.name'
+    },
+
     fiscal_year: {
         table: 'fiscal_years',
         id: 'id',
@@ -407,30 +407,30 @@ chart_of_accounts: {
         listOrderBy: 'id'
     },
     document_templates: {
-  table: 'document_templates',
-  id: 'id',
-  fields: [
-    { name: 'name', type: 'string', required: true },
-    { name: 'content', type: 'string' },
-    { name: 'company_ids', type: 'string' },
-    { name: 'document_id', type: 'number' },
-    { name: 'template_attachment_path', type: 'string' },
-    { name: 'sign_path', type: 'string' },
-    { name: 'stamp_path', type: 'string' },
-    { name: 'updated_at', type: 'date' }
-  ],
-  listSelect: `
+        table: 'document_templates',
+        id: 'id',
+        fields: [
+            { name: 'name', type: 'string', required: true },
+            { name: 'content', type: 'string' },
+            { name: 'company_ids', type: 'string' },
+            { name: 'document_id', type: 'number' },
+            { name: 'template_attachment_path', type: 'string' },
+            { name: 'sign_path', type: 'string' },
+            { name: 'stamp_path', type: 'string' },
+            { name: 'updated_at', type: 'date' }
+        ],
+        listSelect: `
     dtmpl.*,
     dt.name AS document_name
   `,
-  listFrom: `
+        listFrom: `
     document_templates dtmpl
     LEFT JOIN document_type dt ON dt.id = dtmpl.document_id
   `,
-  listSearchIn: ['dtmpl.name', 'dt.name'],
-  listOrderBy: 'dtmpl.name'
-},
- 'vehicle_type': { table: 'master_vehicle_type', idCol: 'id', nameCol: 'name' },
+        listSearchIn: ['dtmpl.name', 'dt.name'],
+        listOrderBy: 'dtmpl.name'
+    },
+    'vehicle_type': { table: 'master_vehicle_type', idCol: 'id', nameCol: 'name' },
     available_time: {
         table: 'master_available_time',
         id: 'id',
@@ -490,6 +490,16 @@ chart_of_accounts: {
             { name: 'description', type: 'string' }
         ],
         listOrderBy: 'setting_key'
+    },
+
+    company: {
+        table: 'company_settings',
+        id: 'id',
+        fields: [
+            { name: 'name', type: 'string', required: true },
+            { name: 'company_prefix', type: 'string' }
+        ],
+        listOrderBy: 'name'
     }
 };
 
@@ -543,7 +553,7 @@ router.get('/:type', async (req, res, next) => {
         const pageSize = Math.min(Math.max(parseInt(req.query.pageSize || '25', 10), 1), 200);
         const q = (req.query.search || req.query.q || '').trim();
         const all = req.query.all === '1';
-        
+
         // Sorting parameters (added for consistency)
         const sortField = req.query.sort_field;
         const sortOrder = (req.query.sort_order || 'desc').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';

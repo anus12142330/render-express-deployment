@@ -44,6 +44,7 @@ import rbacRoutes from './routes/rbac.js';
 import roleRoutes from './routes/roles.js';
 import routePlannerRoutes from './routes/routePlanner.js';
 import salesQuoteRoutes from './routes/salesQuote.js';
+import salesOrderRoutes from './src/modules/sales-order/salesOrder.routes.js';
 import shipmentRoutes from './routes/shipment.js';
 import shipmentDocumentsRoutes from './routes/shipmentDocuments.js';
 import shipmentStageRoutes from './routes/shipmentStage.js';
@@ -137,14 +138,14 @@ const companyStorage = multer.diskStorage({
   }
 });
 const userStorage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        cb(null, "uploads/users");
-    },
-    filename: (req, file, cb) => {
-        const ext = path.extname(file.originalname);
-        const name = crypto.randomBytes(16).toString('hex');
-        cb(null, name + ext);
-    },
+  destination: (req, file, cb) => {
+    cb(null, "uploads/users");
+  },
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname);
+    const name = crypto.randomBytes(16).toString('hex');
+    cb(null, name + ext);
+  },
 });
 
 
@@ -155,8 +156,8 @@ const uploadc = multer({ storage: companyStorage });
 const uploadUserPhoto = multer({ storage: userStorage });
 
 const uploadCompany = uploadc.fields([
-    { name: 'logo', maxCount: 1 },
-    { name: 'company_stamp', maxCount: 1 }
+  { name: 'logo', maxCount: 1 },
+  { name: 'company_stamp', maxCount: 1 }
 ]);
 
 
@@ -204,6 +205,7 @@ app.use("/api/shipment-documents", shipmentDocumentsRoutes);
 app.use("/api/shipment-stages", shipmentStageRoutes);
 app.use("/api/proforma-invoices", proformaRoutes);
 app.use("/api/sales-quotes", salesQuoteRoutes);
+app.use("/api/sales-orders", salesOrderRoutes);
 app.use("/api/bank", bankRoutes);
 app.use("/api/bank-accounts", bankAccountRoutes);
 app.use("/api/fund-transfer", fundTransferRoutes);
@@ -272,7 +274,7 @@ app.get('/api/me', requireAuth, async (req, res) => {
 
   const userWithDetails = userRows[0] || null;
   if (userWithDetails && userWithDetails.roles) {
-      userWithDetails.roles = userWithDetails.roles.split(',');
+    userWithDetails.roles = userWithDetails.roles.split(',');
   }
 
   res.json({ user: userWithDetails });
@@ -283,7 +285,7 @@ app.get('/api/me', requireAuth, async (req, res) => {
 
 app.get('/api/me/permissions', requireAuth, async (req, res) => {
   const userId = req.user.id;// or JWT subject
-  if(!userId) return res.status(401).json({});
+  if (!userId) return res.status(401).json({});
 
   console.log(`[PERMISSIONS] Fetching for user ID: ${userId}`);
 
@@ -295,7 +297,7 @@ app.get('/api/me/permissions', requireAuth, async (req, res) => {
     JOIN permission_action a ON a.id = rp.action_id
     WHERE ur.user_id = ?
     GROUP BY m.key_name, a.key_name
-  `,[userId]);
+  `, [userId]);
 
   console.log(`[PERMISSIONS] Found ${rows.length} permission entries for user ID: ${userId}`);
 
@@ -307,7 +309,7 @@ app.get('/api/me/permissions', requireAuth, async (req, res) => {
 
 // ✅ GET ALL USERS
 app.get('/api/users', (req, res) => {
-    const query = `
+  const query = `
         SELECT
             u.id AS user_id,
             u.name AS user_name,
@@ -327,13 +329,13 @@ app.get('/api/users', (req, res) => {
         GROUP BY
             u.id, u.name, u.designation, u.email, u.password, u.department_id, d.name, u.photo_path
     `;
-    db.query(query, (err, results) => {
-        if (err) {
-            console.error('SQL ERROR (GET /api/users):', err);
-            return res.status(500).json({ success: false, error: err.message });
-        }
-        res.json(results);
-    });
+  db.query(query, (err, results) => {
+    if (err) {
+      console.error('SQL ERROR (GET /api/users):', err);
+      return res.status(500).json({ success: false, error: err.message });
+    }
+    res.json(results);
+  });
 });
 
 // ✅ GET ALL DEPARTMENTS
@@ -357,8 +359,8 @@ app.get('/api/provisions', (req, res) => {
 // list users (debug)
 app.get('/api/login-debug', (req, res) => {
   db.query('SELECT id,name,email,is_inactive FROM `user` ORDER BY id LIMIT 200',
-    (err, rows) => err ? res.status(500).json({success:false, error:err.message})
-                       : res.json({success:true, users:rows})
+    (err, rows) => err ? res.status(500).json({ success: false, error: err.message })
+      : res.json({ success: true, users: rows })
   );
 });
 
@@ -477,95 +479,95 @@ app.post('/api/user/change-password', (req, res) => {
 
 // ✅ CREATE USER
 app.post("/api/user", uploadUserPhoto.single("photo"), (req, res) => {
-    const { name, designation, department_id, role_ids, email, password } =
-        req.body;
-    const photoPath = req.file
-        ? `uploads/users/${req.file.filename}`
-        : null;
+  const { name, designation, department_id, role_ids, email, password } =
+    req.body;
+  const photoPath = req.file
+    ? `uploads/users/${req.file.filename}`
+    : null;
 
-    db.getConnection(async (err, conn) => {
-        if (err) return res.status(500).json({ success: false, error: 'DB Connection failed' });
-        try {
-            await conn.promise().beginTransaction();
+  db.getConnection(async (err, conn) => {
+    if (err) return res.status(500).json({ success: false, error: 'DB Connection failed' });
+    try {
+      await conn.promise().beginTransaction();
 
-            const userSql = `
+      const userSql = `
               INSERT INTO \`user\` (name, designation, department_id, email, password, photo_path)
               VALUES (?, ?, ?, ?, ?, ?)
             `;
-            const [userResult] = await conn.promise().query(userSql, [name, designation, department_id, email, password, photoPath]);
-            const userId = userResult.insertId;
+      const [userResult] = await conn.promise().query(userSql, [name, designation, department_id, email, password, photoPath]);
+      const userId = userResult.insertId;
 
-            if (role_ids && role_ids.length > 0) {
-                const roles = Array.isArray(role_ids) ? role_ids : role_ids.split(',');
-                const userRoleValues = roles.map(roleId => [userId, roleId]);
-                await conn.promise().query('INSERT INTO user_role (user_id, role_id) VALUES ?', [userRoleValues]);
-            }
+      if (role_ids && role_ids.length > 0) {
+        const roles = Array.isArray(role_ids) ? role_ids : role_ids.split(',');
+        const userRoleValues = roles.map(roleId => [userId, roleId]);
+        await conn.promise().query('INSERT INTO user_role (user_id, role_id) VALUES ?', [userRoleValues]);
+      }
 
-            await conn.promise().commit();
-            res.json({ success: true, id: userId });
+      await conn.promise().commit();
+      res.json({ success: true, id: userId });
 
-        } catch (dbErr) {
-            await conn.promise().rollback();
-            console.error("SQL ERROR (POST /api/user):", dbErr);
-            res.status(500).json({ success: false, error: dbErr.message });
-        } finally {
-            conn.release();
-        }
-    });
+    } catch (dbErr) {
+      await conn.promise().rollback();
+      console.error("SQL ERROR (POST /api/user):", dbErr);
+      res.status(500).json({ success: false, error: dbErr.message });
+    } finally {
+      conn.release();
+    }
+  });
 });
 
 // === UPDATE USER ===
 app.put("/api/user/:id", uploadUserPhoto.single("photo"), async (req, res) => {
-    const { id } = req.params;
-    const { name, designation, department_id, role_ids, email, password } =
-        req.body;
+  const { id } = req.params;
+  const { name, designation, department_id, role_ids, email, password } =
+    req.body;
 
-    const conn = await db.promise().getConnection();
+  const conn = await db.promise().getConnection();
 
-    try {
-        await conn.beginTransaction();
+  try {
+    await conn.beginTransaction();
 
-        // Fetch current user data to get existing password and signature
-        const [rows] = await conn.execute("SELECT password, photo_path FROM `user` WHERE id = ?", [id]);
-        if (!rows || rows.length === 0) {
-            await conn.rollback();
-            return res.status(404).json({ success: false, error: "User not found" });
-        }
-
-        const { password: currentPassword, photo_path: currentPhoto } = rows[0];
-
-        const nextPassword = password && password.trim() !== "" ? password : currentPassword;
-
-        // Signature logic
-        let nextPhotoPath = currentPhoto;
-        if (req.file) {
-            nextPhotoPath = `uploads/users/${req.file.filename}`;
-        }
-
-        // Update user table
-        const userUpdateSql = `UPDATE \`user\` SET name = ?, designation = ?, department_id = ?, email = ?, password = ?, photo_path = ? WHERE id = ?`;
-        await conn.execute(userUpdateSql, [name, designation, department_id, email, nextPassword, nextPhotoPath, id]);
-
-        // Update user_role table
-        await conn.execute('DELETE FROM user_role WHERE user_id = ?', [id]);
-        if (role_ids && role_ids.length > 0) {
-            const roles = Array.isArray(role_ids) ? role_ids : role_ids.split(',');
-            const userRoleValues = roles.map(roleId => [id, roleId]);
-            if (userRoleValues.length > 0) {
-                await conn.query('INSERT INTO user_role (user_id, role_id) VALUES ?', [userRoleValues]);
-            }
-        }
-
-        await conn.commit();
-        res.json({ success: true });
-
-    } catch (dbErr) {
-        if (conn) await conn.rollback(); // Check if conn exists before rollback
-        console.error("SQL ERROR (PUT /api/user/:id):", dbErr);
-        res.status(500).json({ success: false, error: dbErr.message });
-    } finally {
-        if (conn) conn.release(); // Check if conn exists before releasing
+    // Fetch current user data to get existing password and signature
+    const [rows] = await conn.execute("SELECT password, photo_path FROM `user` WHERE id = ?", [id]);
+    if (!rows || rows.length === 0) {
+      await conn.rollback();
+      return res.status(404).json({ success: false, error: "User not found" });
     }
+
+    const { password: currentPassword, photo_path: currentPhoto } = rows[0];
+
+    const nextPassword = password && password.trim() !== "" ? password : currentPassword;
+
+    // Signature logic
+    let nextPhotoPath = currentPhoto;
+    if (req.file) {
+      nextPhotoPath = `uploads/users/${req.file.filename}`;
+    }
+
+    // Update user table
+    const userUpdateSql = `UPDATE \`user\` SET name = ?, designation = ?, department_id = ?, email = ?, password = ?, photo_path = ? WHERE id = ?`;
+    await conn.execute(userUpdateSql, [name, designation, department_id, email, nextPassword, nextPhotoPath, id]);
+
+    // Update user_role table
+    await conn.execute('DELETE FROM user_role WHERE user_id = ?', [id]);
+    if (role_ids && role_ids.length > 0) {
+      const roles = Array.isArray(role_ids) ? role_ids : role_ids.split(',');
+      const userRoleValues = roles.map(roleId => [id, roleId]);
+      if (userRoleValues.length > 0) {
+        await conn.query('INSERT INTO user_role (user_id, role_id) VALUES ?', [userRoleValues]);
+      }
+    }
+
+    await conn.commit();
+    res.json({ success: true });
+
+  } catch (dbErr) {
+    if (conn) await conn.rollback(); // Check if conn exists before rollback
+    console.error("SQL ERROR (PUT /api/user/:id):", dbErr);
+    res.status(500).json({ success: false, error: dbErr.message });
+  } finally {
+    if (conn) conn.release(); // Check if conn exists before releasing
+  }
 });
 
 // ✅ DEACTIVATE USER
@@ -595,60 +597,60 @@ app.put('/api/user/:id/deactivate', (req, res) => {
 
 // --- METADATA (units, brands, manufacturers, accounts, warehouses, vendors)
 app.get('/api/products/metadata', (req, res) => {
-    const queries = {
-        units:         'SELECT id, name as unit_name FROM uom_master ORDER BY name',
-        brands:        'SELECT id, brand_name FROM brands ORDER BY brand_name',
-        manufacturers: 'SELECT id, name FROM manufacturers ORDER BY name',
-        accounts:      'SELECT id, name, account_type_id FROM acc_chart_accounts ORDER BY name',
-        warehouses:    'SELECT id, warehouse_name FROM warehouses ORDER BY warehouse_name',
-        vendors:       'SELECT id, display_name FROM vendor ORDER BY display_name',
-        taxes:         "SELECT id, tax_name, rate, type FROM taxes WHERE is_active=1 ORDER BY tax_name",
-        valuations:    "SELECT id, code, method_name FROM valuation_methods WHERE is_active = 1 ORDER BY sort_order, method_name"
-    };
+  const queries = {
+    units: 'SELECT id, name as unit_name FROM uom_master ORDER BY name',
+    brands: 'SELECT id, brand_name FROM brands ORDER BY brand_name',
+    manufacturers: 'SELECT id, name FROM manufacturers ORDER BY name',
+    accounts: 'SELECT id, name, account_type_id FROM acc_chart_accounts ORDER BY name',
+    warehouses: 'SELECT id, warehouse_name FROM warehouses ORDER BY warehouse_name',
+    vendors: 'SELECT id, display_name FROM vendor ORDER BY display_name',
+    taxes: "SELECT id, tax_name, rate, type FROM taxes WHERE is_active=1 ORDER BY tax_name",
+    valuations: "SELECT id, code, method_name FROM valuation_methods WHERE is_active = 1 ORDER BY sort_order, method_name"
+  };
 
-    const results = {};
-    let pending = Object.keys(queries).length;
-    let responded = false;
+  const results = {};
+  let pending = Object.keys(queries).length;
+  let responded = false;
 
-    for (const key in queries) {
-        db.query(queries[key], (err, rows) => {
-            if (responded) return;
-            if (err) {
-                responded = true;
-                return res.status(500).json({
-                    error: 'Error loading metadata',
-                    where: key,
-                    message: err.message
-                });
-            }
-            results[key] = rows;
-            if (--pending === 0 && !responded) res.json(results);
+  for (const key in queries) {
+    db.query(queries[key], (err, rows) => {
+      if (responded) return;
+      if (err) {
+        responded = true;
+        return res.status(500).json({
+          error: 'Error loading metadata',
+          where: key,
+          message: err.message
         });
-    }
+      }
+      results[key] = rows;
+      if (--pending === 0 && !responded) res.json(results);
+    });
+  }
 });
 
 
 // Health check endpoint (used by Render)
 app.get('/api/health', (req, res) => {
-    db.query('SELECT 1', (err) => {
-        if (err) {
-            console.error('Health check DB error:', err.message);
-            return res.status(500).json({ ok: false, message: err.message });
-        }
-        res.json({ ok: true, timestamp: new Date().toISOString() });
-    });
+  db.query('SELECT 1', (err) => {
+    if (err) {
+      console.error('Health check DB error:', err.message);
+      return res.status(500).json({ ok: false, message: err.message });
+    }
+    res.json({ ok: true, timestamp: new Date().toISOString() });
+  });
 });
 
 
 // ====== GET /api/products (list with search/pagination/sort) ======
 // Helper function to run queries with promises
 function query(sql, params = []) {
-    return new Promise((resolve, reject) => {
-        db.query(sql, params, (err, results) => {
-            if (err) return reject(err);
-            resolve(results);
-        });
+  return new Promise((resolve, reject) => {
+    db.query(sql, params, (err, results) => {
+      if (err) return reject(err);
+      resolve(results);
     });
+  });
 }
 
 
@@ -659,20 +661,20 @@ app.use('/api/products', productRoutes);
 
 // Your POST route
 app.post('/api/products', upload.array('images', 15), async (req, res) => {
-    const b = req.body;
-    const files = req.files || [];
+  const b = req.body;
+  const files = req.files || [];
 
-    let openingRows = [];
-    try {
-        openingRows = JSON.parse(b.openingRows || '[]');
-    } catch {}
+  let openingRows = [];
+  try {
+    openingRows = JSON.parse(b.openingRows || '[]');
+  } catch { }
 
-    const primaryIndex = Number.isInteger(+b.primaryImageIndex) ? +b.primaryImageIndex : 0;
+  const primaryIndex = Number.isInteger(+b.primaryImageIndex) ? +b.primaryImageIndex : 0;
 
-    // Combine dimensions into one string "L x W x H"
-    const dimensions = [b.length || 0, b.width || 0, b.height || 0].join(' x ');
+  // Combine dimensions into one string "L x W x H"
+  const dimensions = [b.length || 0, b.width || 0, b.height || 0].join(' x ');
 
-    const insertSql = `
+  const insertSql = `
         INSERT INTO products (
             item_type, product_name, sku, unit_id,
             returnable, excise,
@@ -699,87 +701,87 @@ app.post('/api/products', upload.array('images', 15), async (req, res) => {
                  )
     `;
 
-    const insertVals = [
-        b.itemType || 'Goods',                 // product_type
-        b.name || '',                          // product_name
-        b.sku || null,                        // sku
-        b.unitId || null,                     // unit_id
+  const insertVals = [
+    b.itemType || 'Goods',                 // product_type
+    b.name || '',                          // product_name
+    b.sku || null,                        // sku
+    b.unitId || null,                     // unit_id
 
-        b.returnable === '0' ? 0 : 1,         // returnable
-        b.excise === '1' ? 1 : 0,             // excise
+    b.returnable === '0' ? 0 : 1,         // returnable
+    b.excise === '1' ? 1 : 0,             // excise
 
-        dimensions,                           // dimensions (string)
-        b.dimUnit || 'cm',                   // dimensions_unit
+    dimensions,                           // dimensions (string)
+    b.dimUnit || 'cm',                   // dimensions_unit
 
-        b.weight || 0,                       // weight
-        b.weightUnit || 'kg',                // weight_unit
+    b.weight || 0,                       // weight
+    b.weightUnit || 'kg',                // weight_unit
 
-        b.manufacturer || null,              // manufacturer_id
-        b.brand || null,                     // brand_id
+    b.manufacturer || null,              // manufacturer_id
+    b.brand || null,                     // brand_id
 
-        b.upc || null,                      // upc
-        b.mpn || null,                      // mpn
-        b.isbn || null,                     // isbn
-        b.ean || null,                      // ean
+    b.upc || null,                      // upc
+    b.mpn || null,                      // mpn
+    b.isbn || null,                     // isbn
+    b.ean || null,                      // ean
 
-        b.enableSales === '0' ? 0 : 1,      // enable_sales
-        b.sellingCurrency || 'AED',          // selling_currency
-        b.sellingPrice || 0,                 // selling_price
-        b.salesAccount || null,              // sales_account_id
-        b.salesDescription || null,          // sales_description
-        b.salesTax || null,                  // sales_tax
+    b.enableSales === '0' ? 0 : 1,      // enable_sales
+    b.sellingCurrency || 'AED',          // selling_currency
+    b.sellingPrice || 0,                 // selling_price
+    b.salesAccount || null,              // sales_account_id
+    b.salesDescription || null,          // sales_description
+    b.salesTax || null,                  // sales_tax
 
-        b.enablePurchase === '0' ? 0 : 1,   // enable_purchase
-        b.costCurrency || 'AED',              // cost_currency
-        b.costPrice || 0,                    // cost_price
-        b.purchaseAccount || null,           // purchase_account_id
-        b.purchaseDescription || null,       // purchase_description
+    b.enablePurchase === '0' ? 0 : 1,   // enable_purchase
+    b.costCurrency || 'AED',              // cost_currency
+    b.costPrice || 0,                    // cost_price
+    b.purchaseAccount || null,           // purchase_account_id
+    b.purchaseDescription || null,       // purchase_description
 
-        b.preferredVendor || null,            // preferred_vendor_id
-        b.trackInventory === '0' ? 0 : 1,    // track_inventory
-        b.trackBatches === '1' ? 'batches' : 'none',  // adv_tracking
-        b.inventoryAccountId || null,         // inventory_account_id
-        b.valuation || 'FIFO',                // valuation_method
+    b.preferredVendor || null,            // preferred_vendor_id
+    b.trackInventory === '0' ? 0 : 1,    // track_inventory
+    b.trackBatches === '1' ? 'batches' : 'none',  // adv_tracking
+    b.inventoryAccountId || null,         // inventory_account_id
+    b.valuation || 'FIFO',                // valuation_method
 
-        b.reorderPoint || 0,                 // reorder_point
-        b.hscode || null,                    // hscode
-        b.description || null                // description
-    ];
+    b.reorderPoint || 0,                 // reorder_point
+    b.hscode || null,                    // hscode
+    b.description || null                // description
+  ];
 
-    try {
-        await queryAsync('START TRANSACTION');
+  try {
+    await queryAsync('START TRANSACTION');
 
-        const result = await queryAsync(insertSql, insertVals);
-        const productId = result.insertId;
+    const result = await queryAsync(insertSql, insertVals);
+    const productId = result.insertId;
 
-        for (let i = 0; i < files.length; i++) {
-            const f = files[i];
-            const relPath = `/uploads/product/${path.basename(f.path)}`;
-            await queryAsync(
-                `INSERT INTO product_images (product_id, file_path, is_primary, created_at)
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
+      const relPath = `/uploads/product/${path.basename(f.path)}`;
+      await queryAsync(
+        `INSERT INTO product_images (product_id, file_path, is_primary, created_at)
          VALUES (?, ?, ?, NOW())`,
-                [productId, relPath, i === primaryIndex ? 1 : 0]
-            );
-        }
+        [productId, relPath, i === primaryIndex ? 1 : 0]
+      );
+    }
 
-        for (const r of openingRows) {
-            if (!r || !r.warehouse_id) continue;
-            await queryAsync(
-                `INSERT INTO product_opening_stock
+    for (const r of openingRows) {
+      if (!r || !r.warehouse_id) continue;
+      await queryAsync(
+        `INSERT INTO product_opening_stock
          (product_id, warehouse_id, qty, unit_cost_per_unit, created_at)
          VALUES (?, ?, ?, ?, NOW())`,
-                [productId, r.warehouse_id, r.qty ?? 0, r.unit_cost_per_unit ?? 0]
-            );
-        }
-
-        await queryAsync('COMMIT');
-        res.json({ id: productId, message: 'Product created' });
-    } catch (err) {
-        await queryAsync('ROLLBACK').catch(() => {});
-        await Promise.all((files || []).map(f => fs.promises.unlink(f.path).catch(() => {})));
-        console.error('Failed to insert product:', err);
-        res.status(500).json({ error: 'Failed to insert product.', details: err.message });
+        [productId, r.warehouse_id, r.qty ?? 0, r.unit_cost_per_unit ?? 0]
+      );
     }
+
+    await queryAsync('COMMIT');
+    res.json({ id: productId, message: 'Product created' });
+  } catch (err) {
+    await queryAsync('ROLLBACK').catch(() => { });
+    await Promise.all((files || []).map(f => fs.promises.unlink(f.path).catch(() => { })));
+    console.error('Failed to insert product:', err);
+    res.status(500).json({ error: 'Failed to insert product.', details: err.message });
+  }
 });
 
 
@@ -796,15 +798,15 @@ app.get('/api/tax_treatments', (req, res) => {
 
 // 🔹 GET: Single Tax Treatment by ID
 app.get('/api/tax_treatment/:id', (req, res) => {
-    const { id } = req.params;
-    const sql = 'SELECT * FROM tax_treatment WHERE id = ? LIMIT 1';
-    db.query(sql, [id], (err, results) => {
-        if (err) return res.status(500).json({ error: err.message });
-        if (!results || results.length === 0) {
-            return res.status(404).json({ error: 'Tax Treatment not found' });
-        }
-        res.json(results[0]);
-    });
+  const { id } = req.params;
+  const sql = 'SELECT * FROM tax_treatment WHERE id = ? LIMIT 1';
+  db.query(sql, [id], (err, results) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (!results || results.length === 0) {
+      return res.status(404).json({ error: 'Tax Treatment not found' });
+    }
+    res.json(results[0]);
+  });
 });
 
 
@@ -818,10 +820,10 @@ app.get('/api/source_supply', (req, res) => {
 
 //packing
 app.get('/api/packings', (req, res) => {
-    db.query('SELECT id, name FROM packing', (err, results) => {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json(results);
-    });
+  db.query('SELECT id, name FROM packing', (err, results) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(results);
+  });
 });
 
 
@@ -873,26 +875,26 @@ app.get('/api/company-settings', (req, res) => {
      LEFT JOIN country co ON cs.country = co.name -- Join to get country_id from country name
      ORDER BY cs.id DESC LIMIT 1`,
     (err, results) => {
-    if (err) return res.status(500).json({ error: err });
-    if (results.length > 0) {
-      const settings = results[0];
-      // Re-shape the base_currency to be the object the frontend expects
-      if (settings.currency_id && settings.currency_name) {
-        settings.base_currency = {
-          value: settings.currency_id,
-          label: settings.currency_name
-        };
+      if (err) return res.status(500).json({ error: err });
+      if (results.length > 0) {
+        const settings = results[0];
+        // Re-shape the base_currency to be the object the frontend expects
+        if (settings.currency_id && settings.currency_name) {
+          settings.base_currency = {
+            value: settings.currency_id,
+            label: settings.currency_name
+          };
+        } else {
+          settings.base_currency = null;
+        }
+        // remove the extra fields to avoid confusion
+        delete settings.currency_id;
+        delete settings.currency_name;
+        res.json(settings);
       } else {
-        settings.base_currency = null;
+        res.json({});
       }
-      // remove the extra fields to avoid confusion
-      delete settings.currency_id;
-      delete settings.currency_name;
-      res.json(settings);
-    } else {
-      res.json({});
-    }
-  });
+    });
 });
 
 // ✅ GET a specific company's settings by ID
@@ -942,98 +944,98 @@ app.get('/api/companies', (req, res) => {
 
 // ✅ DELETE a company by ID
 app.delete('/api/company-settings/:id', async (req, res) => {
-    const { id } = req.params;
-    if (!id) return res.status(400).json({ error: 'Company ID is required' });
+  const { id } = req.params;
+  if (!id) return res.status(400).json({ error: 'Company ID is required' });
 
-    const conn = await db.promise().getConnection();
-    try {
-        await conn.beginTransaction();
+  const conn = await db.promise().getConnection();
+  try {
+    await conn.beginTransaction();
 
-        // Check if the company is in use in the vendor table's customer_of field
-        // The customer_of field stores a JSON array of company IDs, e.g., '[1, 2]'
-        // We use JSON_SEARCH to find if the ID exists in the array. It returns a path string if found, or NULL if not.
-        // The previous JSON_SEARCH was incorrect as it searched for a string in an array of numbers.
-        // JSON_CONTAINS is the correct function. We check if the numeric ID exists in the array.
-        const inUseSql = `SELECT 1 FROM vendor WHERE JSON_CONTAINS(customer_of, ?, '$') LIMIT 1`;
-        const [inUseRows] = await conn.query(inUseSql, [id]);
+    // Check if the company is in use in the vendor table's customer_of field
+    // The customer_of field stores a JSON array of company IDs, e.g., '[1, 2]'
+    // We use JSON_SEARCH to find if the ID exists in the array. It returns a path string if found, or NULL if not.
+    // The previous JSON_SEARCH was incorrect as it searched for a string in an array of numbers.
+    // JSON_CONTAINS is the correct function. We check if the numeric ID exists in the array.
+    const inUseSql = `SELECT 1 FROM vendor WHERE JSON_CONTAINS(customer_of, ?, '$') LIMIT 1`;
+    const [inUseRows] = await conn.query(inUseSql, [id]);
 
-        if (inUseRows.length > 0) {
-            await conn.rollback();
-            return res.status(400).json({ error: 'Cannot delete company. It is currently associated with one or more vendors or customers.' });
-        }
-
-        await conn.query('DELETE FROM company_settings WHERE id = ?', [id]);
-        await conn.commit();
-        res.json({ success: true, message: 'Company deleted successfully.' });
-    } catch (err) {
-        await conn.rollback();
-        res.status(500).json({ error: err?.sqlMessage || 'Database error during deletion.' });
-    } finally {
-        conn.release();
+    if (inUseRows.length > 0) {
+      await conn.rollback();
+      return res.status(400).json({ error: 'Cannot delete company. It is currently associated with one or more vendors or customers.' });
     }
+
+    await conn.query('DELETE FROM company_settings WHERE id = ?', [id]);
+    await conn.commit();
+    res.json({ success: true, message: 'Company deleted successfully.' });
+  } catch (err) {
+    await conn.rollback();
+    res.status(500).json({ error: err?.sqlMessage || 'Database error during deletion.' });
+  } finally {
+    conn.release();
+  }
 });
 
 
 // Insert company settings
 // Insert company settings (accepts logo and/or company_stamp)
 app.post('/api/company-settings', uploadCompany, (req, res) => {
-    const {
-        name, industry, full_address, telephone, fax, country, is_tax_registered, trn_no,
-        primary_contact_email, base_currency,
-        fiscal_year_id, fiscal_start_day, language_id, timezone_id, date_format_id, company_prefix,
-        existing_logo_path // For copying logo
-    } = req.body;
+  const {
+    name, industry, full_address, telephone, fax, country, is_tax_registered, trn_no,
+    primary_contact_email, base_currency,
+    fiscal_year_id, fiscal_start_day, language_id, timezone_id, date_format_id, company_prefix,
+    existing_logo_path // For copying logo
+  } = req.body;
 
-    const logoFile  = req.files?.logo?.[0] || null;
-    const stampFile = req.files?.company_stamp?.[0] || null;
+  const logoFile = req.files?.logo?.[0] || null;
+  const stampFile = req.files?.company_stamp?.[0] || null;
 
-    let final_base_currency = null;
-    const raw_currency = req.body.base_currency;
+  let final_base_currency = null;
+  const raw_currency = req.body.base_currency;
 
-    if (typeof raw_currency === 'object' && raw_currency !== null) {
-        // Case 1: It's already an object, e.g., { value: 'USD', label: '...' }
-        final_base_currency = raw_currency.value || null;
-    } else if (typeof raw_currency === 'string' && raw_currency.trim() && raw_currency !== '[object Object]') {
-        // Case 2: It's a string. It could be a primitive 'USD' or a JSON string.
-        if (raw_currency.startsWith('{') && raw_currency.endsWith('}')) {
-            try {
-                const parsed = JSON.parse(raw_currency);
-                final_base_currency = parsed.value || null;
-            } catch (e) {
-                final_base_currency = raw_currency;
-            }
-        } else {
-            final_base_currency = raw_currency;
-        }
+  if (typeof raw_currency === 'object' && raw_currency !== null) {
+    // Case 1: It's already an object, e.g., { value: 'USD', label: '...' }
+    final_base_currency = raw_currency.value || null;
+  } else if (typeof raw_currency === 'string' && raw_currency.trim() && raw_currency !== '[object Object]') {
+    // Case 2: It's a string. It could be a primitive 'USD' or a JSON string.
+    if (raw_currency.startsWith('{') && raw_currency.endsWith('}')) {
+      try {
+        const parsed = JSON.parse(raw_currency);
+        final_base_currency = parsed.value || null;
+      } catch (e) {
+        final_base_currency = raw_currency;
+      }
+    } else {
+      final_base_currency = raw_currency;
     }
+  }
 
-    let base64logo = null;
-    if (logoFile) {
-        try {
-            const fileBuffer = fs.readFileSync(logoFile.path);
-            const ext = path.extname(logoFile.originalname).substring(1) || 'png';
-            base64logo = `data:image/${ext};base64,${fileBuffer.toString('base64')}`;
-        } catch (err) {
-            console.error('Error converting new logo to base64 on create:', err);
-        }
-    } else if (existing_logo_path) {
-        // If copying, generate base64 from the existing file path
-        try {
-            const fullPath = path.join(__dirname, '..', existing_logo_path);
-            if (fs.existsSync(fullPath)) {
-                const fileBuffer = fs.readFileSync(fullPath);
-                const ext = path.extname(existing_logo_path).substring(1) || 'png';
-                base64logo = `data:image/${ext};base64,${fileBuffer.toString('base64')}`;
-            }
-        } catch (err) {
-            console.error('Error converting existing logo to base64 on create:', err);
-        }
+  let base64logo = null;
+  if (logoFile) {
+    try {
+      const fileBuffer = fs.readFileSync(logoFile.path);
+      const ext = path.extname(logoFile.originalname).substring(1) || 'png';
+      base64logo = `data:image/${ext};base64,${fileBuffer.toString('base64')}`;
+    } catch (err) {
+      console.error('Error converting new logo to base64 on create:', err);
     }
+  } else if (existing_logo_path) {
+    // If copying, generate base64 from the existing file path
+    try {
+      const fullPath = path.join(__dirname, '..', existing_logo_path);
+      if (fs.existsSync(fullPath)) {
+        const fileBuffer = fs.readFileSync(fullPath);
+        const ext = path.extname(existing_logo_path).substring(1) || 'png';
+        base64logo = `data:image/${ext};base64,${fileBuffer.toString('base64')}`;
+      }
+    } catch (err) {
+      console.error('Error converting existing logo to base64 on create:', err);
+    }
+  }
 
-    const logo = logoFile ? `uploads/company/${logoFile.filename}` : (existing_logo_path || null);
-    const company_stamp = stampFile ? `uploads/company/${stampFile.filename}` : null;
+  const logo = logoFile ? `uploads/company/${logoFile.filename}` : (existing_logo_path || null);
+  const company_stamp = stampFile ? `uploads/company/${stampFile.filename}` : null;
 
-    const sql = `
+  const sql = `
     INSERT INTO company_settings
       (name, industry, full_address, telephone, fax, country, is_tax_registered, trn_no,
        primary_contact_email, base_currency,
@@ -1041,108 +1043,108 @@ app.post('/api/company-settings', uploadCompany, (req, res) => {
        logo, company_stamp, company_prefix, base64logo)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `;
-    const params = [
-        name, industry, full_address, telephone, fax, country, is_tax_registered === '1' ? 1 : 0, trn_no || null,
-        primary_contact_email, final_base_currency,
-        fiscal_year_id || null, fiscal_start_day || 1, language_id || null, timezone_id || null, date_format_id || null,
-        logo, company_stamp, company_prefix || null, base64logo,
-    ];
+  const params = [
+    name, industry, full_address, telephone, fax, country, is_tax_registered === '1' ? 1 : 0, trn_no || null,
+    primary_contact_email, final_base_currency,
+    fiscal_year_id || null, fiscal_start_day || 1, language_id || null, timezone_id || null, date_format_id || null,
+    logo, company_stamp, company_prefix || null, base64logo,
+  ];
 
-    db.query(sql, params, (err, result) => {
-        if (err) return res.status(500).json({ error: err?.sqlMessage || 'Database error' });
-        res.json({
-            success: true,
-            id: result.insertId, // Keep id for frontend logic
-            name: name, // Return the saved name
-            industry: industry, // Return the saved industry
-            logo: logo, // Return the new logo path
-            message: 'Company settings saved successfully',
-            company_stamp_path: company_stamp // Keep this if used elsewhere
-        });
+  db.query(sql, params, (err, result) => {
+    if (err) return res.status(500).json({ error: err?.sqlMessage || 'Database error' });
+    res.json({
+      success: true,
+      id: result.insertId, // Keep id for frontend logic
+      name: name, // Return the saved name
+      industry: industry, // Return the saved industry
+      logo: logo, // Return the new logo path
+      message: 'Company settings saved successfully',
+      company_stamp_path: company_stamp // Keep this if used elsewhere
     });
+  });
 });
 
 
 
 app.put('/api/company-settings/:id', uploadCompany, (req, res) => {
-    const {
-        name, industry, full_address, telephone, fax, country, is_tax_registered, trn_no,
-        primary_contact_email, base_currency,
-        fiscal_year_id, fiscal_start_day, language_id, timezone_id, date_format_id, company_prefix
-    } = req.body;
-    const id = req.params.id;
+  const {
+    name, industry, full_address, telephone, fax, country, is_tax_registered, trn_no,
+    primary_contact_email, base_currency,
+    fiscal_year_id, fiscal_start_day, language_id, timezone_id, date_format_id, company_prefix
+  } = req.body;
+  const id = req.params.id;
 
-    let final_base_currency = null;
-    const raw_currency = req.body.base_currency;
+  let final_base_currency = null;
+  const raw_currency = req.body.base_currency;
 
-    if (typeof raw_currency === 'object' && raw_currency !== null) {
-        // Case 1: It's already an object, e.g., { value: 'USD', label: '...' }
-        final_base_currency = raw_currency.value || null;
-    } else if (typeof raw_currency === 'string' && raw_currency.trim() && raw_currency !== '[object Object]') {
-        // Case 2: It's a string. It could be a primitive 'USD' or a JSON string.
-        if (raw_currency.startsWith('{') && raw_currency.endsWith('}')) {
-            try {
-                const parsed = JSON.parse(raw_currency);
-                final_base_currency = parsed.value || null;
-            } catch (e) {
-                final_base_currency = raw_currency;
-            }
-        } else {
-            final_base_currency = raw_currency;
-        }
+  if (typeof raw_currency === 'object' && raw_currency !== null) {
+    // Case 1: It's already an object, e.g., { value: 'USD', label: '...' }
+    final_base_currency = raw_currency.value || null;
+  } else if (typeof raw_currency === 'string' && raw_currency.trim() && raw_currency !== '[object Object]') {
+    // Case 2: It's a string. It could be a primitive 'USD' or a JSON string.
+    if (raw_currency.startsWith('{') && raw_currency.endsWith('}')) {
+      try {
+        const parsed = JSON.parse(raw_currency);
+        final_base_currency = parsed.value || null;
+      } catch (e) {
+        final_base_currency = raw_currency;
+      }
+    } else {
+      final_base_currency = raw_currency;
     }
+  }
 
-    const fields = [
-        'name = ?', 'industry = ?', 'full_address = ?', 'telephone = ?', 'fax = ?', 'country = ?', 'is_tax_registered = ?', 'trn_no = ?',
-        'primary_contact_email = ?', 'base_currency = ?',
-        'fiscal_year_id = ?', 'fiscal_start_day = ?', 'language_id = ?', 'timezone_id = ?', 'date_format_id = ?',
-        'company_prefix = ?'
-    ];
-    const values = [
-        name, industry, full_address, telephone, fax, country, is_tax_registered === '1' ? 1 : 0, trn_no || null,
-        primary_contact_email, final_base_currency,
-        fiscal_year_id || null, fiscal_start_day || 1, language_id || null, timezone_id || null, date_format_id || null,
-        company_prefix || null,
-    ];
+  const fields = [
+    'name = ?', 'industry = ?', 'full_address = ?', 'telephone = ?', 'fax = ?', 'country = ?', 'is_tax_registered = ?', 'trn_no = ?',
+    'primary_contact_email = ?', 'base_currency = ?',
+    'fiscal_year_id = ?', 'fiscal_start_day = ?', 'language_id = ?', 'timezone_id = ?', 'date_format_id = ?',
+    'company_prefix = ?'
+  ];
+  const values = [
+    name, industry, full_address, telephone, fax, country, is_tax_registered === '1' ? 1 : 0, trn_no || null,
+    primary_contact_email, final_base_currency,
+    fiscal_year_id || null, fiscal_start_day || 1, language_id || null, timezone_id || null, date_format_id || null,
+    company_prefix || null,
+  ];
 
-    // If logo uploaded (existing behavior with base64logo)
-    const logoFile = req.files?.logo?.[0] || null;
-    if (logoFile) {
-        const logoPath = `uploads/company/${logoFile.filename}`;
-        fields.push('logo = ?');
-        values.push(logoPath);
+  // If logo uploaded (existing behavior with base64logo)
+  const logoFile = req.files?.logo?.[0] || null;
+  if (logoFile) {
+    const logoPath = `uploads/company/${logoFile.filename}`;
+    fields.push('logo = ?');
+    values.push(logoPath);
 
-        try {
-            const fileBuffer = fs.readFileSync(logoFile.path); // Read file from disk path provided by multer
-            const ext = path.extname(logoFile.originalname).substring(1) || 'png';
-            const base64logo = `data:image/${ext};base64,${fileBuffer.toString('base64')}`;
-            fields.push('base64logo = ?');
-            values.push(base64logo);
-        } catch (err) {
-            console.error('Error converting logo to base64 on update:', err);
-            // Don't add base64 if conversion fails
-        }
+    try {
+      const fileBuffer = fs.readFileSync(logoFile.path); // Read file from disk path provided by multer
+      const ext = path.extname(logoFile.originalname).substring(1) || 'png';
+      const base64logo = `data:image/${ext};base64,${fileBuffer.toString('base64')}`;
+      fields.push('base64logo = ?');
+      values.push(base64logo);
+    } catch (err) {
+      console.error('Error converting logo to base64 on update:', err);
+      // Don't add base64 if conversion fails
     }
+  }
 
-    // If company_stamp uploaded (no base64, per your request)
-    const stampFile = req.files?.company_stamp?.[0] || null;
-    if (stampFile) {
-        const stampPath = `uploads/company/${stampFile.filename}`;
-        fields.push('company_stamp = ?');
-        values.push(stampPath);
-    }
+  // If company_stamp uploaded (no base64, per your request)
+  const stampFile = req.files?.company_stamp?.[0] || null;
+  if (stampFile) {
+    const stampPath = `uploads/company/${stampFile.filename}`;
+    fields.push('company_stamp = ?');
+    values.push(stampPath);
+  }
 
-    values.push(id);
-    const sql = `UPDATE company_settings SET ${fields.join(', ')} WHERE id = ?`;
+  values.push(id);
+  const sql = `UPDATE company_settings SET ${fields.join(', ')} WHERE id = ?`;
 
-    db.query(sql, values, (err) => {
-        if (err) return res.status(500).json({ error: err?.sqlMessage || 'Database error' });
-        res.json({
-            success: true,
-            message: 'Company settings updated successfully',
-            logo: logoFile ? `uploads/company/${logoFile.filename}` : req.body.existing_logo_path || null
-        });
+  db.query(sql, values, (err) => {
+    if (err) return res.status(500).json({ error: err?.sqlMessage || 'Database error' });
+    res.json({
+      success: true,
+      message: 'Company settings updated successfully',
+      logo: logoFile ? `uploads/company/${logoFile.filename}` : req.body.existing_logo_path || null
     });
+  });
 });
 
 // ✅ GET email settings
@@ -1164,23 +1166,23 @@ app.post('/api/email-settings', (req, res) => {
     if (result.length === 0) {
       // INSERT if no settings exist
       db.query(
-          'INSERT INTO email_settings (username, password, smtp_host, smtp_port, encryption) VALUES (?, ?, ?, ?, ?)',
-          [username, password, smtp_host, smtp_port, encryption],
-          (insertErr) => {
-            if (insertErr) return res.status(500).send(insertErr);
-            res.send({ message: 'Email settings saved.' });
-          }
+        'INSERT INTO email_settings (username, password, smtp_host, smtp_port, encryption) VALUES (?, ?, ?, ?, ?)',
+        [username, password, smtp_host, smtp_port, encryption],
+        (insertErr) => {
+          if (insertErr) return res.status(500).send(insertErr);
+          res.send({ message: 'Email settings saved.' });
+        }
       );
     } else {
       // UPDATE existing settings
       const id = result[0].id;
       db.query(
-          'UPDATE email_settings SET username=?, password=?, smtp_host=?, smtp_port=?, encryption=? WHERE id=?',
-          [username, password, smtp_host, smtp_port, encryption, id],
-          (updateErr) => {
-            if (updateErr) return res.status(500).send(updateErr);
-            res.send({ message: 'Email settings updated.' });
-          }
+        'UPDATE email_settings SET username=?, password=?, smtp_host=?, smtp_port=?, encryption=? WHERE id=?',
+        [username, password, smtp_host, smtp_port, encryption, id],
+        (updateErr) => {
+          if (updateErr) return res.status(500).send(updateErr);
+          res.send({ message: 'Email settings updated.' });
+        }
       );
     }
   });
@@ -1246,77 +1248,77 @@ app.put('/api/templatesettings/:id', (req, res) => {
  * DELETE /api/vendor_attachments/:id
  */
 app.delete("/api/vendor_attachments/:id", (req, res) => {
-    const { id } = req.params;
+  const { id } = req.params;
 
-    db.query("DELETE FROM vendor_attachment WHERE id = ?", [id], (err) => {
-        if (err) return res.status(500).json({ error: "Failed to delete attachment" });
-        res.json({ success: true, message: "Attachment deleted" });
-    });
+  db.query("DELETE FROM vendor_attachment WHERE id = ?", [id], (err) => {
+    if (err) return res.status(500).json({ error: "Failed to delete attachment" });
+    res.json({ success: true, message: "Attachment deleted" });
+  });
 });
 
 
 app.get("/api/preferences/vendor", async (req, res) => {
-    const userId = req.session.user?.id;
-    if (!userId) return res.status(401).json({ error: "Not logged in" });
+  const userId = req.session.user?.id;
+  if (!userId) return res.status(401).json({ error: "Not logged in" });
 
-    try {
-        const [rows] = await db
-            .promise()
-            .query(
-                "SELECT acc_address_open, acc_details_open, acc_contacts_open, acc_record_open FROM user_vendor_preferences WHERE user_id = ? LIMIT 1",
-                [userId]
-            );
+  try {
+    const [rows] = await db
+      .promise()
+      .query(
+        "SELECT acc_address_open, acc_details_open, acc_contacts_open, acc_record_open FROM user_vendor_preferences WHERE user_id = ? LIMIT 1",
+        [userId]
+      );
 
-        if (rows.length > 0) {
-            res.json(rows[0]);
-        } else {
-            res.json({
-                acc_address_open: true,
-                acc_details_open: true,
-                acc_contacts_open: true,
-                acc_record_open: true
-            });
-        }
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "Failed to fetch preferences", details: err.message });
+    if (rows.length > 0) {
+      res.json(rows[0]);
+    } else {
+      res.json({
+        acc_address_open: true,
+        acc_details_open: true,
+        acc_contacts_open: true,
+        acc_record_open: true
+      });
     }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch preferences", details: err.message });
+  }
 });
 
 app.post("/api/preferences/vendor", async (req, res) => {
-    const userId = req.session.user?.id;
-    if (!userId) return res.status(401).json({ error: "Not logged in" });
-    const { acc_address_open, acc_details_open, acc_contacts_open, acc_record_open } = req.body;
+  const userId = req.session.user?.id;
+  if (!userId) return res.status(401).json({ error: "Not logged in" });
+  const { acc_address_open, acc_details_open, acc_contacts_open, acc_record_open } = req.body;
 
-    try {
-        const [existing] = await db
-            .promise()
-            .query("SELECT id FROM user_vendor_preferences WHERE user_id = ?", [userId]);
+  try {
+    const [existing] = await db
+      .promise()
+      .query("SELECT id FROM user_vendor_preferences WHERE user_id = ?", [userId]);
 
-        if (existing.length > 0) {
-            await db
-                .promise()
-                .query(
-                    `UPDATE user_vendor_preferences
+    if (existing.length > 0) {
+      await db
+        .promise()
+        .query(
+          `UPDATE user_vendor_preferences
            SET acc_address_open = ?, acc_details_open = ?, acc_contacts_open = ?, acc_record_open = ?
            WHERE user_id = ?`,
-                    [acc_address_open, acc_details_open, acc_contacts_open, acc_record_open, userId]
-                );
-        } else {
-            await db
-                .promise()
-                .query(
-                    `INSERT INTO user_vendor_preferences (user_id, acc_address_open, acc_details_open, acc_contacts_open, acc_record_open)
+          [acc_address_open, acc_details_open, acc_contacts_open, acc_record_open, userId]
+        );
+    } else {
+      await db
+        .promise()
+        .query(
+          `INSERT INTO user_vendor_preferences (user_id, acc_address_open, acc_details_open, acc_contacts_open, acc_record_open)
            VALUES (?, ?, ?, ?, ?)`,
-                    [userId, acc_address_open, acc_details_open, acc_contacts_open, acc_record_open]
-                );
-        }
-
-        res.json({ success: true });
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "Failed to save preferences", details: err.message });
+          [userId, acc_address_open, acc_details_open, acc_contacts_open, acc_record_open]
+        );
     }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to save preferences", details: err.message });
+  }
 });
 
 /**
@@ -1324,98 +1326,98 @@ app.post("/api/preferences/vendor", async (req, res) => {
  * PUT  /api/vendor-contacts/:id
  */
 app.post("/api/vendor-contacts", async (req, res) => {
-    const {
-        vendor_id,
-        salutation,
-        first_name,
-        last_name,
-        email,
-        phone,
-        mobile,
-        skype_name_number,
-        designation,
-        department
-    } = req.body;
+  const {
+    vendor_id,
+    salutation,
+    first_name,
+    last_name,
+    email,
+    phone,
+    mobile,
+    skype_name_number,
+    designation,
+    department
+  } = req.body;
 
-    const sql = `INSERT INTO vendor_contact
+  const sql = `INSERT INTO vendor_contact
     (vendor_id, salutation_id, first_name, last_name, email, phone, mobile, skype_name_number, designation, department)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
-    db.query(
-        sql,
-        [
-            vendor_id,
-            salutation,
-            first_name,
-            last_name,
-            email,
-            phone,
-            mobile,
-            skype_name_number,
-            designation,
-            department
-        ],
-        (err) => {
-            if (err) return res.status(500).json({ error: err.message });
-            res.status(200).json({ message: "Contact added" });
-        }
-    );
+  db.query(
+    sql,
+    [
+      vendor_id,
+      salutation,
+      first_name,
+      last_name,
+      email,
+      phone,
+      mobile,
+      skype_name_number,
+      designation,
+      department
+    ],
+    (err) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.status(200).json({ message: "Contact added" });
+    }
+  );
 });
 
 app.put("/api/vendor-contacts/:id", (req, res) => {
-    const {
-        salutation,
-        first_name,
-        last_name,
-        email,
-        phone,
-        mobile,
-        skype_name_number,
-        designation,
-        department
-    } = req.body;
-    const id = req.params.id;
+  const {
+    salutation,
+    first_name,
+    last_name,
+    email,
+    phone,
+    mobile,
+    skype_name_number,
+    designation,
+    department
+  } = req.body;
+  const id = req.params.id;
 
-    const sql = `UPDATE vendor_contact SET
+  const sql = `UPDATE vendor_contact SET
     salutation_id = ?, first_name = ?, last_name = ?, email = ?,
     phone = ?, mobile = ?, skype_name_number = ?, designation = ?, department = ?
     WHERE id = ?`;
 
-    db.query(
-        sql,
-        [
-            salutation,
-            first_name,
-            last_name,
-            email,
-            phone,
-            mobile,
-            skype_name_number,
-            designation,
-            department,
-            id
-        ],
-        (err) => {
-            if (err) return res.status(500).json({ error: err.message });
-            res.json({ message: "Contact updated" });
-        }
-    );
+  db.query(
+    sql,
+    [
+      salutation,
+      first_name,
+      last_name,
+      email,
+      phone,
+      mobile,
+      skype_name_number,
+      designation,
+      department,
+      id
+    ],
+    (err) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ message: "Contact updated" });
+    }
+  );
 });
 
 // ✅ GET Business Types
 app.get('/api/business-types', async (req, res) => {
-    try {
-        const [rows] = await db.promise().query('SELECT id, name FROM business_types WHERE is_active = 1 ORDER BY sort_order, name');
-        res.json(rows);
-    } catch (err) { res.status(500).json({ error: 'Failed to load business types' }); }
+  try {
+    const [rows] = await db.promise().query('SELECT id, name FROM business_types WHERE is_active = 1 ORDER BY sort_order, name');
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: 'Failed to load business types' }); }
 });
 
 // ✅ GET Product Interests
 app.get('/api/product-interests', async (req, res) => {
-    try {
-        const [rows] = await db.promise().query('SELECT id, name FROM product_interests WHERE is_active = 1 ORDER BY sort_order, name');
-        res.json(rows);
-    } catch (err) { res.status(500).json({ error: 'Failed to load product interests' }); }
+  try {
+    const [rows] = await db.promise().query('SELECT id, name FROM product_interests WHERE is_active = 1 ORDER BY sort_order, name');
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: 'Failed to load product interests' }); }
 });
 
 // ✅ Global error handler (JSON response for API)

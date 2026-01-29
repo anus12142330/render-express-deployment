@@ -162,7 +162,7 @@ router.get('/', async (req, res) => {
                     p.having_duty,
                     COALESCE(p.hscode, '') AS hscode,
                     0 AS unit_price,
-                    COALESCE((SELECT SUM(s2.qty) FROM product_opening_stock s2 WHERE s2.product_id = p.id), 0) AS stock,
+                    COALESCE((SELECT SUM(isb.qty_on_hand) FROM inventory_stock_batches isb WHERE isb.product_id = p.id), 0) AS stock,
                     -- Correctly fetch the primary image's file_path, then any image's file_path
                     COALESCE(
                         (SELECT pi.file_path FROM product_images pi WHERE pi.product_id = p.id AND pi.is_primary = 1 LIMIT 1),
@@ -371,15 +371,13 @@ router.get('/:identifier', async (req, res) => {
         // 3) opening stocks (unchanged)
         const warehousesForView = await q(
             `SELECT w.id AS warehouse_id, w.warehouse_name,
-              IFNULL(s.qty,0) AS qty,
-              IFNULL(s.unit_cost_per_unit,0) AS unit_cost_per_unit,
+              IFNULL((SELECT SUM(isb.qty_on_hand) FROM inventory_stock_batches isb WHERE isb.product_id = ? AND isb.warehouse_id = w.id), 0) AS qty,
+              IFNULL((SELECT unit_cost FROM inventory_stock_batches isb WHERE isb.product_id = ? AND isb.warehouse_id = w.id ORDER BY id DESC LIMIT 1), 0) AS unit_cost_per_unit,
               0 AS committed_qty
        FROM warehouses w
-       LEFT JOIN product_opening_stock s
-         ON s.warehouse_id=w.id AND s.product_id=?
        WHERE w.is_inactive = 0
        ORDER BY w.warehouse_name`,
-            [productId]
+            [productId, productId]
         );
 
         const openingStocksForEdit = await q(

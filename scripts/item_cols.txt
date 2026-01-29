@@ -1,0 +1,13 @@
+id
+client_id
+sales_order_id
+product_id
+description
+quantity
+uom_id
+unit_price
+tax_rate
+line_subtotal
+line_tax
+line_total
+created_at
