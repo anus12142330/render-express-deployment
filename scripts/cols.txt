@@ -1,0 +1,17 @@
+id
+client_id
+company_id
+order_no
+customer_id
+customer_address
+order_date
+tax_mode
+status_id
+subtotal
+tax_total
+grand_total
+currency_id
+created_by
+updated_by
+created_at
+updated_at
