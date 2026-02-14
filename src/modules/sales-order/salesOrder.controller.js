@@ -185,8 +185,8 @@ export const submitSalesOrder = async (req, res) => {
         const userId = req.user?.id;
         const id = Number(req.params.id);
 
-        await submitForApproval({ clientId, userId, id });
-        return res.json({ success: true, message: 'Submitted for approval' });
+        const result = await submitForApproval({ clientId, userId, id });
+        return res.json({ success: true, message: 'Submitted for approval', order_no: result?.order_no });
     } catch (err) {
         return fail(res, err.message || 'Failed to submit', 500);
     }

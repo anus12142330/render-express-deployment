@@ -1020,6 +1020,7 @@ app.post('/api/company-settings', uploadCompany, (req, res) => {
     name, industry, full_address, telephone, fax, country, is_tax_registered, trn_no,
     primary_contact_email, base_currency,
     fiscal_year_id, fiscal_start_day, language_id, timezone_id, date_format_id, company_prefix,
+    sales_order_no_format,
     existing_logo_path // For copying logo
   } = req.body;
 
@@ -1077,14 +1078,14 @@ app.post('/api/company-settings', uploadCompany, (req, res) => {
       (name, industry, full_address, telephone, fax, country, is_tax_registered, trn_no,
        primary_contact_email, base_currency,
        fiscal_year_id, fiscal_start_day, language_id, timezone_id, date_format_id,
-       logo, company_stamp, company_prefix, base64logo)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       logo, company_stamp, company_prefix, sales_order_no_format, base64logo)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `;
   const params = [
     name, industry, full_address, telephone, fax, country, is_tax_registered === '1' ? 1 : 0, trn_no || null,
     primary_contact_email, final_base_currency,
     fiscal_year_id || null, fiscal_start_day || 1, language_id || null, timezone_id || null, date_format_id || null,
-    logo, company_stamp, company_prefix || null, base64logo,
+    logo, company_stamp, company_prefix || null, sales_order_no_format || null, base64logo,
   ];
 
   db.query(sql, params, (err, result) => {
@@ -1107,7 +1108,8 @@ app.put('/api/company-settings/:id', uploadCompany, (req, res) => {
   const {
     name, industry, full_address, telephone, fax, country, is_tax_registered, trn_no,
     primary_contact_email, base_currency,
-    fiscal_year_id, fiscal_start_day, language_id, timezone_id, date_format_id, company_prefix
+    fiscal_year_id, fiscal_start_day, language_id, timezone_id, date_format_id, company_prefix,
+    sales_order_no_format
   } = req.body;
   const id = req.params.id;
 
@@ -1135,13 +1137,13 @@ app.put('/api/company-settings/:id', uploadCompany, (req, res) => {
     'name = ?', 'industry = ?', 'full_address = ?', 'telephone = ?', 'fax = ?', 'country = ?', 'is_tax_registered = ?', 'trn_no = ?',
     'primary_contact_email = ?', 'base_currency = ?',
     'fiscal_year_id = ?', 'fiscal_start_day = ?', 'language_id = ?', 'timezone_id = ?', 'date_format_id = ?',
-    'company_prefix = ?'
+    'company_prefix = ?', 'sales_order_no_format = ?'
   ];
   const values = [
     name, industry, full_address, telephone, fax, country, is_tax_registered === '1' ? 1 : 0, trn_no || null,
     primary_contact_email, final_base_currency,
     fiscal_year_id || null, fiscal_start_day || 1, language_id || null, timezone_id || null, date_format_id || null,
-    company_prefix || null,
+    company_prefix || null, sales_order_no_format || null,
   ];
 
   // If logo uploaded (existing behavior with base64logo)

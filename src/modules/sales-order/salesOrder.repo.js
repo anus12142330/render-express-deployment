@@ -3,6 +3,17 @@ export const fetchCompanyPrefix = async (conn, companyId) => {
     return rows[0]?.company_prefix || 'SO';
 };
 
+/** Get company prefix and optional sales order number format template (from master). */
+export const fetchSalesOrderFormat = async (conn, companyId) => {
+    const [rows] = await conn.query(
+        'SELECT company_prefix, sales_order_no_format FROM company_settings WHERE id = ?',
+        [companyId]
+    );
+    const prefix = rows[0]?.company_prefix || 'SO';
+    const format = rows[0]?.sales_order_no_format?.trim() || null;
+    return { prefix, format };
+};
+
 export const getSalesOrderHeader = async (conn, { id, clientId }) => {
     const [rows] = await conn.query(
         `SELECT so.*, 
@@ -21,7 +32,8 @@ export const getSalesOrderHeader = async (conn, { id, clientId }) => {
                 latest_d.vehicle_no,
                 latest_d.driver_name,
                 latest_d.dispatched_at,
-                udisp.name as dispatched_by_name
+                udisp.name as dispatched_by_name,
+                uom_sum.summary as total_quantity
          FROM sales_orders so
          LEFT JOIN vendor v ON so.customer_id = v.id
          LEFT JOIN company_settings comp ON so.company_id = comp.id
@@ -37,6 +49,16 @@ export const getSalesOrderHeader = async (conn, { id, clientId }) => {
             ORDER BY dispatched_at DESC LIMIT 1
          ) latest_d ON so.id = latest_d.sales_order_id
          LEFT JOIN \`user\` udisp ON latest_d.dispatched_by = udisp.id
+         LEFT JOIN (
+            SELECT sales_order_id, GROUP_CONCAT(CONCAT(qty, ' ', acronyms) SEPARATOR ', ') as summary
+            FROM (
+                SELECT soi_inner.sales_order_id, (SUM(soi_inner.quantity) + 0) as qty, u_inner.acronyms
+                FROM sales_order_items soi_inner
+                JOIN uom_master u_inner ON soi_inner.uom_id = u_inner.id
+                GROUP BY soi_inner.sales_order_id, u_inner.id
+            ) t1
+            GROUP BY sales_order_id
+         ) uom_sum ON so.id = uom_sum.sales_order_id
          WHERE so.id = ? AND so.client_id = ?`,
         [id, id, clientId]
     );
@@ -262,8 +284,17 @@ export const listSalesOrders = async (conn, { clientId, page, pageSize, search, 
         params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
     }
     if (status_id) {
-        conditions.push('so.status_id = ?');
-        params.push(status_id);
+        const statusStr = String(status_id);
+        if (statusStr.includes(',')) {
+            const ids = statusStr.split(',').map(s => s.trim()).filter(Boolean);
+            if (ids.length > 0) {
+                conditions.push(`so.status_id IN (${ids.map(() => '?').join(',')})`);
+                params.push(...ids);
+            }
+        } else {
+            conditions.push('so.status_id = ?');
+            params.push(status_id);
+        }
     }
     if (company_id) {
         conditions.push('so.company_id = ?');
@@ -288,7 +319,7 @@ export const listSalesOrders = async (conn, { clientId, page, pageSize, search, 
 
     const where = conditions.join(' AND ');
 
-    // When search is used, WHERE references v, comp, p - count must use same JOINs (subquery ensures correct scope). Run count first.
+    // Count first
     const countSql = search
         ? `
     SELECT COUNT(*) as total FROM (
@@ -313,11 +344,15 @@ export const listSalesOrders = async (conn, { clientId, page, pageSize, search, 
 
     const sql = `
     SELECT so.*, v.display_name as customer_name, v.company_name as customer_company,
-           comp.name as company_name, 
+           comp.name as company_name,
            s.name as status, s.name as status_name, s.bg_colour as color_code, s.bg_colour as status_bg, s.colour as status_text_color,
            u.name as sales_person_name, u_creator.name as created_by_name,
            cur.name as currency_code, urb.name as edit_requested_by_name,
-           GROUP_CONCAT(DISTINCT p.product_name SEPARATOR ', ') as product_names
+           (SELECT GROUP_CONCAT(DISTINCT p2.product_name SEPARATOR ', ') 
+            FROM sales_order_items soi2 
+            JOIN products p2 ON soi2.product_id = p2.id 
+            WHERE soi2.sales_order_id = so.id) as product_names,
+           uom_sum.summary as total_quantity
     FROM sales_orders so
     LEFT JOIN vendor v ON so.customer_id = v.id
     LEFT JOIN company_settings comp ON so.company_id = comp.id
@@ -328,6 +363,16 @@ export const listSalesOrders = async (conn, { clientId, page, pageSize, search, 
     LEFT JOIN \`user\` urb ON so.edit_requested_by = urb.id
     LEFT JOIN sales_order_items soi ON so.id = soi.sales_order_id
     LEFT JOIN products p ON soi.product_id = p.id
+    LEFT JOIN (
+        SELECT sales_order_id, GROUP_CONCAT(CONCAT(qty, ' ', acronyms) SEPARATOR ', ') as summary
+        FROM (
+            SELECT soi_inner.sales_order_id, (SUM(soi_inner.quantity) + 0) as qty, u_inner.acronyms
+            FROM sales_order_items soi_inner
+            JOIN uom_master u_inner ON soi_inner.uom_id = u_inner.id
+            GROUP BY soi_inner.sales_order_id, u_inner.id
+        ) t1
+        GROUP BY sales_order_id
+    ) uom_sum ON so.id = uom_sum.sales_order_id
     WHERE ${where}
     GROUP BY so.id
     ORDER BY so.created_at DESC

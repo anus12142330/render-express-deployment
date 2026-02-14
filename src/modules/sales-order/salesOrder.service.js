@@ -1,6 +1,7 @@
 import db from '../../../db.js';
 import {
     fetchCompanyPrefix,
+    fetchSalesOrderFormat,
     getSalesOrderHeader,
     getSalesOrderItems,
     getSalesOrderAttachments,
@@ -48,6 +49,22 @@ const withTx = async (fn) => {
 
 const pad = (num, size = 3) => String(num).padStart(size, '0');
 
+/** Build order number from master format template or legacy. Placeholders: {prefix}, {YY}, {YYYY}, {MM}, {seq} */
+const buildOrderNoFromFormat = (prefix, format, yy, yyyy, mm, nextSeq) => {
+    const MM = String(mm).padStart(2, '0');
+    const YY = String(yy).padStart(2, '0');
+    const seq = pad(nextSeq, 3);
+    if (format && format.length > 0) {
+        return format
+            .replace(/\{prefix\}/gi, prefix || 'SO')
+            .replace(/\{YYYY\}/g, String(yyyy))
+            .replace(/\{YY\}/g, YY)
+            .replace(/\{MM\}/g, MM)
+            .replace(/\{seq\}/gi, seq);
+    }
+    return `${prefix || 'SO'}SO-${YY}-${MM}-${seq}`;
+};
+
 const generateOrderNo = async (conn, { clientId, companyId, orderDate }) => {
     const date = orderDate ? new Date(orderDate) : new Date();
     const yyyy = date.getFullYear();
@@ -76,10 +93,8 @@ const generateOrderNo = async (conn, { clientId, companyId, orderDate }) => {
     );
 
     const nextSeq = rows.length && rows[0].last_seq != null ? Number(rows[0].last_seq) : 1;
-
-    const prefix = await fetchCompanyPrefix(conn, companyId);
-    // Format: {company_prefix}SO-YY-MM-001 (e.g. AGSO-26-02-002)
-    return `${prefix}SO-${String(yy).padStart(2, '0')}-${String(mm).padStart(2, '0')}-${pad(nextSeq, 3)}`;
+    const { prefix, format } = await fetchSalesOrderFormat(conn, companyId);
+    return buildOrderNoFromFormat(prefix, format, yy, yyyy, mm, nextSeq);
 };
 
 const computeTotals = (items, taxMode) => {
@@ -214,13 +229,11 @@ const computeHeaderDiff = (oldHeader, newPayload) => {
     return changes;
 };
 
+const DRAFT_ORDER_NO_PLACEHOLDER = 'XXX';
+
 export const createDraft = async ({ clientId, userId, payload }) =>
     withTx(async (conn) => {
-        const orderNo = await generateOrderNo(conn, {
-            clientId,
-            companyId: payload.company_id,
-            orderDate: payload.order_date
-        });
+        const orderNo = DRAFT_ORDER_NO_PLACEHOLDER;
 
         const orderId = await insertSalesOrder(conn, {
             client_id: clientId,
@@ -467,12 +480,24 @@ export const submitForApproval = async ({ clientId, userId, id }) =>
         const items = await getSalesOrderItems(conn, { salesOrderId: id, clientId });
         if (!items.length) throw new Error('At least 1 item is required before submit');
 
-        // Update status manual query since repo helper is general
-        await conn.query(`UPDATE sales_orders SET status_id = 8, updated_by = ?, updated_at = NOW() WHERE id = ? AND client_id = ?`, [
-            userId,
-            id,
-            clientId
-        ]);
+        let finalOrderNo = header.order_no;
+        const needsOrderNo = !header.order_no || String(header.order_no).toUpperCase() === 'XXX';
+        if (needsOrderNo) {
+            finalOrderNo = await generateOrderNo(conn, {
+                clientId,
+                companyId: header.company_id,
+                orderDate: header.order_date
+            });
+            await conn.query(
+                `UPDATE sales_orders SET order_no = ?, status_id = 8, updated_by = ?, updated_at = NOW() WHERE id = ? AND client_id = ?`,
+                [finalOrderNo, userId, id, clientId]
+            );
+        } else {
+            await conn.query(
+                `UPDATE sales_orders SET status_id = 8, updated_by = ?, updated_at = NOW() WHERE id = ? AND client_id = ?`,
+                [userId, id, clientId]
+            );
+        }
 
         await insertAudit(conn, {
             client_id: clientId,
@@ -480,9 +505,11 @@ export const submitForApproval = async ({ clientId, userId, id }) =>
             action: 'SUBMITTED',
             old_status_id: 3,
             new_status_id: 8,
-            payload_json: { order_no: header.order_no },
+            payload_json: { order_no: finalOrderNo },
             action_by: userId
         });
+
+        return { order_no: finalOrderNo };
     });
 
 export const approveOrder = async ({ clientId, userId, id, comment }) =>
@@ -882,14 +909,14 @@ export const previewNextSequence = async ({ clientId, companyId, orderDate }) =>
         );
 
         const nextSeq = (rows.length && rows[0].last_seq != null ? Number(rows[0].last_seq) : 0) + 1;
-        const prefix = await fetchCompanyPrefix(conn, coId);
-        return `${prefix}SO-${String(yy).padStart(2, '0')}-${String(mm).padStart(2, '0')}-${pad(nextSeq, 3)}`;
+        const { prefix, format } = await fetchSalesOrderFormat(conn, coId);
+        return buildOrderNoFromFormat(prefix, format, yy, yyyy, mm, nextSeq);
     } catch (err) {
         // Fallback if sales_order_sequences table missing or DB error (e.g. migration not run)
         const date = orderDate ? new Date(orderDate) : new Date();
         const yy = Number(String(date.getFullYear()).slice(-2));
         const mm = date.getMonth() + 1;
-        return `SO-${String(yy).padStart(2, '0')}-${String(mm).padStart(2, '0')}-001`;
+        return buildOrderNoFromFormat('SO', null, yy, date.getFullYear(), mm, 1);
     } finally {
         try {
             conn.release();
