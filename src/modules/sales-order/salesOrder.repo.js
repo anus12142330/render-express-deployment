@@ -368,7 +368,7 @@ export const listSalesOrders = async (conn, { clientId, page, pageSize, search, 
     LEFT JOIN (
         SELECT sales_order_id, GROUP_CONCAT(CONCAT(qty, ' ', acronyms) SEPARATOR ', ') as summary
         FROM (
-            SELECT soi_inner.sales_order_id, (SUM(soi_inner.quantity) + 0) as qty, u_inner.acronyms
+            SELECT soi_inner.sales_order_id, FORMAT(SUM(soi_inner.quantity), 2) as qty, u_inner.acronyms
             FROM sales_order_items soi_inner
             JOIN uom_master u_inner ON soi_inner.uom_id = u_inner.id
             GROUP BY soi_inner.sales_order_id, u_inner.id
