@@ -33,6 +33,7 @@ export const getSalesOrderHeader = async (conn, { id, clientId }) => {
                 latest_d.driver_name,
                 latest_d.dispatched_at,
                 udisp.name as dispatched_by_name,
+                ucr.name as created_by_name,
                 uom_sum.summary as total_quantity
          FROM sales_orders so
          LEFT JOIN vendor v ON so.customer_id = v.id
@@ -42,6 +43,7 @@ export const getSalesOrderHeader = async (conn, { id, clientId }) => {
          LEFT JOIN status s ON so.status_id = s.id
          LEFT JOIN \`user\` urb ON so.edit_requested_by = urb.id
          LEFT JOIN \`user\` ucomp ON so.completed_by = ucomp.id
+         LEFT JOIN \`user\` ucr ON so.created_by = ucr.id
          LEFT JOIN currency cur ON so.currency_id = cur.id
          LEFT JOIN (
             SELECT * FROM sales_order_dispatches 

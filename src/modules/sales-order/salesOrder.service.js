@@ -252,7 +252,7 @@ export const createDraft = async ({ clientId, userId, payload }) =>
             grand_total: 0,
             created_by: userId,
             terms_conditions: payload.terms_conditions ?? payload.notes ?? null,
-            sales_person_id: payload.sales_person_id || null
+            sales_person_id: payload.sales_person_id || userId
         });
 
         await insertAudit(conn, {
@@ -320,7 +320,7 @@ export const updateDraftHeader = async ({ clientId, userId, id, payload }) =>
             grand_total: header.grand_total,
             updated_by: userId,
             terms_conditions: (payload.terms_conditions !== undefined ? payload.terms_conditions : payload.notes !== undefined ? payload.notes : header.terms_conditions),
-            sales_person_id: payload.sales_person_id !== undefined ? payload.sales_person_id : header.sales_person_id
+            sales_person_id: payload.sales_person_id || (payload.sales_person_id !== undefined ? userId : header.sales_person_id)
         });
 
         if (changes.length > 0) {
