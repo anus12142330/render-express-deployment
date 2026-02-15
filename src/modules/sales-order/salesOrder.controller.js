@@ -274,14 +274,15 @@ export const completeSalesOrder = async (req, res) => {
 
         const userId = req.user?.id;
         const id = Number(req.params.id);
-        const { client_received_by, client_notes } = req.body || {};
+        const { client_received_by, client_notes, comments } = req.body || {};
+        const finalNotes = client_notes || comments;
 
         const files = (req.files || []).map(file => ({
             ...file,
             file_path: buildStoredPath('completion', file.filename)
         }));
 
-        await completeOrder({ clientId, userId, id, client_received_by, client_notes, files });
+        await completeOrder({ clientId, userId, id, client_received_by, client_notes: finalNotes, files });
         return res.json({ success: true, message: 'Completed' });
     } catch (err) {
         return fail(res, err.message || 'Failed to complete', 500);
@@ -386,9 +387,10 @@ export const deliveredSalesOrder = async (req, res) => {
 
         const userId = req.user?.id;
         const id = Number(req.params.id);
-        const { comment } = req.body || {};
+        const { comment, comments } = req.body || {};
+        const finalComment = comment || comments;
 
-        await markAsDelivered({ clientId, userId, id, comment });
+        await markAsDelivered({ clientId, userId, id, comment: finalComment });
         return res.json({ success: true, message: 'Sales order marked as delivered' });
     } catch (err) {
         return fail(res, err.message || 'Failed to mark delivered', 500);

@@ -147,6 +147,22 @@ router.get("/dashboard", authenticateMobile, async (req, res) => {
   }
 });
 
+// Update biometric setting
+router.put("/settings/biometric", authenticateMobile, async (req, res) => {
+  try {
+    const userId = req.mobileUser.id;
+    const { enabled } = req.body;
+    await db.promise().query(
+      "UPDATE `user` SET biometric_login_enabled = ? WHERE id = ?",
+      [enabled ? 1 : 0, userId]
+    );
+    res.json({ success: true, message: `Biometric login ${enabled ? "enabled" : "disabled"}` });
+  } catch (err) {
+    console.error("Biometric update error:", err);
+    res.status(500).json({ success: false, message: err.message || "Failed to update setting" });
+  }
+});
+
 router.get("/me", authenticateMobile, async (req, res) => {
   try {
     const userId = req.mobileUser?.id;
@@ -166,6 +182,7 @@ router.get("/me", authenticateMobile, async (req, res) => {
     const { isSuperAdmin, permissions } = await loadMobilePermissions(userId);
     res.json({ success: true, user, isSuperAdmin, permissions });
   } catch (err) {
+    console.error("Failed to load user:", err);
     res.status(500).json({ success: false, message: "Failed to load user" });
   }
 });

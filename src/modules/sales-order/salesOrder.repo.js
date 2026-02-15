@@ -354,6 +354,10 @@ export const listSalesOrders = async (conn, { clientId, page, pageSize, search, 
             FROM sales_order_items soi2 
             JOIN products p2 ON soi2.product_id = p2.id 
             WHERE soi2.sales_order_id = so.id) as product_names,
+           (SELECT GROUP_CONCAT(DISTINCT pi.thumbnail_path SEPARATOR ',')
+            FROM sales_order_items soi3
+            JOIN product_images pi ON soi3.product_id = pi.product_id
+            WHERE soi3.sales_order_id = so.id) as product_images,
            uom_sum.summary as total_quantity
     FROM sales_orders so
     LEFT JOIN vendor v ON so.customer_id = v.id

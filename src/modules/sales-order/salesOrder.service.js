@@ -734,7 +734,9 @@ export const completeOrder = async ({ clientId, userId, id, client_received_by, 
     withTx(async (conn) => {
         const header = await getSalesOrderHeader(conn, { id, clientId });
         if (!header) throw new Error('Sales order not found');
-        if (Number(header.status_id) !== 9) throw new Error('Completion allowed only for dispatched orders');
+        if (![9, 12].includes(Number(header.status_id))) {
+            throw new Error('Completion allowed only for dispatched or delivered orders');
+        }
 
         if (files.length) {
             const rows = files.map((file) => [
@@ -757,14 +759,14 @@ export const completeOrder = async ({ clientId, userId, id, client_received_by, 
         await conn.query(
             `UPDATE sales_orders 
              SET status_id = 10, 
-                 client_received_by = NULL, 
+                 client_received_by = ?, 
                  client_notes = ?, 
                  completed_by = ?, 
                  completed_at = NOW(),
                  updated_by = ?, 
                  updated_at = NOW() 
              WHERE id = ? AND client_id = ?`,
-            [client_notes, userId, userId, id, clientId]
+            [client_received_by || null, client_notes, userId, userId, id, clientId]
         );
 
         await insertAudit(conn, {
