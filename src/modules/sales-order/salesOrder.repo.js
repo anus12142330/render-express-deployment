@@ -33,6 +33,7 @@ export const getSalesOrderHeader = async (conn, { id, clientId }) => {
                 latest_d.driver_name,
                 latest_d.dispatched_at,
                 udisp.name as dispatched_by_name,
+                udeliv.name as delivered_by_name,
                 ucr.name as created_by_name,
                 uom_sum.summary as total_quantity
          FROM sales_orders so
@@ -44,12 +45,13 @@ export const getSalesOrderHeader = async (conn, { id, clientId }) => {
          LEFT JOIN \`user\` urb ON so.edit_requested_by = urb.id
          LEFT JOIN \`user\` ucomp ON so.completed_by = ucomp.id
          LEFT JOIN \`user\` ucr ON so.created_by = ucr.id
+         LEFT JOIN \`user\` udeliv ON so.delivered_by = udeliv.id
          LEFT JOIN currency cur ON so.currency_id = cur.id
-         LEFT JOIN (
-            SELECT * FROM sales_order_dispatches 
-            WHERE sales_order_id = ? 
+         LEFT JOIN sales_order_dispatches latest_d ON latest_d.id = (
+            SELECT id FROM sales_order_dispatches 
+            WHERE sales_order_id = so.id 
             ORDER BY dispatched_at DESC LIMIT 1
-         ) latest_d ON so.id = latest_d.sales_order_id
+         )
          LEFT JOIN \`user\` udisp ON latest_d.dispatched_by = udisp.id
          LEFT JOIN (
             SELECT sales_order_id, GROUP_CONCAT(CONCAT(qty, ' ', acronyms) SEPARATOR ', ') as summary
@@ -62,7 +64,7 @@ export const getSalesOrderHeader = async (conn, { id, clientId }) => {
             GROUP BY sales_order_id
          ) uom_sum ON so.id = uom_sum.sales_order_id
          WHERE so.id = ? AND so.client_id = ?`,
-        [id, id, clientId]
+        [id, clientId]
     );
     return rows[0];
 };
@@ -201,20 +203,20 @@ export const updateItemDispatchedQuantity = async (conn, { id, dispatched_quanti
 };
 
 export const insertDispatchHeader = async (conn, data) => {
-    const { client_id, sales_order_id, vehicle_no, driver_name, dispatched_by } = data;
+    const { client_id, sales_order_id, vehicle_no, driver_name, dispatched_by, comments } = data;
     const [res] = await conn.query(
-        `INSERT INTO sales_order_dispatches (client_id, sales_order_id, vehicle_no, driver_name, dispatched_by, dispatched_at)
-         VALUES (?, ?, ?, ?, ?, NOW())`,
-        [client_id, sales_order_id, vehicle_no, driver_name, dispatched_by]
+        `INSERT INTO sales_order_dispatches (client_id, sales_order_id, vehicle_no, driver_name, dispatched_by, comments, dispatched_at)
+         VALUES (?, ?, ?, ?, ?, ?, NOW())`,
+        [client_id, sales_order_id, vehicle_no, driver_name, dispatched_by, comments || null]
     );
     return res.insertId;
 };
 
 export const updateDispatchHeader = async (conn, data) => {
-    const { id, vehicle_no, driver_name, client_id } = data;
+    const { id, vehicle_no, driver_name, client_id, comments } = data;
     await conn.query(
-        `UPDATE sales_order_dispatches SET vehicle_no = ?, driver_name = ? WHERE id = ? AND client_id = ?`,
-        [vehicle_no, driver_name, id, client_id]
+        `UPDATE sales_order_dispatches SET vehicle_no = ?, driver_name = ?, comments = ? WHERE id = ? AND client_id = ?`,
+        [vehicle_no, driver_name, comments || null, id, client_id]
     );
 };
 
@@ -358,7 +360,9 @@ export const listSalesOrders = async (conn, { clientId, page, pageSize, search, 
             FROM sales_order_items soi3
             JOIN product_images pi ON soi3.product_id = pi.product_id
             WHERE soi3.sales_order_id = so.id) as product_images,
-           uom_sum.summary as total_quantity
+           uom_sum.summary as total_quantity,
+           (SELECT COALESCE(SUM(soi4.dispatched_quantity), 0) FROM sales_order_items soi4 WHERE soi4.sales_order_id = so.id) as total_dispatched_quantity,
+           (SELECT COALESCE(SUM(soi5.quantity), 0) FROM sales_order_items soi5 WHERE soi5.sales_order_id = so.id) as total_ordered_quantity
     FROM sales_orders so
     LEFT JOIN vendor v ON so.customer_id = v.id
     LEFT JOIN company_settings comp ON so.company_id = comp.id

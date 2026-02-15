@@ -21,7 +21,7 @@ import {
     removeSalesOrderDispatch
 } from './salesOrder.controller.js';
 
-import { headerUpload, dispatchUpload, completionUpload } from './salesOrder.upload.js';
+import { headerUpload, dispatchUpload, completionUpload, deliveryUpload } from './salesOrder.upload.js';
 
 const router = express.Router();
 
@@ -70,7 +70,7 @@ router.post('/:id/reject', requireAuth, requirePerm('SalesOrders', 'approve'), r
 router.post('/:id/request-edit', requireAuth, requirePerm('SalesOrders', 'edit'), requestSalesOrderEdit);
 
 // Mark as Delivered
-router.post('/:id/delivered', requireAuth, requirePerm('SalesOrders', 'dispatch'), deliveredSalesOrder);
+router.post('/:id/delivered', requireAuth, requirePerm('SalesOrders', 'dispatch'), deliveryUpload.array('attachments', 20), deliveredSalesOrder);
 
 router.post('/:id/decide-edit-request', requireAuth, requirePerm('SalesOrders', 'approve'), decideSalesOrderEditRequest);
 

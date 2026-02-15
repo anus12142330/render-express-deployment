@@ -20,6 +20,7 @@ const storage = multer.diskStorage({
         let scope = 'header';
         if (req.path.includes('/dispatch')) scope = 'dispatch';
         else if (req.path.includes('/complete')) scope = 'completion';
+        else if (req.path.includes('/delivered')) scope = 'delivery';
 
         const uploadPath = path.join('uploads', 'sales_orders', scope);
         ensureDir(uploadPath);
@@ -47,3 +48,4 @@ const fileFilter = (req, file, cb) => {
 export const headerUpload = multer({ storage, fileFilter });
 export const dispatchUpload = multer({ storage, fileFilter });
 export const completionUpload = multer({ storage, fileFilter });
+export const deliveryUpload = multer({ storage, fileFilter });

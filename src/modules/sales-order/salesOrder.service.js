@@ -535,7 +535,7 @@ export const approveOrder = async ({ clientId, userId, id, comment }) =>
         });
     });
 
-export const dispatchOrder = async ({ clientId, userId, id, dispatch_id, vehicle_no, driver_name, files, items: dispatchPayload }) =>
+export const dispatchOrder = async ({ clientId, userId, id, dispatch_id, vehicle_no, driver_name, comments, files, items: dispatchPayload }) =>
     withTx(async (conn) => {
         const header = await getSalesOrderHeader(conn, { id, clientId });
         if (!header) throw new Error('Sales order not found');
@@ -553,7 +553,7 @@ export const dispatchOrder = async ({ clientId, userId, id, dispatch_id, vehicle
         let activeDispatchId = dispatch_id;
         if (activeDispatchId) {
             // EDIT MODE: Update existing header and reverse old quantities
-            await updateDispatchHeader(conn, { id: activeDispatchId, vehicle_no, driver_name, client_id: clientId });
+            await updateDispatchHeader(conn, { id: activeDispatchId, vehicle_no, driver_name, client_id: clientId, comments });
 
             const oldItems = await getDispatchItems(conn, { dispatchId: activeDispatchId, clientId });
             for (const oi of oldItems) {
@@ -570,7 +570,8 @@ export const dispatchOrder = async ({ clientId, userId, id, dispatch_id, vehicle
                 sales_order_id: id,
                 vehicle_no,
                 driver_name,
-                dispatched_by: userId
+                dispatched_by: userId,
+                comments
             });
         }
 
@@ -650,25 +651,50 @@ export const dispatchOrder = async ({ clientId, userId, id, dispatch_id, vehicle
         });
     });
 
-export const markAsDelivered = async ({ clientId, userId, id, comment }) =>
+export const markAsDelivered = async ({ clientId, userId, id, comment, files = [] }) =>
     withTx(async (conn) => {
         const header = await getSalesOrderHeader(conn, { id, clientId });
         if (!header) throw new Error('Sales order not found');
-        if (Number(header.status_id) !== 9) throw new Error('Only fully dispatched orders can be marked delivered');
+        if (![9, 11].includes(Number(header.status_id))) {
+            throw new Error('Only dispatched orders can be marked delivered');
+        }
 
-        await conn.query(`UPDATE sales_orders SET status_id = 12, updated_by = ?, updated_at = NOW() WHERE id = ? AND client_id = ?`, [
-            userId,
-            id,
-            clientId
-        ]);
+        if (files.length) {
+            const rows = files.map((file) => [
+                clientId,
+                id,
+                null, // dispatch_id
+                'DELIVERY',
+                file.originalname,
+                file.filename,
+                file.mimetype,
+                file.size,
+                file.file_path,
+                userId,
+                new Date()
+            ]);
+            await insertAttachments(conn, rows);
+        }
+
+        await conn.query(
+            `UPDATE sales_orders 
+             SET status_id = 12, 
+                 delivery_notes = ?, 
+                 delivered_by = ?, 
+                 delivered_at = NOW(), 
+                 updated_by = ?, 
+                 updated_at = NOW() 
+             WHERE id = ? AND client_id = ?`,
+            [comment || null, userId, userId, id, clientId]
+        );
 
         await insertAudit(conn, {
             client_id: clientId,
             sales_order_id: id,
             action: 'MARKED_DELIVERED',
-            old_status_id: 9,
+            old_status_id: header.status_id,
             new_status_id: 12,
-            payload_json: { comment },
+            payload_json: { comment, attachments: files.length },
             action_by: userId
         });
     });

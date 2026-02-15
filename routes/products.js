@@ -85,13 +85,24 @@ router.get('/', async (req, res) => {
             params.push(s, s, s, s);
         }
 
-        if (inStockOnly) { // This condition seems correct as is.
+        if (inStockOnly) {
             conds.push(`EXISTS (
-        SELECT 1
-        FROM product_opening_stock s
-        WHERE s.product_id = p.id
-          AND COALESCE(s.qty, 0) > 0
-      )`);
+                SELECT 1 
+                FROM inventory_stock_batches isb 
+                WHERE isb.product_id = p.id 
+                AND isb.qty_on_hand > 0
+            )`);
+        }
+
+        const inShipmentOnly = ['1', 'true', 1, true].includes(req.query.in_shipment_only);
+        if (inShipmentOnly) {
+            conds.push(`EXISTS (
+                SELECT 1
+                FROM purchase_order_items poi
+                JOIN purchase_orders po ON po.id = poi.purchase_order_id
+                WHERE poi.item_id = p.id
+                  AND po.trade_type_id = 2
+            )`);
         }
 
         if (isActiveFilter === '1' || isActiveFilter === 'true') {
@@ -200,10 +211,17 @@ router.get('/', async (req, res) => {
                         JOIN uom_master um ON um.id = pd_uom.uom_id
                         WHERE pd_uom.product_id = p.id AND pd_uom.uom_id IS NOT NULL
                         ORDER BY pd_uom.id ASC LIMIT 1
-                    ) as uom
-                    , (
+                    ) as uom,
+                     (
+                        SELECT b.brand_name
+                        FROM product_details pd
+                        JOIN brands b ON b.id = pd.brand_id
+                        WHERE pd.product_id = p.id ORDER BY pd.id ASC LIMIT 1
+                    ) as brand,
+                    (
                         SELECT pd.uom_id FROM product_details pd WHERE pd.product_id = p.id AND pd.uom_id IS NOT NULL ORDER BY pd.id ASC LIMIT 1
                     ) as uom_id,
+                    p.is_taxable,
                     (
                         SELECT co.name
                         FROM product_details pd
@@ -243,10 +261,12 @@ router.get('/', async (req, res) => {
                 image_url: r.image_url || null,
                 thumbnail_url: r.thumbnail_url || r.image_url || null,
                 variety: r.variety || null,
+                brand: r.brand || null,
                 grade_and_size_code: r.grade_and_size_code || null,
                 origin: r.origin || null,
                 uom: r.uom || '',
                 uom_id: r.uom_id || null,
+                is_taxable: r.is_taxable ?? 0,
                 having_duty: r.having_duty ?? 0,
                 inventory_account_id: r.inventory_account_id || null,
                 purchase_account_id: r.purchase_account_id || null

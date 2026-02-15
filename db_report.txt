@@ -1,0 +1,105 @@
+Tables:
+sales_order_attachments
+sales_order_dispatch_items
+sales_order_dispatches
+sales_order_items
+sales_order_sequences
+sales_orders
+
+Columns for sales_order_attachments:
+id (int(11))
+client_id (int(11))
+sales_order_id (int(11))
+dispatch_id (int(11))
+scope (varchar(20))
+file_original_name (varchar(255))
+file_name (varchar(255))
+file_type (varchar(100))
+file_size (int(11))
+file_path (varchar(500))
+uploaded_by (int(11))
+created_at (datetime)
+
+Columns for sales_order_dispatch_items:
+id (int(11))
+client_id (int(11))
+dispatch_id (int(11))
+sales_order_item_id (int(11))
+quantity (decimal(15,4))
+
+Columns for sales_order_dispatches:
+id (int(11))
+client_id (int(11))
+sales_order_id (int(11))
+vehicle_no (varchar(100))
+driver_name (varchar(100))
+dispatched_by (int(11))
+dispatched_at (datetime)
+comments (text)
+
+Columns for sales_order_items:
+id (int(11))
+client_id (int(11))
+sales_order_id (int(11))
+product_id (int(11))
+description (varchar(255))
+quantity (decimal(15,4))
+uom_id (int(11))
+unit_price (decimal(15,2))
+discount_type (enum('PERCENTAGE','AMOUNT'))
+discount_rate (decimal(10,2))
+discount_amount (decimal(15,2))
+tax_rate (decimal(5,2))
+line_subtotal (decimal(15,2))
+tax_id (bigint(20))
+line_tax (decimal(15,2))
+line_total (decimal(15,2))
+created_at (datetime)
+ordered_quantity (decimal(15,4))
+dispatched_quantity (decimal(15,4))
+
+Columns for sales_order_sequences:
+id (bigint(20))
+client_id (bigint(20))
+company_id (bigint(20))
+yy (smallint(6))
+mm (tinyint(4))
+last_seq (int(11))
+updated_at (datetime)
+
+Columns for sales_orders:
+id (int(11))
+client_id (int(11))
+company_id (int(11))
+order_no (varchar(50))
+customer_id (int(11))
+warehouse_id (int(11))
+billing_address (text)
+shipping_address (text)
+order_date (date)
+tax_mode (enum('EXCLUSIVE','INCLUSIVE'))
+status_id (int(11))
+subtotal (decimal(15,2))
+tax_total (decimal(15,2))
+grand_total (decimal(15,2))
+currency_id (int(11))
+is_deleted (int(11))
+created_by (int(11))
+updated_by (int(11))
+created_at (datetime)
+updated_at (datetime)
+terms_conditions (text)
+sales_person_id (int(11))
+edit_request_status (enum('pending','approved','rejected'))
+edit_request_reason (text)
+edit_requested_at (datetime)
+edit_requested_by (int(11))
+edit_request_decision_reason (text)
+client_received_by (varchar(100))
+client_notes (text)
+completed_by (int(11))
+completed_at (datetime)
+delivery_notes (text)
+delivered_at (datetime)
+delivered_by (bigint(20))
+

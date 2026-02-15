@@ -229,7 +229,7 @@ export const dispatchSalesOrder = async (req, res) => {
             payload = req.body || {};
         }
 
-        const { dispatch_id, vehicle_no, driver_name, items } = payload;
+        const { dispatch_id, vehicle_no, driver_name, comments, items } = payload;
         console.log('[Dispatch] Payload received:', { dispatch_id, vehicle_no, driver_name, items_count: Array.isArray(items) ? items.length : 'N/A' });
 
         if (!vehicle_no || !driver_name) return fail(res, 'vehicle_no and driver_name are required');
@@ -239,7 +239,7 @@ export const dispatchSalesOrder = async (req, res) => {
             file_path: buildStoredPath('dispatch', file.filename)
         }));
 
-        await dispatchOrder({ clientId, userId, id, dispatch_id, vehicle_no, driver_name, files, items });
+        await dispatchOrder({ clientId, userId, id, dispatch_id, vehicle_no, driver_name, comments, files, items });
         return res.json({ success: true, message: 'Dispatched' });
     } catch (err) {
         return fail(res, err.message || 'Failed to dispatch', 500);
@@ -390,7 +390,12 @@ export const deliveredSalesOrder = async (req, res) => {
         const { comment, comments } = req.body || {};
         const finalComment = comment || comments;
 
-        await markAsDelivered({ clientId, userId, id, comment: finalComment });
+        const files = (req.files || []).map(file => ({
+            ...file,
+            file_path: buildStoredPath('delivery', file.filename)
+        }));
+
+        await markAsDelivered({ clientId, userId, id, comment: finalComment, files });
         return res.json({ success: true, message: 'Sales order marked as delivered' });
     } catch (err) {
         return fail(res, err.message || 'Failed to mark delivered', 500);
