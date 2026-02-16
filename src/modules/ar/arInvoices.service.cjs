@@ -202,15 +202,15 @@ async function postInvoice(conn, invoiceId, userId) {
             const purchaseUnitCost = parseFloat(alloc.unit_cost || stock.unit_cost);
             // Sales unit price from invoice line (for inventory_transactions table)
             const salesUnitPrice = parseFloat(line.rate || 0);
-            
+
             // Use invoice currency if available, otherwise use stock currency
             const txnCurrencyId = invoiceCurrencyId || stock.currency_id;
             // Use line uom_id if available, otherwise use stock uom_id
             const txnUomId = line.uom_id || stock.uom_id;
-            
+
             // Calculate COGS amount using purchase cost
             const cogsAmount = qtyOut * purchaseUnitCost;
-            
+
             // Calculate sales amount using sales price (for transaction record)
             const salesAmount = qtyOut * salesUnitPrice; // Transaction currency amount
             const salesAedAmount = exchangeRate && exchangeRate > 0 ? salesAmount * exchangeRate : salesAmount; // AED converted amount
@@ -267,26 +267,26 @@ async function postInvoice(conn, invoiceId, userId) {
 
     // Get VAT Output account ID (should be account ID 7 based on your data)
     const vatOutputAccountId = await glService.getAccountByCode(conn, '7'); // Taxes Payable (VAT/GST)
-    
+
     // Get Discount account ID (account ID 19 based on your data)
     const discountAccountId = await glService.getAccountByCode(conn, '19'); // Sales Discount
-    
+
     const customerId = invoice.customer_id; // customer_id saved to buyer_id
-    
+
     // Group sales revenue by product's sales_account_id
     const salesAccountTotals = {};
     const salesAccountNames = {};
     let totalLineTotals = 0;
-    
+
     // Calculate sales revenue per product line and sum total
     for (const line of lines) {
         if (!line.product_id || !line.sales_account_id) continue;
-        
+
         const lineTotal = parseFloat(line.line_total || 0);
         if (lineTotal <= 0) continue;
-        
+
         totalLineTotals += lineTotal;
-        
+
         if (!salesAccountTotals[line.sales_account_id]) {
             salesAccountTotals[line.sales_account_id] = 0;
             // Get account name for description
@@ -295,10 +295,10 @@ async function postInvoice(conn, invoiceId, userId) {
             `, [line.sales_account_id]);
             salesAccountNames[line.sales_account_id] = accountRows.length > 0 ? accountRows[0].name : `Account ${line.sales_account_id}`;
         }
-        
+
         salesAccountTotals[line.sales_account_id] += lineTotal;
     }
-    
+
     // Use invoice subtotal instead of sum of line totals to avoid rounding issues
     // Distribute the invoice subtotal proportionally across sales accounts
     const invoiceSubtotal = parseFloat(invoice.subtotal || 0);
@@ -307,7 +307,7 @@ async function postInvoice(conn, invoiceId, userId) {
         const adjustmentRatio = invoiceSubtotal / totalLineTotals;
         let adjustedTotal = 0;
         const accountIds = Object.keys(salesAccountTotals);
-        
+
         // Adjust each account proportionally, except the last one
         for (let i = 0; i < accountIds.length - 1; i++) {
             const accountId = accountIds[i];
@@ -315,7 +315,7 @@ async function postInvoice(conn, invoiceId, userId) {
             salesAccountTotals[accountId] = Math.round(adjustedAmount * 100) / 100; // Round to 2 decimals
             adjustedTotal += salesAccountTotals[accountId];
         }
-        
+
         // Last account gets the remainder to ensure exact match with invoice subtotal
         if (accountIds.length > 0) {
             const lastAccountId = accountIds[accountIds.length - 1];
@@ -323,10 +323,10 @@ async function postInvoice(conn, invoiceId, userId) {
         }
     }
     // If totals match (within tolerance), use the calculated totals as-is
-    
+
     const invoiceTotal = parseFloat(invoice.total);
     const invoiceTaxTotal = parseFloat(invoice.tax_total || 0);
-    
+
     const journalLines = [
         {
             account_id: arAccountId,
@@ -358,7 +358,7 @@ async function postInvoice(conn, invoiceId, userId) {
             });
         }
     }
-    
+
     // Ensure sales revenue matches invoice subtotal exactly (handle rounding differences)
     const difference = Math.round((invoiceSubtotal - totalSalesRevenue) * 100) / 100;
     if (Math.abs(difference) > 0.01) {
@@ -374,7 +374,7 @@ async function postInvoice(conn, invoiceId, userId) {
                     largestAccountId = accountId;
                 }
             }
-            
+
             // Update the last journal line (which should be the largest account) with adjusted amount
             const lastLineIndex = journalLines.length - 1;
             if (lastLineIndex >= 0 && journalLines[lastLineIndex].account_id === parseInt(largestAccountId)) {
@@ -422,14 +422,14 @@ async function postInvoice(conn, invoiceId, userId) {
             if (cogsData.amount > 0) {
                 const purchaseAccountId = productPurchaseAccounts[productId];
                 const inventoryAccountId = productInventoryAccounts[productId];
-                
+
                 if (!purchaseAccountId) {
                     throw new Error(`Product "${cogsData.item_name}" does not have a purchase_account_id. Cannot post COGS.`);
                 }
                 if (!inventoryAccountId) {
                     throw new Error(`Product "${cogsData.item_name}" does not have an inventory_account_id. Cannot post inventory reduction.`);
                 }
-                
+
                 journalLines.push({
                     account_id: purchaseAccountId,
                     debit: cogsData.amount,
@@ -456,10 +456,10 @@ async function postInvoice(conn, invoiceId, userId) {
         }
     }
 
-     // Calculate journal totals for currency fields
-     const journalTotalDebits = journalLines.reduce((sum, line) => sum + parseFloat(line.debit || 0), 0);
-     const journalTotalAmount = journalTotalDebits; // Use debits as total (should equal credits)
-     const journalForeignAmount = exchangeRate && exchangeRate > 0 ? journalTotalAmount / exchangeRate : null;
+    // Calculate journal totals for currency fields
+    const journalTotalDebits = journalLines.reduce((sum, line) => sum + parseFloat(line.debit || 0), 0);
+    const journalTotalAmount = journalTotalDebits; // Use debits as total (should equal credits)
+    const journalForeignAmount = exchangeRate && exchangeRate > 0 ? journalTotalAmount / exchangeRate : null;
 
     await glService.createJournal(conn, {
         source_type: 'AR_INVOICE',
@@ -467,13 +467,13 @@ async function postInvoice(conn, invoiceId, userId) {
         journal_date: invoice.invoice_date,
         memo: `Post Invoice ${invoice.invoice_number}`,
         created_by: userId,
-         currency_id: invoiceCurrencyId || null,
-         exchange_rate: exchangeRate,
-         foreign_amount: journalForeignAmount,
-         total_amount: journalTotalAmount,
-         source_name: invoice.invoice_number,
-         source_date: invoice.invoice_date,
-         is_deleted: 0,
+        currency_id: invoiceCurrencyId || null,
+        exchange_rate: exchangeRate,
+        foreign_amount: journalForeignAmount,
+        total_amount: journalTotalAmount,
+        source_name: invoice.invoice_number,
+        source_date: invoice.invoice_date,
+        is_deleted: 0,
         lines: journalLines
     });
 
@@ -487,7 +487,7 @@ async function postInvoice(conn, invoiceId, userId) {
  */
 async function autoAllocateBatches(conn, invoiceId, mode = 'FIFO') {
     const [invoices] = await conn.query(`
-        SELECT * FROM ar_invoices WHERE id = ? AND status = 'DRAFT'
+        SELECT * FROM ar_invoices WHERE id = ? AND status_id = 3
     `, [invoiceId]);
 
     if (invoices.length === 0) {
@@ -543,7 +543,7 @@ async function autoAllocateBatches(conn, invoiceId, mode = 'FIFO') {
  */
 async function cancelInvoice(conn, invoiceId, userId) {
     const [invoices] = await conn.query(`
-        SELECT * FROM ar_invoices WHERE id = ? AND status = 'POSTED'
+        SELECT * FROM ar_invoices WHERE id = ? AND status_id = 1
     `, [invoiceId]);
 
     if (invoices.length === 0) {
@@ -571,7 +571,7 @@ async function cancelInvoice(conn, invoiceId, userId) {
 
         // Calculate reversal amounts
         const amount = parseFloat(txn.qty || 0) * parseFloat(txn.unit_cost || 0); // Transaction currency amount
-        const aedAmount = txn.exchange_rate && parseFloat(txn.exchange_rate) > 0 
+        const aedAmount = txn.exchange_rate && parseFloat(txn.exchange_rate) > 0
             ? amount * parseFloat(txn.exchange_rate)
             : amount; // AED converted amount
 
@@ -608,7 +608,7 @@ async function cancelInvoice(conn, invoiceId, userId) {
 
     await conn.query(`
         UPDATE ar_invoices 
-        SET status = 'CANCELLED', cancelled_at = NOW(), cancelled_by = ?
+        SET status_id = 14, cancelled_at = NOW(), cancelled_by = ?
         WHERE id = ?
     `, [userId, invoiceId]);
 }

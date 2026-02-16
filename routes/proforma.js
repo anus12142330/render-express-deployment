@@ -669,6 +669,8 @@ router.get("/:id", async (req, res) => {
                 pii.*,
                 um.name as uom_name, 
                 um.acronyms as uom_code,
+                t.tax_name as tax_name,
+                t.rate as tax_rate,
                 (SELECT file_path 
                  FROM product_images 
                  WHERE product_id = pii.product_id 
@@ -676,6 +678,7 @@ router.get("/:id", async (req, res) => {
                  LIMIT 1) as product_image
              FROM proforma_invoice_items pii
              LEFT JOIN uom_master um ON um.id = pii.uom_id
+             LEFT JOIN taxes t ON t.id = pii.vat_id
              WHERE pii.proforma_invoice_id = ? 
              ORDER BY pii.id`,
             [header.id]

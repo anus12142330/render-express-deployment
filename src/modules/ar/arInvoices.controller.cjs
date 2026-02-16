@@ -4,6 +4,7 @@ const { pool } = require('../../db/tx.cjs');
 const { generateARInvoiceNumber } = require('../../utils/docNo.cjs');
 const arInvoicesService = require('./arInvoices.service.cjs');
 const inventoryService = require('../inventory/inventory.service.cjs');
+const { isInventoryMovementEnabled } = require('../../utils/inventoryHelper.cjs');
 const crypto = require('crypto');
 
 // Helper function to add history entries
@@ -45,21 +46,21 @@ async function getInvoiceInventoryTransactionQuantities(conn, invoiceId, product
         AND (it.is_deleted = 0 OR it.is_deleted IS NULL)
     `;
     const inventoryTxnsParams = [invoiceId];
-    
+
     if (productId) {
         // Filter by product_id to get only transactions for this specific product
         inventoryTxnsQuery += ` AND it.product_id = ?`;
         inventoryTxnsParams.push(parseInt(productId, 10));
     }
-    
+
     // If warehouse_id is provided, also filter by warehouse to get more accurate results
     if (warehouseId) {
         inventoryTxnsQuery += ` AND it.warehouse_id = ?`;
         inventoryTxnsParams.push(parseInt(warehouseId, 10));
     }
-    
+
     const [inventoryTxns] = await conn.query(inventoryTxnsQuery, inventoryTxnsParams);
-    
+
     // Group by batch_id, product_id, and warehouse_id
     // Use key format: productId_batchId_warehouseId for proper matching
     // These are the quantities from inventory_transactions for this invoice
@@ -72,7 +73,7 @@ async function getInvoiceInventoryTransactionQuantities(conn, invoiceId, product
         }
         invoiceBatchQuantities[key] += parseFloat(txn.qty || 0);
     });
-    
+
     return invoiceBatchQuantities;
 }
 
@@ -92,25 +93,25 @@ function calculateAvailableStock(stockOnHand, inventoryTransactionQty) {
 function getChangedFields(oldValues, newValues) {
     const changes = [];
     const fieldsToTrack = [
-        'invoice_number', 'invoice_date', 'invoice_time', 'due_date', 
-        'customer_id', 'company_id', 'warehouse_id', 'currency_id', 
+        'invoice_number', 'invoice_date', 'invoice_time', 'due_date',
+        'customer_id', 'company_id', 'warehouse_id', 'currency_id',
         'payment_terms_id', 'subtotal', 'discount_type', 'discount_amount', 'tax_total', 'total', 'notes', 'proforma_invoice_id',
         'customer_address', 'delivery_address', 'delivery_address_id'
     ];
-    
+
     for (const field of fieldsToTrack) {
         const oldVal = oldValues[field];
         const newVal = newValues[field];
-        
+
         // Handle numeric fields - compare as numbers with tolerance for floating point
         if (['subtotal', 'discount_amount', 'tax_total', 'total'].includes(field)) {
             const normalizedOld = oldVal != null ? Number(oldVal) : null;
             const normalizedNew = newVal != null ? Number(newVal) : null;
-            
+
             // Compare numbers with small tolerance for floating point (0.01)
-            if (normalizedOld !== normalizedNew && 
-                (normalizedOld == null || normalizedNew == null || 
-                 Math.abs((normalizedOld || 0) - (normalizedNew || 0)) > 0.01)) {
+            if (normalizedOld !== normalizedNew &&
+                (normalizedOld == null || normalizedNew == null ||
+                    Math.abs((normalizedOld || 0) - (normalizedNew || 0)) > 0.01)) {
                 changes.push({
                     field: field,
                     from: normalizedOld != null ? normalizedOld.toFixed(2) : '—',
@@ -121,7 +122,7 @@ function getChangedFields(oldValues, newValues) {
             // For non-numeric fields, compare as strings (trimmed)
             const oldStr = String(oldVal || '').trim();
             const newStr = String(newVal || '').trim();
-            
+
             if (oldStr !== newStr) {
                 changes.push({
                     field: field,
@@ -131,7 +132,7 @@ function getChangedFields(oldValues, newValues) {
             }
         }
     }
-    
+
     return changes;
 }
 
@@ -142,6 +143,7 @@ async function listInvoices(req, res, next) {
         const offset = (page - 1) * perPage;
         const search = (req.query.search || '').trim();
         const customerId = req.query.customer_id ? parseInt(req.query.customer_id, 10) : null;
+        const salesOrderId = req.query.sales_order_id ? parseInt(req.query.sales_order_id, 10) : null;
         const status = req.query.status || '';
         const statusId = req.query.status_id ? parseInt(req.query.status_id, 10) : null;
         const editRequestStatus = req.query.edit_request_status ? parseInt(req.query.edit_request_status, 10) : null;
@@ -153,8 +155,12 @@ async function listInvoices(req, res, next) {
             whereClause += ' AND ai.customer_id = ?';
             params.push(customerId);
         }
+        if (salesOrderId) {
+            whereClause += ' AND ai.sales_order_id = ?';
+            params.push(salesOrderId);
+        }
         if (status) {
-            whereClause += ' AND ai.status = ?';
+            whereClause += ' AND s.name = ?';
             params.push(status);
         }
         if (statusId) {
@@ -171,7 +177,7 @@ async function listInvoices(req, res, next) {
             params.push(searchPattern, searchPattern);
         }
 
-        const [countRows] = await pool.query(`SELECT COUNT(*) as total FROM ar_invoices ai LEFT JOIN vendor v ON v.id = ai.customer_id ${whereClause}`, params);
+        const [countRows] = await pool.query(`SELECT COUNT(*) as total FROM ar_invoices ai LEFT JOIN vendor v ON v.id = ai.customer_id LEFT JOIN status s ON s.id = ai.status_id ${whereClause}`, params);
         const total = countRows[0].total;
 
         const [rows] = await pool.query(`
@@ -397,7 +403,15 @@ async function createInvoice(req, res, next) {
                 }
             }
 
-            const { invoice_number, invoice_date, invoice_time, due_date, payment_terms_id, customer_id, company_id, warehouse_id, currency_id, subtotal, discount_type, discount_amount, tax_total, total, notes, proforma_invoice_id, customer_address, delivery_address, delivery_address_id, allow_stock_override, lines = [], deleted_attachment_ids } = bodyData;
+            const {
+                invoice_number, invoice_date, invoice_time, due_date, payment_terms_id,
+                customer_id, company_id, warehouse_id, currency_id, subtotal,
+                discount_type, discount_amount, tax_total, total, notes,
+                proforma_invoice_id, sales_order_id, sales_order_number,
+                customer_address, delivery_address, delivery_address_id,
+                allow_stock_override, lines = [], deleted_attachment_ids
+            } = bodyData;
+
 
             let finalInvoiceNumber = invoice_number;
             if (!finalInvoiceNumber) {
@@ -413,9 +427,17 @@ async function createInvoice(req, res, next) {
 
             const [invoiceResult] = await conn.query(`
                 INSERT INTO ar_invoices 
-                (invoice_uniqid, invoice_number, invoice_date, invoice_time, due_date, payment_terms_id, customer_id, customer_address, delivery_address, delivery_address_id, company_id, warehouse_id, currency_id, subtotal, discount_type, discount_amount, tax_total, total, notes, proforma_invoice_id, allow_stock_override, user_id, status_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3)
-            `, [invoiceUniqid, finalInvoiceNumber, invoice_date, invoice_time || null, due_date || null, payment_terms_id || null, customer_id, customer_address || null, delivery_address || null, delivery_address_id || null, company_id || null, warehouse_id, currency_id, subtotal, discount_type || 'fixed', discount_amount || 0, tax_total, total, notes, proforma_invoice_id || null, allow_stock_override ? 1 : 0, userId]);
+                (invoice_uniqid, invoice_number, invoice_date, invoice_time, due_date, payment_terms_id, customer_id, customer_address, delivery_address, delivery_address_id, company_id, warehouse_id, currency_id, subtotal, discount_type, discount_amount, tax_total, total, notes, proforma_invoice_id, sales_order_id, sales_order_number, allow_stock_override, user_id, status_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3)
+            `, [
+                invoiceUniqid, finalInvoiceNumber, invoice_date, invoice_time || null,
+                due_date || null, payment_terms_id || null, customer_id,
+                customer_address || null, delivery_address || null, delivery_address_id || null,
+                company_id || null, warehouse_id, currency_id, subtotal,
+                discount_type || 'fixed', discount_amount || 0, tax_total, total,
+                notes, proforma_invoice_id || null, sales_order_id || null, sales_order_number || null,
+                allow_stock_override ? 1 : 0, userId
+            ]);
 
             const invoiceId = invoiceResult.insertId;
 
@@ -461,7 +483,7 @@ async function createInvoice(req, res, next) {
                     const basename = path.basename(f.path);
                     return `uploads/ar_invoices/${basename}`;
                 };
-                
+
                 const attachmentValues = req.files.map(f => [
                     invoiceId,
                     f.originalname,
@@ -470,7 +492,7 @@ async function createInvoice(req, res, next) {
                     f.size || null,
                     new Date()
                 ]);
-                
+
                 await conn.query(`
                     INSERT INTO ar_invoices_attachments 
                     (invoice_id, file_name, file_path, mime_type, size_bytes, created_at)
@@ -491,7 +513,9 @@ async function createInvoice(req, res, next) {
                     warehouse_id: warehouse_id,
                     total: total,
                     line_count: lines.length,
-                    proforma_invoice_id: proforma_invoice_id || null
+                    proforma_invoice_id: proforma_invoice_id || null,
+                    sales_order_id: sales_order_id || null,
+                    sales_order_number: sales_order_number || null
                 }
             });
 
@@ -519,11 +543,11 @@ async function updateInvoice(req, res, next) {
             // - SUBMITTED FOR APPROVAL (8)
             // - REJECTED (2)
             // - APPROVED (1) with approved edit request (edit_request_status = 1)
-            const canEdit = invoice.status_id === 3 || 
-                            invoice.status_id === 8 || 
-                            invoice.status_id === 2 || 
-                            (invoice.status_id === 1 && invoice.edit_request_status === 1);
-            
+            const canEdit = invoice.status_id === 3 ||
+                invoice.status_id === 8 ||
+                invoice.status_id === 2 ||
+                (invoice.status_id === 1 && invoice.edit_request_status === 1);
+
             if (!canEdit) {
                 return res.status(400).json({ error: 'Only DRAFT, SUBMITTED FOR APPROVAL, REJECTED invoices, or APPROVED invoices with approved edit requests can be updated' });
             }
@@ -538,7 +562,15 @@ async function updateInvoice(req, res, next) {
                 }
             }
 
-            const { invoice_number, invoice_date, invoice_time, due_date, payment_terms_id, customer_id, company_id, warehouse_id, currency_id, subtotal, discount_type, discount_amount, tax_total, total, notes, proforma_invoice_id, customer_address, delivery_address, delivery_address_id, allow_stock_override, lines = [], deleted_attachment_ids } = bodyData;
+            const {
+                invoice_number, invoice_date, invoice_time, due_date, payment_terms_id,
+                customer_id, company_id, warehouse_id, currency_id, subtotal,
+                discount_type, discount_amount, tax_total, total, notes,
+                proforma_invoice_id, sales_order_id, sales_order_number,
+                customer_address, delivery_address, delivery_address_id,
+                allow_stock_override, lines = [], deleted_attachment_ids
+            } = bodyData;
+
 
             // Get old values for comparison (fetch names for IDs) - BEFORE updating
             const [oldCustomer] = await conn.query(`SELECT display_name FROM vendor WHERE id = ?`, [invoice.customer_id]);
@@ -584,6 +616,7 @@ async function updateInvoice(req, res, next) {
                 SELECT CONCAT_WS(', ', ship_address_1, ship_address_2, ship_city, ship_zip_code) as address
                 FROM vendor_shipping_addresses WHERE id = ?
             `, [delivery_address_id]) : [[]];
+            const [newSalesOrder] = sales_order_id ? await conn.query(`SELECT sales_order_no FROM sales_orders WHERE id = ?`, [sales_order_id]) : [[]];
 
             const newValues = {
                 invoice_number: invoice_number || '',
@@ -600,6 +633,7 @@ async function updateInvoice(req, res, next) {
                 total: total || 0,
                 notes: notes || '',
                 proforma_invoice_id: newProforma[0]?.proforma_invoice_no || (proforma_invoice_id ? String(proforma_invoice_id) : ''),
+                sales_order_id: newSalesOrder[0]?.sales_order_no || (sales_order_id ? String(sales_order_id) : ''),
                 customer_address: customer_address || '',
                 delivery_address: delivery_address || '',
                 delivery_address_id: newDeliveryAddress[0]?.address || (delivery_address_id ? String(delivery_address_id) : '')
@@ -612,26 +646,35 @@ async function updateInvoice(req, res, next) {
             const oldStatusId = invoice.status_id;
             const shouldRevertToDraft = oldStatusId === 8 || oldStatusId === 2 || (oldStatusId === 1 && invoice.edit_request_status === 1);
             const newStatusId = shouldRevertToDraft ? 3 : invoice.status_id;
-            
+
             // Clear edit_request_status when invoice is edited after edit request approval
             const clearEditRequestStatus = oldStatusId === 1 && invoice.edit_request_status === 1;
-            
+
             await conn.query(`
                 UPDATE ar_invoices 
-                SET invoice_number = ?, invoice_date = ?, invoice_time = ?, due_date = ?, payment_terms_id = ?, customer_id = ?, customer_address = ?, delivery_address = ?, delivery_address_id = ?, company_id = ?, warehouse_id = ?, currency_id = ?, subtotal = ?, discount_type = ?, discount_amount = ?, tax_total = ?, total = ?, notes = ?, proforma_invoice_id = ?, allow_stock_override = ?, status_id = ?, edit_request_status = ?
+                SET invoice_number = ?, invoice_date = ?, invoice_time = ?, due_date = ?, payment_terms_id = ?, customer_id = ?, customer_address = ?, delivery_address = ?, delivery_address_id = ?, company_id = ?, warehouse_id = ?, currency_id = ?, subtotal = ?, discount_type = ?, discount_amount = ?, tax_total = ?, total = ?, notes = ?, proforma_invoice_id = ?, sales_order_id = ?, sales_order_number = ?, allow_stock_override = ?, status_id = ?, edit_request_status = ?
                 WHERE id = ?
-            `, [invoice_number, invoice_date, invoice_time || null, due_date || null, payment_terms_id || null, customer_id, customer_address || null, delivery_address || null, delivery_address_id || null, company_id || null, warehouse_id, currency_id, subtotal, discount_type || 'fixed', discount_amount || 0, tax_total, total, notes, proforma_invoice_id || null, allow_stock_override ? 1 : 0, newStatusId, clearEditRequestStatus ? null : invoice.edit_request_status, invoice.id]);
-            
+            `, [
+                invoice_number, invoice_date, invoice_time || null, due_date || null,
+                payment_terms_id || null, customer_id, customer_address || null,
+                delivery_address || null, delivery_address_id || null, company_id || null,
+                warehouse_id, currency_id, subtotal, discount_type || 'fixed',
+                discount_amount || 0, tax_total, total, notes,
+                proforma_invoice_id || null, sales_order_id || null, sales_order_number || null,
+                allow_stock_override ? 1 : 0, newStatusId,
+                clearEditRequestStatus ? null : invoice.edit_request_status, invoice.id
+            ]);
+
             // If status was changed from "Submitted for Approval" (8), "REJECTED" (2), or "APPROVED with edit request" (1) to "Draft" (3), add history record
             if (shouldRevertToDraft && newStatusId === 3) {
                 const [oldStatus] = await conn.query('SELECT name FROM status WHERE id = ?', [oldStatusId]);
                 const [newStatus] = await conn.query('SELECT name FROM status WHERE id = ?', [3]);
-                
+
                 let reason = 'Invoice edited';
                 if (oldStatusId === 1 && invoice.edit_request_status === 1) {
                     reason = 'Edit request approved - Invoice edited';
                 }
-                
+
                 await conn.query(`
                     INSERT INTO history (module, module_id, user_id, action, details, created_at)
                     VALUES (?, ?, ?, ?, ?, NOW())
@@ -695,7 +738,7 @@ async function updateInvoice(req, res, next) {
                 } catch (e) {
                     deletedIds = [];
                 }
-                
+
                 if (deletedIds.length > 0) {
                     const fs = require('fs');
                     const path = require('path');
@@ -703,14 +746,14 @@ async function updateInvoice(req, res, next) {
                         `SELECT id, file_path FROM ar_invoices_attachments WHERE id IN (?) AND invoice_id = ?`,
                         [deletedIds, invoice.id]
                     );
-                    
+
                     for (const file of filesToDelete) {
                         if (file.file_path) {
                             const fullPath = path.join(__dirname, '../../..', file.file_path);
                             await fs.promises.unlink(fullPath).catch(e => console.warn(`Failed to delete file: ${fullPath}`, e));
                         }
                     }
-                    
+
                     await conn.query(`DELETE FROM ar_invoices_attachments WHERE id IN (?) AND invoice_id = ?`, [deletedIds, invoice.id]);
                 }
             }
@@ -723,7 +766,7 @@ async function updateInvoice(req, res, next) {
                     const basename = path.basename(f.path);
                     return `uploads/ar_invoices/${basename}`;
                 };
-                
+
                 const attachmentValues = req.files.map(f => [
                     invoice.id,
                     f.originalname,
@@ -732,7 +775,7 @@ async function updateInvoice(req, res, next) {
                     f.size || null,
                     new Date()
                 ]);
-                
+
                 await conn.query(`
                     INSERT INTO ar_invoices_attachments 
                     (invoice_id, file_name, file_path, mime_type, size_bytes, created_at)
@@ -830,7 +873,7 @@ async function getAvailableBatches(req, res, next) {
         }
 
         const { pool } = require('../../db/tx.cjs');
-        
+
         // Get quantities allocated to the current invoice (if editing) to add back to available stock
         // UNIVERSAL FORMULA: Available Stock = Stock on Hand + Inventory Transaction Quantities (for this invoice)
         // This calculation works for ALL statuses (Draft, Submitted, Approved, Rejected, etc.)
@@ -841,11 +884,11 @@ async function getAvailableBatches(req, res, next) {
             const isNumeric = /^\d+$/.test(excludeInvoiceId);
             const whereField = isNumeric ? 'id' : 'invoice_uniqid';
             const [invoices] = await pool.query(`SELECT id, status_id FROM ar_invoices WHERE ${whereField} = ?`, [excludeInvoiceId]);
-            
+
             if (invoices.length > 0) {
                 const invoiceId = invoices[0].id;
                 const invoiceStatusId = invoices[0].status_id;
-                
+
                 // Use the universal helper function to get inventory transaction quantities
                 invoiceBatchQuantities = await getInvoiceInventoryTransactionQuantities(
                     pool,
@@ -853,7 +896,7 @@ async function getAvailableBatches(req, res, next) {
                     productId ? parseInt(productId, 10) : null,
                     warehouseId ? parseInt(warehouseId, 10) : null
                 );
-                
+
                 const txnCount = Object.keys(invoiceBatchQuantities).length;
                 console.log(`[Stock Calculation] Invoice ${invoiceId} (status_id=${invoiceStatusId}): Found ${txnCount} batch quantity entries for product ${productId}, warehouse ${warehouseId}`);
             }
@@ -866,21 +909,21 @@ async function getAvailableBatches(req, res, next) {
             // Add warehouse info to each batch and add back excluded invoice quantities
             const [warehouses] = await pool.query('SELECT id, warehouse_name FROM warehouses WHERE id = ?', [warehouseId]);
             const warehouseName = warehouses[0]?.warehouse_name || `Warehouse ${warehouseId}`;
-            
+
             // Apply UNIVERSAL FORMULA: Available Stock = Stock on Hand + Inventory Transaction Quantities (for this invoice)
             // This works for ALL statuses - if transactions exist, add them back to stock on hand
             const batchesWithWarehouse = await Promise.all((batches || []).map(async (b) => {
                 // Match key format: productId_batchId_warehouseId
                 const key = `${productId}_${b.batch_id}_${warehouseId}`;
                 const inventoryTransactionQty = invoiceBatchQuantities[key] || 0;
-                
+
                 // Calculate available stock using universal formula
                 const availableStock = calculateAvailableStock(b.qty_on_hand, inventoryTransactionQty);
-                
+
                 if (inventoryTransactionQty > 0) {
                     console.log(`[Stock Calculation] Batch ${b.batch_id}: stock_on_hand=${b.qty_on_hand}, inventory_txn_qty=${inventoryTransactionQty}, available_stock=${availableStock}`);
                 }
-                
+
                 return {
                     ...b,
                     warehouse_id: parseInt(warehouseId, 10),
@@ -888,13 +931,13 @@ async function getAvailableBatches(req, res, next) {
                     qty_on_hand: availableStock
                 };
             }));
-            
+
             res.json(batchesWithWarehouse);
         } else {
             // Get stock for all warehouses
             const [warehouses] = await pool.query('SELECT id, warehouse_name FROM warehouses WHERE is_inactive = 0');
             const allBatches = [];
-            
+
             for (const wh of warehouses) {
                 try {
                     const batches = await inventoryService.getAvailableBatches(parseInt(productId, 10), wh.id);
@@ -905,10 +948,10 @@ async function getAvailableBatches(req, res, next) {
                             // Match key format: productId_batchId_warehouseId
                             const key = `${productId}_${b.batch_id}_${wh.id}`;
                             const inventoryTransactionQty = invoiceBatchQuantities[key] || 0;
-                            
+
                             // Calculate available stock using universal formula
                             const availableStock = calculateAvailableStock(b.qty_on_hand, inventoryTransactionQty);
-                            
+
                             return {
                                 ...b,
                                 warehouse_id: wh.id,
@@ -922,7 +965,7 @@ async function getAvailableBatches(req, res, next) {
                     console.warn(`Failed to get batches for warehouse ${wh.id}:`, err);
                 }
             }
-            
+
             res.json(allBatches);
         }
     } catch (error) {
@@ -1058,6 +1101,7 @@ async function approveInvoice(req, res, next) {
             }
 
             // Validate stock availability before approval
+            const inventoryEnabled = await isInventoryMovementEnabled();
             // Get all invoice lines with batch allocations
             const [invoiceLines] = await conn.query(`
                 SELECT ail.id, ail.product_id, ail.item_name, ail.quantity, ai.warehouse_id, p.item_type, p.item_id
@@ -1073,7 +1117,7 @@ async function approveInvoice(req, res, next) {
             for (const line of invoiceLines) {
                 if (!line.product_id) continue;
                 const isServiceLine = String(line.item_type || '').toLowerCase() === 'service' || Number(line.item_id) === 1;
-                if (isServiceLine) {
+                if (isServiceLine || !inventoryEnabled) {
                     continue;
                 }
 
@@ -1102,7 +1146,7 @@ async function approveInvoice(req, res, next) {
                 // Check each batch allocation
                 for (const alloc of batchAllocs) {
                     const requiredQty = parseFloat(alloc.quantity);
-                    
+
                     // Get current stock on hand
                     const [stockRows] = await conn.query(`
                         SELECT qty_on_hand
@@ -1116,7 +1160,7 @@ async function approveInvoice(req, res, next) {
                     }
 
                     const stockOnHand = parseFloat(stockRows[0].qty_on_hand || 0);
-                    
+
                     // Calculate available stock using universal formula
                     // Key format: productId_batchId_warehouseId
                     const key = `${line.product_id}_${alloc.batch_id}_${line.warehouse_id}`;
@@ -1134,7 +1178,7 @@ async function approveInvoice(req, res, next) {
             }
 
             if (stockErrors.length > 0) {
-                return res.status(400).json({ 
+                return res.status(400).json({
                     error: 'Insufficient stock available for approval',
                     details: stockErrors
                 });
@@ -1148,12 +1192,12 @@ async function approveInvoice(req, res, next) {
             // The file is saved to PDF_DIR with the generated filename before this controller is called
             const path = require('path');
             let pdfPath = null;
-            
+
             if (pdfFile) {
                 // Multer has already saved the file to PDF_DIR with the generated filename
                 // Construct the relative path for database storage (same pattern as purchase orders)
                 pdfPath = path.join('uploads/ar-invoices/pdf', pdfFile.filename).replace(/\\/g, '/');
-                
+
                 // Verify file was actually saved by multer (pdfFile.path contains the full path where multer saved it)
                 const fs = require('fs');
                 if (pdfFile.path && !fs.existsSync(pdfFile.path)) {
@@ -1167,7 +1211,7 @@ async function approveInvoice(req, res, next) {
                     });
                     throw new Error('PDF file was not saved correctly by multer');
                 }
-                
+
                 console.log(`[PDF Save] File saved by multer: ${pdfFile.path}`);
                 console.log(`[PDF Save] Filename: ${pdfFile.filename}`);
                 console.log(`[PDF Save] Relative path for DB: ${pdfPath}`);
@@ -1200,7 +1244,7 @@ async function approveInvoice(req, res, next) {
             if (req.file) {
                 const fs = require('fs');
                 const path = require('path');
-                fs.promises.unlink(req.file.path).catch(err => 
+                fs.promises.unlink(req.file.path).catch(err =>
                     console.error('[PDF Cleanup] Failed to delete PDF file on error:', err)
                 );
             }
@@ -1239,7 +1283,7 @@ async function rejectInvoice(req, res, next) {
 
             const [fromStatusRows] = await conn.query(`SELECT name FROM status WHERE id = ? LIMIT 1`, [invoice.status_id]);
             const [toStatusRows] = await conn.query(`SELECT name FROM status WHERE id = ? LIMIT 1`, [2]); // REJECTED status_id = 2
-            
+
             const fromStatusName = fromStatusRows[0]?.name || 'N/A';
             const toStatusName = toStatusRows[0]?.name || 'N/A';
 
@@ -1586,7 +1630,7 @@ async function getInvoiceStockDetails(req, res, next) {
             // Check each batch allocation
             for (const alloc of batchAllocs) {
                 const requiredQty = parseFloat(alloc.quantity);
-                
+
                 // Get current stock on hand
                 const [stockRows] = await pool.query(`
                     SELECT qty_on_hand
@@ -1595,7 +1639,7 @@ async function getInvoiceStockDetails(req, res, next) {
                 `, [alloc.batch_id, line.warehouse_id, line.product_id]);
 
                 const stockOnHand = stockRows.length > 0 ? parseFloat(stockRows[0].qty_on_hand || 0) : 0;
-                
+
                 // Calculate available stock using universal formula
                 // Key format: productId_batchId_warehouseId
                 const key = `${line.product_id}_${alloc.batch_id}_${line.warehouse_id}`;

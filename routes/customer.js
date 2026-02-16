@@ -1482,6 +1482,21 @@ router.get('/:id/invoice-payments', async (req, res, next) => {
             return res.status(400).json(errPayload('Invalid customer ID'));
         }
 
+        const perPage = parseInt(req.query.per_page || 5, 10);
+        const page = parseInt(req.query.page || 1, 10);
+        const offset = (page - 1) * perPage;
+
+        // Get total count first
+        const [countResult] = await db.promise().query(`
+            SELECT COUNT(DISTINCT ai.id) as total
+            FROM ar_invoices ai
+            INNER JOIN tbl_payment_allocation pa ON pa.reference_id = ai.id AND pa.alloc_type = 'invoice'
+            INNER JOIN tbl_payment p ON p.id = pa.payment_id
+            WHERE ai.customer_id = ?
+              AND (p.is_deleted = 0 OR p.is_deleted IS NULL)
+        `, [customerId]);
+        const totalRows = countResult[0].total;
+
         // Get invoices that have payment allocations
         const [invoicePayments] = await db.promise().query(`
             SELECT DISTINCT
@@ -1507,9 +1522,10 @@ router.get('/:id/invoice-payments', async (req, res, next) => {
               AND (p.is_deleted = 0 OR p.is_deleted IS NULL)
             GROUP BY ai.id, ai.invoice_uniqid, ai.invoice_number, ai.invoice_date, ai.total, ai.currency_id, c.name, s.name
             ORDER BY ai.invoice_date DESC, ai.id DESC
-        `, [customerId]);
+            LIMIT ? OFFSET ?
+        `, [customerId, perPage, offset]);
 
-        res.json({ data: invoicePayments || [] });
+        res.json({ data: invoicePayments || [], pagination: { total: totalRows, page, perPage } });
     } catch (e) {
         console.error('Error fetching invoice payments:', e);
         next(e);
@@ -1526,6 +1542,22 @@ router.get('/:id/proforma-receives', async (req, res, next) => {
         if (!customerId || !Number.isFinite(customerId)) {
             return res.status(400).json(errPayload('Invalid customer ID'));
         }
+
+        const perPage = parseInt(req.query.per_page || 5, 10);
+        const page = parseInt(req.query.page || 1, 10);
+        const offset = (page - 1) * perPage;
+
+        // Get total count first
+        const [countResult] = await db.promise().query(`
+            SELECT COUNT(DISTINCT p.id) as total
+            FROM tbl_payment p
+            INNER JOIN tbl_payment_allocation pa ON pa.payment_id = p.id AND pa.alloc_type = 'advance'
+            INNER JOIN proforma_invoice pi ON pi.id = pa.reference_id
+            WHERE p.party_id = ?
+              AND p.is_customer_payment = 1
+              AND (p.is_deleted = 0 OR p.is_deleted IS NULL)
+        `, [customerId]);
+        const totalRows = countResult[0].total;
 
         // Get customer receivables that have proforma invoice allocations (advance payments)
         const [proformaReceives] = await db.promise().query(`
@@ -1555,9 +1587,10 @@ router.get('/:id/proforma-receives', async (req, res, next) => {
               AND (p.is_deleted = 0 OR p.is_deleted IS NULL)
             GROUP BY p.id, p.payment_uniqid, p.payment_number, p.transaction_date, p.currency_id, c.name, s.name, pt.name
             ORDER BY p.transaction_date DESC, p.id DESC
-        `, [customerId]);
+            LIMIT ? OFFSET ?
+        `, [customerId, perPage, offset]);
 
-        res.json({ data: proformaReceives || [] });
+        res.json({ data: proformaReceives || [], pagination: { total: totalRows, page, perPage } });
     } catch (e) {
         console.error('Error fetching proforma receives:', e);
         next(e);
