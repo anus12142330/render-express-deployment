@@ -74,44 +74,52 @@ function parseIssueDate(input) {
     const d = new Date(raw);
     return Number.isNaN(d.getTime()) ? new Date() : d;
 }
-function yearPrefixSegment(type = 'proforma_invoice', issueDate) {
-    const prefix = (type === 'sales_order' || type === 'sales order') ? 'AGSO' : 'AGPI';
+const codePrefix = (type) => (type === 'sales_order' || type === 'sales order') ? 'AGSO' : 'AGPI';
+
+// Full prefix with year and month for display: e.g. AGPI-26-01
+function yearMonthPrefixSegment(type = 'proforma_invoice', issueDate) {
+    const prefix = codePrefix(type);
     const dStr = parseIssueDate(issueDate);
     const yy = String(dStr.getFullYear()).slice(-2);
     const mm = String(dStr.getMonth() + 1).padStart(2, "0");
-    return `${prefix}-${yy}-${mm}`; // Removed trailing dash
+    return `${prefix}-${yy}-${mm}`;
 }
 
-async function getMaxSequenceForPeriod(conn, prefix) {
-    // Look for the highest number starting with this PREFIX-YY-MM
-    // e.g. AGPI-26-01...
+// 2-digit year for sequence lookup (shared across AGPI and AGSO)
+function yearSegment(issueDate) {
+    const dStr = parseIssueDate(issueDate);
+    return String(dStr.getFullYear()).slice(-2);
+}
+
+// Max sequence for the year: shared across AGPI and AGSO so next number is 002 after 001
+async function getMaxSequenceForYear(conn, yy) {
     const [rows] = await conn.query(
         `SELECT proforma_invoice_no AS no
        FROM proforma_invoice
-      WHERE proforma_invoice_no LIKE ?
-      ORDER BY proforma_invoice_no DESC
-      LIMIT 1`,
-        [`${prefix}%`]
+      WHERE proforma_invoice_no LIKE ? OR proforma_invoice_no LIKE ?`,
+        [`AGPI-${yy}-%`, `AGSO-${yy}-%`]
     );
-    const top = rows?.[0]?.no || null;
-    if (!top) return 0;
-
-    // Extract the sequence number from the end (last 3 digits)
-    const seqStr = top.slice(-3);
-    const seq = Number(seqStr);
-    return Number.isFinite(seq) ? seq : 0;
+    let maxSeq = 0;
+    for (const row of rows || []) {
+        const no = row?.no || '';
+        const seqStr = no.slice(-3);
+        const seq = Number(seqStr);
+        if (Number.isFinite(seq) && seq > maxSeq) maxSeq = seq;
+    }
+    return maxSeq;
 }
 
 async function generateNextProformaNumber(conn, { width = 3, type = 'proforma_invoice', issueDate } = {}) {
-    const prefix = yearPrefixSegment(type, issueDate);
-    const seq = await getMaxSequenceForPeriod(conn, prefix);
-    return `${prefix}${pad(seq + 1, width)}`;
+    const yearMonthPrefix = yearMonthPrefixSegment(type, issueDate);
+    const yy = yearSegment(issueDate);
+    const seq = await getMaxSequenceForYear(conn, yy);
+    return `${yearMonthPrefix}${pad(seq + 1, width)}`;
 }
 
 async function ensureUniqueProformaNumber(conn, n, { width = 3, type = 'proforma_invoice', issueDate } = {}) {
     let value = n || await generateNextProformaNumber(conn, { width, type, issueDate });
     // Check if the provided number matches the expected prefix for the date
-    const expectedPrefix = yearPrefixSegment(type, issueDate);
+    const expectedPrefix = yearMonthPrefixSegment(type, issueDate);
 
     // If we're auto-generating or if the user changed the date but kept an old number, 
     // we should probably enforce the new prefix, but here we just ensure uniqueness.
@@ -631,6 +639,7 @@ router.get("/:id", async (req, res) => {
                 consignee_details.display_name as consignee_name_from_db,
                 consignee_details.uniqid as consignee_uniqid,
                 b.bank_name,
+                b.nick_name,
                 b.acc_name as account_name,
                 b.acc_no as account_number,
                 b.iban_no as iban,
