@@ -1,0 +1,42 @@
+[
+  {
+    "Field": "id",
+    "Type": "int(10) unsigned",
+    "Null": "NO",
+    "Key": "PRI",
+    "Default": null,
+    "Extra": "auto_increment"
+  },
+  {
+    "Field": "receipt_id",
+    "Type": "int(10) unsigned",
+    "Null": "NO",
+    "Key": "MUL",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "invoice_id",
+    "Type": "int(10) unsigned",
+    "Null": "NO",
+    "Key": "MUL",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "allocated_amount",
+    "Type": "decimal(18,2)",
+    "Null": "NO",
+    "Key": "",
+    "Default": "0.00",
+    "Extra": ""
+  },
+  {
+    "Field": "created_at",
+    "Type": "datetime",
+    "Null": "NO",
+    "Key": "",
+    "Default": "current_timestamp()",
+    "Extra": ""
+  }
+]

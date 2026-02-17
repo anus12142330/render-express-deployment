@@ -1,0 +1,50 @@
+[
+  {
+    "id": 1,
+    "name": "Approved"
+  },
+  {
+    "id": 2,
+    "name": "Rejected"
+  },
+  {
+    "id": 3,
+    "name": "Draft"
+  },
+  {
+    "id": 4,
+    "name": "Pending"
+  },
+  {
+    "id": 5,
+    "name": "Issued"
+  },
+  {
+    "id": 6,
+    "name": "Cancelled"
+  },
+  {
+    "id": 7,
+    "name": "Confirmed\r\n"
+  },
+  {
+    "id": 8,
+    "name": "Submitted for Approval"
+  },
+  {
+    "id": 9,
+    "name": "Dispatched"
+  },
+  {
+    "id": 10,
+    "name": "Completed"
+  },
+  {
+    "id": 11,
+    "name": "Partially Dispatched"
+  },
+  {
+    "id": 12,
+    "name": "Delivered"
+  }
+]

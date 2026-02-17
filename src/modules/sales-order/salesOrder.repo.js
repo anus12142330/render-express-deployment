@@ -274,11 +274,14 @@ export const insertAudit = async (conn, data) => {
     );
 };
 
-export const listSalesOrders = async (conn, { clientId, page, pageSize, search, status_id, company_id, customer_id, date_from, date_to, edit_request_status, created_by }) => {
+export const listSalesOrders = async (conn, { clientId, page, pageSize, search, status_id, company_id, customer_id, date_from, date_to, edit_request_status, created_by, exclude_with_ar_invoice }) => {
     const offset = (page - 1) * pageSize;
     const conditions = ['so.client_id = ?'];
     const params = [clientId];
 
+    if (exclude_with_ar_invoice) {
+        conditions.push('so.id NOT IN (SELECT sales_order_id FROM ar_invoices WHERE sales_order_id IS NOT NULL)');
+    }
     if (created_by != null && created_by !== '') {
         conditions.push('so.created_by = ?');
         params.push(created_by);

@@ -42,7 +42,7 @@ const pdfStorage = multer.diskStorage({
     },
 });
 
-const uploadPdf = multer({ 
+const uploadPdf = multer({
     storage: pdfStorage,
     limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
 });
@@ -66,6 +66,8 @@ router.post('/invoices/:id/decide-edit-request', arInvoicesController.decideEdit
 router.get('/invoices/:id/stock-details', arInvoicesController.getInvoiceStockDetails);
 router.post('/invoices/:id/attachments', upload.array('attachments', 20), arInvoicesController.addAttachment);
 router.delete('/invoices/:id/attachments/:attachmentId', arInvoicesController.deleteAttachment);
+router.get('/sales-orders/:id/payments', arInvoicesController.getSalesOrderPayments);
+router.get('/sales-orders/:id/advance-receivables', arInvoicesController.getSalesOrderAdvanceReceivables);
 
 router.get('/receipts', arReceiptsController.listReceipts);
 router.get('/receipts/:id', arReceiptsController.getReceipt);
@@ -83,10 +85,10 @@ router.get('/proforma-invoices', async (req, res, next) => {
         const search = (req.query.search || '').trim();
         const customerId = req.query.customer_id ? parseInt(req.query.customer_id, 10) : null;
         const statusId = req.query.status_id ? parseInt(req.query.status_id, 10) : null;
-        
+
         let whereClause = 'WHERE 1=1';
         const params = [];
-        
+
         if (customerId) {
             whereClause += ' AND pi.buyer_id = ?';
             params.push(customerId);
@@ -100,7 +102,7 @@ router.get('/proforma-invoices', async (req, res, next) => {
             const searchPattern = `%${search}%`;
             params.push(searchPattern, searchPattern);
         }
-        
+
         const [rows] = await pool.query(`
             SELECT pi.id, pi.uniqid, pi.proforma_invoice_no, pi.date_issue, 
                    pi.grand_total, c.display_name as customer_name,
@@ -115,7 +117,7 @@ router.get('/proforma-invoices', async (req, res, next) => {
             ORDER BY pi.date_issue DESC
             LIMIT 100
         `, params);
-        
+
         res.json({ data: rows });
     } catch (error) {
         next(error);
@@ -129,7 +131,7 @@ router.get('/proforma-invoices/:id', async (req, res, next) => {
         const { id } = req.params;
         const isNumeric = /^\d+$/.test(id);
         const whereField = isNumeric ? 'pi.id' : 'pi.uniqid';
-        
+
         const [[header]] = await pool.query(`
             SELECT pi.*, c.display_name as customer_name, c.id as customer_id,
                    curr.id as currency_id, curr.name as currency_code,
@@ -139,11 +141,11 @@ router.get('/proforma-invoices/:id', async (req, res, next) => {
             LEFT JOIN currency curr ON curr.id = pi.currency_sale
             WHERE ${whereField} = ?
         `, [id]);
-        
+
         if (!header) {
             return res.status(404).json({ error: 'Proforma invoice not found' });
         }
-        
+
         const [items] = await pool.query(`
             SELECT 
                 pii.*, 
@@ -158,7 +160,7 @@ router.get('/proforma-invoices/:id', async (req, res, next) => {
             WHERE pii.proforma_invoice_id = ?
             ORDER BY pii.id
         `, [header.id]);
-        
+
         header.items = items;
         res.json(header);
     } catch (error) {
@@ -173,7 +175,7 @@ router.get('/invoices/:id/payment-allocations', async (req, res, next) => {
         const { id } = req.params;
         const isNumeric = /^\d+$/.test(id);
         const whereField = isNumeric ? 'ai.id' : 'ai.invoice_uniqid';
-        
+
         // Get invoice info
         const [[invoice]] = await pool.query(`
             SELECT ai.id, ai.invoice_uniqid, ai.invoice_number, ai.total, ai.currency_id, ai.invoice_date,
@@ -183,12 +185,12 @@ router.get('/invoices/:id/payment-allocations', async (req, res, next) => {
             LEFT JOIN vendor v ON v.id = ai.customer_id
             WHERE ${whereField} = ?
         `, [id]);
-        
+
         if (!invoice) {
             return res.status(404).json({ error: 'Invoice not found' });
         }
-        
-        // Get payment allocations for this invoice (balance payments)
+
+        // Get payment allocations for this invoice (both from tbl_payment_allocation and ar_receipt_allocations)
         const [allocations] = await pool.query(`
             SELECT 
                 pa.id,
@@ -211,22 +213,46 @@ router.get('/invoices/:id/payment-allocations', async (req, res, next) => {
             WHERE pa.reference_id = ?
               AND pa.alloc_type = 'invoice'
               AND (p.is_deleted = 0 OR p.is_deleted IS NULL)
-            ORDER BY p.transaction_date DESC, p.id DESC
-        `, [invoice.id]);
-        
+              AND (p.status_id IN (1, 3, 8) OR p.status_id IS NULL)
+
+            UNION ALL
+
+            SELECT
+                ara.id,
+                ara.allocated_amount as amount_bank,
+                (ara.allocated_amount * COALESCE(curr.conversion_rate, 1)) as amount_base,
+                ar.id as payment_id,
+                ar.receipt_uniqid as payment_uniqid,
+                ar.receipt_number as payment_number,
+                ar.receipt_date as transaction_date,
+                'RECEIPT' as payment_type,
+                1 as status_id,
+                ar.currency_id as payment_currency_id,
+                curr.name as payment_currency_code,
+                'Posted' as payment_status_name,
+                'Receipt' as payment_type_name
+            FROM ar_receipt_allocations ara
+            INNER JOIN ar_receipts ar ON ar.id = ara.receipt_id
+            LEFT JOIN currency curr ON curr.id = ar.currency_id
+            WHERE ara.invoice_id = ?
+              AND ar.status = 'POSTED'
+            
+            ORDER BY transaction_date DESC, payment_id DESC
+        `, [invoice.id, invoice.id]);
+
         // Calculate totals
         const totalAmount = parseFloat(invoice.total || 0);
         const totalAdjusted = allocations.reduce((sum, alloc) => {
             // Use amount_bank if payment currency matches invoice currency, otherwise amount_base
             const invoiceCurrencyId = invoice.currency_id;
             const paymentCurrencyId = alloc.payment_currency_id;
-            const amount = (invoiceCurrencyId && paymentCurrencyId && invoiceCurrencyId === paymentCurrencyId) 
-                ? parseFloat(alloc.amount_bank || 0) 
+            const amount = (invoiceCurrencyId && paymentCurrencyId && invoiceCurrencyId === paymentCurrencyId)
+                ? parseFloat(alloc.amount_bank || 0)
                 : parseFloat(alloc.amount_base || 0);
             return sum + amount;
         }, 0);
         const outstanding = totalAmount - totalAdjusted;
-        
+
         res.json({
             invoice: {
                 id: invoice.id,
@@ -258,7 +284,7 @@ router.get('/proforma-invoices/:id/payment-allocations', async (req, res, next) 
         const { id } = req.params;
         const isNumeric = /^\d+$/.test(id);
         const whereField = isNumeric ? 'pi.id' : 'pi.uniqid';
-        
+
         // Get proforma invoice info
         const [[proforma]] = await pool.query(`
             SELECT pi.id, pi.uniqid, pi.proforma_invoice_no, pi.grand_total as total, pi.currency_sale as currency_id, pi.date_issue,
@@ -268,11 +294,11 @@ router.get('/proforma-invoices/:id/payment-allocations', async (req, res, next) 
             LEFT JOIN vendor v ON v.id = pi.buyer_id
             WHERE ${whereField} = ?
         `, [id]);
-        
+
         if (!proforma) {
             return res.status(404).json({ error: 'Proforma invoice not found' });
         }
-        
+
         // Get payment allocations for this proforma (advance payments)
         const [allocations] = await pool.query(`
             SELECT 
@@ -298,20 +324,20 @@ router.get('/proforma-invoices/:id/payment-allocations', async (req, res, next) 
               AND (p.is_deleted = 0 OR p.is_deleted IS NULL)
             ORDER BY p.transaction_date DESC, p.id DESC
         `, [proforma.id]);
-        
+
         // Calculate totals
         const totalAmount = parseFloat(proforma.total || 0);
         const totalAdjusted = allocations.reduce((sum, alloc) => {
             // Use amount_bank if payment currency matches proforma currency, otherwise amount_base
             const proformaCurrencyId = proforma.currency_id;
             const paymentCurrencyId = alloc.payment_currency_id;
-            const amount = (proformaCurrencyId && paymentCurrencyId && proformaCurrencyId === paymentCurrencyId) 
-                ? parseFloat(alloc.amount_bank || 0) 
+            const amount = (proformaCurrencyId && paymentCurrencyId && proformaCurrencyId === paymentCurrencyId)
+                ? parseFloat(alloc.amount_bank || 0)
                 : parseFloat(alloc.amount_base || 0);
             return sum + amount;
         }, 0);
         const outstanding = totalAmount - totalAdjusted;
-        
+
         res.json({
             proforma: {
                 id: proforma.id,

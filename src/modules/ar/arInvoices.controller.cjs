@@ -147,10 +147,15 @@ async function listInvoices(req, res, next) {
         const status = req.query.status || '';
         const statusId = req.query.status_id ? parseInt(req.query.status_id, 10) : null;
         const editRequestStatus = req.query.edit_request_status ? parseInt(req.query.edit_request_status, 10) : null;
+        const createdBy = req.query.created_by ? parseInt(req.query.created_by, 10) : null;
 
         let whereClause = 'WHERE 1=1';
         const params = [];
 
+        if (createdBy) {
+            whereClause += ' AND ai.user_id = ?';
+            params.push(createdBy);
+        }
         if (customerId) {
             whereClause += ' AND ai.customer_id = ?';
             params.push(customerId);
@@ -182,8 +187,14 @@ async function listInvoices(req, res, next) {
 
         const [rows] = await pool.query(`
             SELECT ai.*, v.display_name as customer_name, c.name as currency_code,
-                (SELECT COALESCE(SUM(ra.allocated_amount), 0) FROM ar_receipt_allocations ra WHERE ra.invoice_id = ai.id) as received_amount,
-                (ai.total - COALESCE((SELECT SUM(ra.allocated_amount) FROM ar_receipt_allocations ra WHERE ra.invoice_id = ai.id), 0)) as outstanding_amount,
+                (
+                    COALESCE((SELECT SUM(ra.allocated_amount) FROM ar_receipt_allocations ra INNER JOIN ar_receipts ar_receipt ON ar_receipt.id = ra.receipt_id WHERE ra.invoice_id = ai.id AND ar_receipt.status = 'POSTED'), 0) +
+                    COALESCE((SELECT SUM(CASE WHEN p.currency_id = ai.currency_id THEN pa.amount_bank ELSE pa.amount_base END) FROM tbl_payment_allocation pa INNER JOIN tbl_payment p ON p.id = pa.payment_id WHERE pa.alloc_type = 'invoice' AND pa.reference_id = ai.id AND (p.is_deleted = 0 OR p.is_deleted IS NULL) AND p.status_id = 1 AND p.direction = 'IN'), 0)
+                ) as received_amount,
+                (ai.total - (
+                    COALESCE((SELECT SUM(ra.allocated_amount) FROM ar_receipt_allocations ra INNER JOIN ar_receipts ar_receipt ON ar_receipt.id = ra.receipt_id WHERE ra.invoice_id = ai.id AND ar_receipt.status = 'POSTED'), 0) +
+                    COALESCE((SELECT SUM(CASE WHEN p.currency_id = ai.currency_id THEN pa.amount_bank ELSE pa.amount_base END) FROM tbl_payment_allocation pa INNER JOIN tbl_payment p ON p.id = pa.payment_id WHERE pa.alloc_type = 'invoice' AND pa.reference_id = ai.id AND (p.is_deleted = 0 OR p.is_deleted IS NULL) AND p.status_id = 1 AND p.direction = 'IN'), 0)
+                )) as outstanding_amount,
                 s.name as status_name, s.id as status_id, s.colour as status_colour, s.bg_colour as status_bg_colour,
                 u1.name as created_by_name, u2.name as approved_by_name, u3.name as edit_requested_by_name
             FROM ar_invoices ai
@@ -231,7 +242,8 @@ async function getInvoice(req, res, next) {
                    vsh.ship_attention, vsh.ship_address_1, vsh.ship_address_2, vsh.ship_city, 
                    vsh.ship_state_id, vsh.ship_zip_code, vsh.ship_country_id, vsh.ship_phone, vsh.ship_fax,
                    ship_state.name as ship_state_name, ship_country.name as ship_country_name,
-                   s.name as status_name, s.id as status_id, s.colour as status_colour, s.bg_colour as status_bg_colour
+                   s.name as status_name, s.id as status_id, s.colour as status_colour, s.bg_colour as status_bg_colour,
+                   u.name as created_by_name
             FROM ar_invoices ai
             LEFT JOIN vendor v ON v.id = ai.customer_id
             LEFT JOIN currency c ON c.id = ai.currency_id
@@ -239,6 +251,7 @@ async function getInvoice(req, res, next) {
             LEFT JOIN state ship_state ON ship_state.id = vsh.ship_state_id
             LEFT JOIN country ship_country ON ship_country.id = vsh.ship_country_id
             LEFT JOIN status s ON s.id = ai.status_id
+            LEFT JOIN user u ON u.id = ai.user_id
             WHERE ${whereField} = ?
         `, [id]);
 
@@ -253,6 +266,7 @@ async function getInvoice(req, res, next) {
                 um.name as uom_name,
                 p.item_type,
                 p.item_id,
+                t.tax_name,
                 (SELECT pi.file_path 
                  FROM product_images pi 
                  WHERE pi.product_id = ail.product_id 
@@ -261,6 +275,7 @@ async function getInvoice(req, res, next) {
             FROM ar_invoice_lines ail
             LEFT JOIN uom_master um ON um.id = ail.uom_id
             LEFT JOIN products p ON p.id = ail.product_id
+            LEFT JOIN taxes t ON t.id = ail.tax_id
             WHERE ail.invoice_id = ?
             ORDER BY ail.line_no
         `, [invoice.id]);
@@ -328,6 +343,10 @@ async function getInvoice(req, res, next) {
         invoice.attachments = attachments || [];
         invoice.history = history || [];
         invoice.documentTemplate = documentTemplate;
+        if (invoice.proforma_invoice_id) {
+            const [proformaRows] = await pool.query(`SELECT proforma_invoice_no FROM proforma_invoice WHERE id = ?`, [invoice.proforma_invoice_id]);
+            invoice.proforma_invoice_no = proformaRows[0]?.proforma_invoice_no || null;
+        }
         res.json(invoice);
     } catch (error) {
         next(error);
@@ -616,7 +635,7 @@ async function updateInvoice(req, res, next) {
                 SELECT CONCAT_WS(', ', ship_address_1, ship_address_2, ship_city, ship_zip_code) as address
                 FROM vendor_shipping_addresses WHERE id = ?
             `, [delivery_address_id]) : [[]];
-            const [newSalesOrder] = sales_order_id ? await conn.query(`SELECT sales_order_no FROM sales_orders WHERE id = ?`, [sales_order_id]) : [[]];
+            const [newSalesOrder] = sales_order_id ? await conn.query(`SELECT order_no AS sales_order_no FROM sales_orders WHERE id = ?`, [sales_order_id]) : [[]];
 
             const newValues = {
                 invoice_number: invoice_number || '',
@@ -1011,19 +1030,23 @@ async function getInvoiceHistory(req, res, next) {
 async function changeStatus(req, res, next) {
     try {
         const { id } = req.params;
-        const { status_id } = req.body;
-        const userId = req.session?.user?.id;
+        const rawStatusId = req.body?.status_id;
+        const userId = req.user?.id ?? req.session?.user?.id;
 
         if (!userId) {
             return res.status(401).json({ error: 'Authentication required' });
         }
 
-        if (!status_id) {
+        if (rawStatusId === undefined || rawStatusId === null || rawStatusId === '') {
             return res.status(400).json({ error: 'status_id is required' });
         }
 
-        const { pool } = require('../../db/tx.cjs');
-        const isNumeric = /^\d+$/.test(id);
+        const status_id = parseInt(rawStatusId, 10);
+        if (Number.isNaN(status_id)) {
+            return res.status(400).json({ error: 'status_id must be a number' });
+        }
+
+        const isNumeric = /^\d+$/.test(String(id).trim());
         const whereField = isNumeric ? 'id' : 'invoice_uniqid';
 
         // Get current invoice
@@ -1673,5 +1696,138 @@ async function getInvoiceStockDetails(req, res, next) {
     }
 }
 
-module.exports = { listInvoices, getNextInvoiceNumber, getInvoice, getInvoiceHistory, getInvoiceTransactions, createInvoice, updateInvoice, autoAllocate, postInvoice, cancelInvoice, getAvailableBatches, changeStatus, approveInvoice, rejectInvoice, requestEdit, decideEditRequest, addAttachment, deleteAttachment, getInvoiceStockDetails };
+async function getSalesOrderPayments(req, res, next) {
+    try {
+        const { id } = req.params;
+        const soId = parseInt(id, 10);
+        if (!soId) {
+            return res.json({ success: true, data: [] });
+        }
 
+        const payments = [];
+
+        // 1) Allocations from tbl_payment (inward payments)
+        try {
+            const [rows] = await pool.query(`
+                SELECT 
+                    pa.id,
+                    pa.amount_bank,
+                    pa.amount_base,
+                    p.id as payment_id,
+                    p.payment_uniqid,
+                    p.payment_number,
+                    p.transaction_date,
+                    p.payment_type,
+                    p.status_id,
+                    p.currency_id as payment_currency_id,
+                    COALESCE(p.currency_code, c.name) as payment_currency_code,
+                    s.name as payment_status_name,
+                    COALESCE(pt.name, p.payment_type) as payment_type_name,
+                    ai.invoice_number,
+                    ai.id as invoice_id
+                FROM tbl_payment_allocation pa
+                INNER JOIN tbl_payment p ON p.id = pa.payment_id
+                INNER JOIN ar_invoices ai ON ai.id = pa.reference_id
+                LEFT JOIN status s ON s.id = p.status_id
+                LEFT JOIN payment_type pt ON pt.id = p.payment_type_id
+                LEFT JOIN currency c ON c.id = p.currency_id
+                WHERE ai.sales_order_id = ?
+                  AND pa.alloc_type = 'invoice'
+                  AND (p.is_deleted = 0 OR p.is_deleted IS NULL)
+                  AND (p.status_id IN (1, 3, 8) OR p.status_id IS NULL)
+                  AND (p.direction = 'IN' OR p.direction IS NULL)
+                ORDER BY p.transaction_date DESC, p.id DESC
+            `, [soId]);
+            if (rows && rows.length) payments.push(...rows);
+        } catch (err) {
+            console.error('getSalesOrderPayments (tbl_payment):', err.message);
+        }
+
+        // 2) Allocations from ar_receipts
+        try {
+            const [rows] = await pool.query(`
+                SELECT
+                    ara.id,
+                    ara.allocated_amount as amount_bank,
+                    ara.allocated_amount as amount_base,
+                    ar.id as payment_id,
+                    ar.receipt_uniqid as payment_uniqid,
+                    ar.receipt_number as payment_number,
+                    ar.receipt_date as transaction_date,
+                    'RECEIPT' as payment_type,
+                    1 as status_id,
+                    ar.currency_id as payment_currency_id,
+                    COALESCE(curr.name, '') as payment_currency_code,
+                    'Posted' as payment_status_name,
+                    'Receipt' as payment_type_name,
+                    ai.invoice_number,
+                    ai.id as invoice_id
+                FROM ar_receipt_allocations ara
+                INNER JOIN ar_receipts ar ON ar.id = ara.receipt_id
+                INNER JOIN ar_invoices ai ON ai.id = ara.invoice_id
+                LEFT JOIN currency curr ON curr.id = ar.currency_id
+                WHERE ai.sales_order_id = ?
+                  AND ar.status = 'POSTED'
+                ORDER BY ar.receipt_date DESC, ar.id DESC
+            `, [soId]);
+            if (rows && rows.length) payments.push(...rows);
+        } catch (err) {
+            console.error('getSalesOrderPayments (ar_receipts):', err.message);
+        }
+
+        // Sort combined by transaction_date DESC, payment_id DESC
+        payments.sort((a, b) => {
+            const dA = a.transaction_date ? new Date(a.transaction_date).getTime() : 0;
+            const dB = b.transaction_date ? new Date(b.transaction_date).getTime() : 0;
+            if (dB !== dA) return dB - dA;
+            return (b.payment_id || 0) - (a.payment_id || 0);
+        });
+
+        res.json({ success: true, data: payments });
+    } catch (error) {
+        console.error('getSalesOrderPayments error:', error.message);
+        next(error);
+    }
+}
+
+async function getSalesOrderAdvanceReceivables(req, res, next) {
+    try {
+        const { id } = req.params;
+        const soId = parseInt(id, 10);
+        if (!soId) {
+            return res.json({ success: true, data: [] });
+        }
+        const [rows] = await pool.query(`
+            SELECT 
+                pa.id,
+                pa.amount_bank,
+                pa.amount_base,
+                p.id as payment_id,
+                p.payment_uniqid,
+                p.payment_number,
+                p.transaction_date,
+                p.payment_type,
+                p.status_id,
+                p.currency_code as payment_currency_code,
+                s.name as payment_status_name,
+                pt.name as payment_type_name,
+                pi.proforma_invoice_no,
+                pi.id as proforma_id
+            FROM tbl_payment_allocation pa
+            INNER JOIN tbl_payment p ON p.id = pa.payment_id
+            INNER JOIN proforma_invoice pi ON pi.id = pa.reference_id
+            INNER JOIN ar_invoices ai ON ai.proforma_invoice_id = pi.id AND ai.sales_order_id = ?
+            LEFT JOIN status s ON s.id = p.status_id
+            LEFT JOIN payment_type pt ON pt.id = p.payment_type_id
+            WHERE pa.alloc_type = 'advance'
+              AND (p.is_deleted = 0 OR p.is_deleted IS NULL)
+              AND p.direction = 'IN'
+            ORDER BY p.transaction_date DESC, p.id DESC
+        `, [soId]);
+        res.json({ success: true, data: rows || [] });
+    } catch (error) {
+        next(error);
+    }
+}
+
+module.exports = { listInvoices, getNextInvoiceNumber, getInvoice, getInvoiceHistory, getInvoiceTransactions, createInvoice, updateInvoice, autoAllocate, postInvoice, cancelInvoice, getAvailableBatches, changeStatus, approveInvoice, rejectInvoice, requestEdit, decideEditRequest, addAttachment, deleteAttachment, getInvoiceStockDetails, getSalesOrderPayments, getSalesOrderAdvanceReceivables };

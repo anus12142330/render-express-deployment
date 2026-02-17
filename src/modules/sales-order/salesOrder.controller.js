@@ -65,6 +65,7 @@ export const listSalesOrders = async (req, res) => {
             date_from: req.query.date_from || null,
             date_to: req.query.date_to || null,
             edit_request_status: req.query.edit_request_status || null,
+            exclude_with_ar_invoice: req.query.exclude_with_ar_invoice === '1' || req.query.exclude_with_ar_invoice === true,
             ...(filterByCreatedBy != null && { created_by: filterByCreatedBy }),
         };
 

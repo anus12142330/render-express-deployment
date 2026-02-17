@@ -43,12 +43,12 @@ const generateQCLotNumber = async (conn) => {
     const year = new Date().getFullYear().toString().slice(-2);
     const month = String(new Date().getMonth() + 1).padStart(2, '0');
     const prefix = `QC${year}${month}`;
-    
+
     const [rows] = await conn.query(
         `SELECT lot_number FROM qc_lots WHERE lot_number LIKE ? ORDER BY lot_number DESC LIMIT 1`,
         [`${prefix}%`]
     );
-    
+
     let seq = 1;
     if (rows.length > 0) {
         const lastNumber = rows[0].lot_number;
@@ -57,7 +57,7 @@ const generateQCLotNumber = async (conn) => {
             seq = parseInt(match[1], 10) + 1;
         }
     }
-    
+
     return `${prefix}${String(seq).padStart(3, '0')}`;
 };
 
@@ -69,7 +69,7 @@ const autoCreateQCLot = async (conn, shipmentId, poId, userId) => {
             'SELECT id FROM qc_lots WHERE shipment_id = ? LIMIT 1',
             [shipmentId]
         );
-        
+
         if (existing.length > 0) {
             // QC lot already exists, skip creation
             return;
@@ -155,8 +155,8 @@ const autoCreateQCLot = async (conn, shipmentId, poId, userId) => {
         const lotNumber = await generateQCLotNumber(conn);
 
         // Get container numbers (comma-separated for the lot)
-        const containerNumber = containers.length > 0 
-            ? containers.map(c => c.container_no).filter(Boolean).join(', ') 
+        const containerNumber = containers.length > 0
+            ? containers.map(c => c.container_no).filter(Boolean).join(', ')
             : null;
 
         // Insert single QC lot for this shipment
@@ -257,9 +257,9 @@ const recordStageHistory = async (connLike, {
 };
 
 const ensureAllocationTable = async (conn) => {
-   
+
     // Ensure legacy tables have new columns / indexes
-    
+
     await conn.query(`
         UPDATE shipment_po_item_allocation spia
         JOIN shipment s ON spia.shipment_id = s.id
@@ -357,26 +357,26 @@ const upsertShipmentPoAllocations = async (conn, {
             : (existingRemainingMap.get(poItemId) ?? Math.max(Number(remainingCalcBase.toFixed(4)), 0));
         const productId = allocation.product_id ? Number(allocation.product_id) : (poItem.product_id ? Number(poItem.product_id) : null);
 
-    const insertValues = [
-        shipmentId,
-        poId,
-        poItemId,
-        productId,
-        nextPlanned,
-        nextAllocated,
-        nextLoaded,
-        remainingGlobal,
-        allocationMode === 'full' ? 'full' : 'partial',
-        userId || null,
-        userId || null
-    ];
+        const insertValues = [
+            shipmentId,
+            poId,
+            poItemId,
+            productId,
+            nextPlanned,
+            nextAllocated,
+            nextLoaded,
+            remainingGlobal,
+            allocationMode === 'full' ? 'full' : 'partial',
+            userId || null,
+            userId || null
+        ];
 
         const updateClauses = [];
         if (updatePlannedQuantity) {
             updateClauses.push('planned_quantity = VALUES(planned_quantity)');
         }
-    updateClauses.push('po_id = VALUES(po_id)');
-    if (updateAllocatedQuantity) {
+        updateClauses.push('po_id = VALUES(po_id)');
+        if (updateAllocatedQuantity) {
             updateClauses.push('allocated_quantity = VALUES(allocated_quantity)');
             updateClauses.push('remaining_quantity = GREATEST(VALUES(remaining_quantity), 0)');
         }
@@ -926,8 +926,8 @@ router.get("/board", async (req, res) => {
                     container_no: row.container_no,
                     return_date_raw: row.return_date_raw,
                     return_date_formatted: row.return_date_formatted,
-                        dt_to_town_date_raw: row.dt_to_town_date_raw,
-                        dt_to_town_date_formatted: row.dt_to_town_date_formatted,
+                    dt_to_town_date_raw: row.dt_to_town_date_raw,
+                    dt_to_town_date_formatted: row.dt_to_town_date_formatted,
                     to_town_date_raw: row.to_town_date_raw,
                     to_town_date_formatted: row.to_town_date_formatted,
                     attachment_count: Number(row.attachment_count || 0)
@@ -1102,9 +1102,9 @@ router.get("/received-calendar", async (req, res) => {
             // Fallback for Range 1: Discharge Date
             // If Dubai Trade doesn't have discharge_date, use ETA/Sailing date from Sailed stage (stage 4)
             if (!dischargeDate && Number(row.stage_id) >= 4) {
-                dischargeDate = safeDateParse(row.sailing_date_raw) || 
-                                safeDateParse(row.eta_date_raw) || 
-                                safeDateParse(row.confirm_arrival_date_raw);
+                dischargeDate = safeDateParse(row.sailing_date_raw) ||
+                    safeDateParse(row.eta_date_raw) ||
+                    safeDateParse(row.confirm_arrival_date_raw);
             }
 
             // Fallback for Range 1 & 2: To Town Date
@@ -1112,7 +1112,7 @@ router.get("/received-calendar", async (req, res) => {
             // Then check container return table for return_to_town_date_raw
             if (!toTownDate && Number(row.stage_id) >= 5) {
                 toTownDate = safeDateParse(row.cleared_date_raw);
-                
+
                 if (!toTownDate && returnDatesByShipment[row.shipment_id]) {
                     const returnData = returnDatesByShipment[row.shipment_id][0];
                     toTownDate = safeDateParse(returnData?.return_to_town_date_raw);
@@ -1284,9 +1284,9 @@ router.get("/inhand-calendar", async (req, res) => {
             // Fallback for Range 1: Discharge Date
             // If Dubai Trade doesn't have discharge_date, use ETA/Sailing date from Sailed stage (stage 4)
             if (!dischargeDate && Number(row.stage_id) >= 4) {
-                dischargeDate = safeDateParse(row.sailing_date_raw) || 
-                                safeDateParse(row.eta_date_raw) || 
-                                safeDateParse(row.confirm_arrival_date_raw);
+                dischargeDate = safeDateParse(row.sailing_date_raw) ||
+                    safeDateParse(row.eta_date_raw) ||
+                    safeDateParse(row.confirm_arrival_date_raw);
             }
 
             // Fallback for Range 1 & 2: To Town Date
@@ -1294,7 +1294,7 @@ router.get("/inhand-calendar", async (req, res) => {
             // Then check container return table for return_to_town_date_raw
             if (!toTownDate && Number(row.stage_id) >= 5) {
                 toTownDate = safeDateParse(row.cleared_date_raw);
-                
+
                 if (!toTownDate && returnDatesByShipment[row.shipment_id]) {
                     const returnData = returnDatesByShipment[row.shipment_id][0];
                     toTownDate = safeDateParse(returnData?.return_to_town_date_raw);
@@ -1507,7 +1507,7 @@ router.get("/:shipUniqid", async (req, res) => {
        JOIN document_type dt ON dt.id = spd.document_type_id
         WHERE spd.shipment_id = ?
     `, [row.id]);
-    
+
     // Also fetch PO items
     const [poItems] = await db.promise().query(`
         SELECT 
@@ -1544,7 +1544,7 @@ router.get("/:shipUniqid", async (req, res) => {
         WHERE i.purchase_order_id = ?
         ORDER BY i.id ASC
     `, [row.id, row.id, row.po_id, row.po_id]);
-    
+
     // Also fetch container details if they exist
     const [containers] = await db.promise().query(`
         SELECT sc.*, dtcs.last_fetched_at, dtcs.discharge_date AS scraped_discharge_date, dtcs.location AS scraped_discharge_port
@@ -1552,7 +1552,7 @@ router.get("/:shipUniqid", async (req, res) => {
         LEFT JOIN dubai_trade_container_status dtcs ON sc.container_no = dtcs.container_no AND sc.shipment_id = dtcs.shipment_id
         WHERE sc.shipment_id = ?
     `, [row.id]);
-    
+
     if (containers.length > 0) {
         const containerIds = containers.map(c => c.id);
         const [images] = await db.promise().query(`SELECT * FROM shipment_container_file WHERE container_id IN (?)`, [containerIds]);
@@ -1572,7 +1572,7 @@ router.get("/:shipUniqid", async (req, res) => {
                     ORDER BY pd.id ASC LIMIT 1) as grade_and_size_code
             FROM shipment_container_item sci WHERE container_id IN (?) ORDER BY id ASC
         `, [containerIds]);
-    
+
         const imagesByContainer = images.reduce((acc, img) => {
             if (!acc[img.container_id]) acc[img.container_id] = [];
             acc[img.container_id].push(img);
@@ -1665,14 +1665,14 @@ router.get("/:shipUniqid", async (req, res) => {
             c.dubai_trade_moves = movesByContainer[c.id] || [];
         });
     }
-    
+
     // Fetch common files for the shipment (from shipment_file table)
     const [shipmentFiles] = await db.promise().query(`
         SELECT sf.*, dt.name as document_type_name, dt.code as document_type_code, sf.is_draft
         FROM shipment_file sf
         JOIN document_type dt ON dt.id = sf.document_type_id
         WHERE sf.shipment_id = ?`, [row.id]);
-    
+
     // Fetch files attached to the original Purchase Order (from purchase_order_attachments table)
     const [poAttachments] = await db.promise().query(`
         SELECT id, file_name, file_path, mime_type, size_bytes, created_at
@@ -1681,7 +1681,7 @@ router.get("/:shipUniqid", async (req, res) => {
 
     // Combine both sets of files into one `commonFiles` array for the frontend
     const allFiles = [...(shipmentFiles || []), ...(poAttachments || []).map(f => ({ ...f, document_type_code: 'po_document' }))];
-    
+
     // Fetch additional products
     const [additionalProducts] = await db.promise().query(`
         SELECT sap.id, sap.product_id, p.product_name, p.hscode,
@@ -1719,7 +1719,7 @@ router.get("/:shipUniqid", async (req, res) => {
         WHERE sap.shipment_id = ?
         ORDER BY sap.id ASC
     `, [row.id]);
-    
+
     res.json({ ...row, po_items: poItems || [], containers: containers || [], commonFiles: allFiles, po_documents: poDocuments || [], additional_products: additionalProducts || [] });
 });
 
@@ -1814,7 +1814,7 @@ router.put("/:shipUniqid/planned-details", upload.none(), async (req, res) => {
             const poDocValues = poDocumentsParsed
                 .filter(doc => doc.document_type_id && !isNaN(Number(doc.document_type_id)) && Number(doc.document_type_id) > 0)
                 .map(doc => [oldShipment.id, doc.document_type_id, null]);
-            
+
             if (poDocValues.length > 0) {
                 await connection.query(
                     'INSERT INTO shipment_po_document (shipment_id, document_type_id, document_name) VALUES ?',
@@ -1831,7 +1831,7 @@ router.put("/:shipUniqid/planned-details", upload.none(), async (req, res) => {
                 const productValues = additionalProductsParsed
                     .filter(prod => prod.product_id && !isNaN(Number(prod.product_id)) && Number(prod.product_id) > 0)
                     .map(prod => [oldShipment.id, Number(prod.product_id)]);
-                
+
                 if (productValues.length > 0) {
                     await connection.query(
                         'INSERT INTO shipment_additional_product (shipment_id, product_id) VALUES ?',
@@ -1928,7 +1928,7 @@ router.post("/:shipUniqid/logs/mark-as-read", async (req, res) => {
         [shipment.id, userId, last_log_id]
     );
     res.json({ ok: true });
-      
+
 });
 
 /* ---------- fetch purchase order allocations for a shipment ---------- */
@@ -2165,7 +2165,7 @@ router.put("/:shipUniqid/update", async (req, res) => {
             `UPDATE shipment
           SET vessel_name=?, etd_date=?, eta_date=?, sailing_date=?, is_transhipment=?
         WHERE id=?`,
-            [vessel_name, etd_date, eta_date, sailed_date, Number(is_transhipment)?1:0, sh.shipment_id]
+            [vessel_name, etd_date, eta_date, sailed_date, Number(is_transhipment) ? 1 : 0, sh.shipment_id]
         );
 
         // refresh transshipment ports
@@ -2246,17 +2246,17 @@ router.put("/:shipUniqid/move", async (req, res) => {
 
         const fromStageId = Number(row.shipment_stage_id || 0);
         if (toStageId === fromStageId) {
-          // If the user is trying to "move" to the same stage, it's an edit.
-          // We just process field updates without changing the stage or logging a stage change.
-          // The frontend will close the modal, so we just return success.
-          return res.json({ ok: true, updated: { from_stage_id: fromStageId, message: "Details updated for the current stage." } });
+            // If the user is trying to "move" to the same stage, it's an edit.
+            // We just process field updates without changing the stage or logging a stage change.
+            // The frontend will close the modal, so we just return success.
+            return res.json({ ok: true, updated: { from_stage_id: fromStageId, message: "Details updated for the current stage." } });
         }
-         // Disallow backwards
+        // Disallow backwards
         if (toStageId < fromStageId) { return res.status(400).json({ error: { message: "Cannot move backwards" } }); }
-         // Enforce one-at-a-time forward
-             if (toStageId > fromStageId + 1) {
-               return res.status(400).json({ error: { message: "Only forward one stage is allowed" } });
-             }
+        // Enforce one-at-a-time forward
+        if (toStageId > fromStageId + 1) {
+            return res.status(400).json({ error: { message: "Only forward one stage is allowed" } });
+        }
 
         // apply stage-specific field updates
         if (toStageId === 2) { // Planned
@@ -2266,55 +2266,55 @@ router.put("/:shipUniqid/move", async (req, res) => {
                 [planned_sailing_date || null, planned_arrival_date || null, vessel_name || null, row.shipment_id]
             );
 
-        }  else if (toStageId === 3) { // Sailed
-        const { sailed_date, confirm_sailing_date, reason_diff_sailing } = fields;
+        } else if (toStageId === 3) { // Sailed
+            const { sailed_date, confirm_sailing_date, reason_diff_sailing } = fields;
 
-        // fetch current confirm date
-        const [[curr]] = await db.promise().query(
-            `SELECT confirm_sailing_date FROM shipment WHERE id=? LIMIT 1`,
-            [row.shipment_id]
-        );
-        const existingConfirm = curr?.confirm_sailing_date || null;
-
-        // set confirm date if not set yet
-        if (!existingConfirm && confirm_sailing_date) {
-            await db.promise().query(
-                `UPDATE shipment SET confirm_sailing_date=? WHERE id=?`,
-                [confirm_sailing_date, row.shipment_id]
+            // fetch current confirm date
+            const [[curr]] = await db.promise().query(
+                `SELECT confirm_sailing_date FROM shipment WHERE id=? LIMIT 1`,
+                [row.shipment_id]
             );
-        }
+            const existingConfirm = curr?.confirm_sailing_date || null;
 
-        // use the value that should be considered the confirm date now
-        const effectiveConfirm = existingConfirm || confirm_sailing_date || null;
-
-        if (sailed_date && effectiveConfirm && sailed_date === effectiveConfirm) {
-            // sailed matches confirm → set actual sailing_date, clear reason
-            await db.promise().query(
-                `UPDATE shipment SET sailing_date=?, reason_diff_sailing=NULL WHERE id=?`,
-                [sailed_date, row.shipment_id]
-            );
-        } else if (sailed_date && effectiveConfirm && sailed_date !== effectiveConfirm) {
-            // sailed differs from confirm → require and SAVE reason, do not change sailing_date
-            if (!reason_diff_sailing || !String(reason_diff_sailing).trim()) {
-                return res.status(400).json(
-                    errPayload("Reason required when Sailed Date differs from Confirm Sailing Date")
+            // set confirm date if not set yet
+            if (!existingConfirm && confirm_sailing_date) {
+                await db.promise().query(
+                    `UPDATE shipment SET confirm_sailing_date=? WHERE id=?`,
+                    [confirm_sailing_date, row.shipment_id]
                 );
             }
-            await db.promise().query(
-                `UPDATE shipment SET reason_diff_sailing=? WHERE id=?`,
-                [String(reason_diff_sailing).trim(), row.shipment_id]
-            );
-        } else {
-            // No sailed date or no confirm date to compare; if a reason was provided, persist it
-            if (reason_diff_sailing && String(reason_diff_sailing).trim()) {
+
+            // use the value that should be considered the confirm date now
+            const effectiveConfirm = existingConfirm || confirm_sailing_date || null;
+
+            if (sailed_date && effectiveConfirm && sailed_date === effectiveConfirm) {
+                // sailed matches confirm → set actual sailing_date, clear reason
+                await db.promise().query(
+                    `UPDATE shipment SET sailing_date=?, reason_diff_sailing=NULL WHERE id=?`,
+                    [sailed_date, row.shipment_id]
+                );
+            } else if (sailed_date && effectiveConfirm && sailed_date !== effectiveConfirm) {
+                // sailed differs from confirm → require and SAVE reason, do not change sailing_date
+                if (!reason_diff_sailing || !String(reason_diff_sailing).trim()) {
+                    return res.status(400).json(
+                        errPayload("Reason required when Sailed Date differs from Confirm Sailing Date")
+                    );
+                }
                 await db.promise().query(
                     `UPDATE shipment SET reason_diff_sailing=? WHERE id=?`,
                     [String(reason_diff_sailing).trim(), row.shipment_id]
                 );
+            } else {
+                // No sailed date or no confirm date to compare; if a reason was provided, persist it
+                if (reason_diff_sailing && String(reason_diff_sailing).trim()) {
+                    await db.promise().query(
+                        `UPDATE shipment SET reason_diff_sailing=? WHERE id=?`,
+                        [String(reason_diff_sailing).trim(), row.shipment_id]
+                    );
+                }
             }
         }
-    }
-    else if (toStageId === 4) { // Discharge
+        else if (toStageId === 4) { // Discharge
             const { discharge_date } = fields;
             if (!discharge_date) {
                 return res.status(400).json(errPayload("Discharge Date is required"));
@@ -2400,8 +2400,8 @@ router.put("/:shipUniqid/move", async (req, res) => {
                 `UPDATE shipment SET cleared_date=? WHERE id=?`,
                 [cleared_date, row.shipment_id]
             );
-        }else if (toStageId === 6) { // Returned
-            const {eir_no, token_no, transportation_charges, returned_date} = fields;
+        } else if (toStageId === 6) { // Returned
+            const { eir_no, token_no, transportation_charges, returned_date } = fields;
 
             if (!eir_no) return res.status(400).json(errPayload("EIR No is required"));
             if (!token_no) return res.status(400).json(errPayload("Token No is required"));
@@ -2412,7 +2412,7 @@ router.put("/:shipUniqid/move", async (req, res) => {
             }
 
             // Require all Stage-6 required docs (with ref_no & ref_date)
-            const missing = await getMissingRequiredDocs(row.shipment_id, 6, {requireMeta: true});
+            const missing = await getMissingRequiredDocs(row.shipment_id, 6, { requireMeta: true });
             if (missing.length) {
                 return res.status(400).json(
                     errPayload(`Attach required documents before Returned: ${missing.join(", ")}`)
@@ -2474,7 +2474,7 @@ router.post("/:shipUniqid/upload", upload.array("files", 20), async (req, res) =
     try {
         const shipUniqid = req.params.shipUniqid;
         const docTypeId = Number(req.body.document_type_id || 0) || null;
-        const refNo   = req.body.ref_no || null;
+        const refNo = req.body.ref_no || null;
         const refDate = req.body.ref_date || null;
         const userId = req.session?.user?.id;
         const userName = req.session?.user?.name || 'System';
@@ -2589,7 +2589,7 @@ router.post("/create-from-po", upload.none(), async (req, res) => {
             const poDocValues = poDocumentsParsed
                 .filter(doc => doc.document_type_id && !isNaN(Number(doc.document_type_id)) && Number(doc.document_type_id) > 0)
                 .map(doc => [shipmentId, doc.document_type_id, null]);
-            
+
             if (poDocValues.length > 0) {
                 await connection.query(
                     'INSERT INTO shipment_po_document (shipment_id, document_type_id, document_name) VALUES ?',
@@ -2606,7 +2606,7 @@ router.post("/create-from-po", upload.none(), async (req, res) => {
                 const productValues = additionalProductsParsed
                     .filter(prod => prod.product_id && !isNaN(Number(prod.product_id)) && Number(prod.product_id) > 0)
                     .map(prod => [shipmentId, Number(prod.product_id)]);
-                
+
                 if (productValues.length > 0) {
                     await connection.query(
                         'INSERT INTO shipment_additional_product (shipment_id, product_id) VALUES ?',
@@ -2697,7 +2697,7 @@ router.post("/:shipUniqid/split-shipment", async (req, res) => {
 
         // 2. Create the new shipment record for the partial shipment
         const newShipUniqid = crypto.randomBytes(8).toString('hex');
-       const [shipResult] = await conn.query(
+        const [shipResult] = await conn.query(
             `INSERT INTO shipment (
                 po_id, ship_uniqid, vendor_id, shipment_stage_id,
                 containers_back_to_back, containers_stock_sales, no_containers, lot_number, total_lots,
@@ -2705,7 +2705,7 @@ router.post("/:shipUniqid/split-shipment", async (req, res) => {
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
                 originalShipment.po_id, newShipUniqid, originalShipment.vendor_id, 3, // New shipment starts at Stage 3 (Underloading)
-               b2bCount, ssCount, totalMoving, newLotNumber, 1, // Default total_lots to 1, will be updated by recalculate
+                b2bCount, ssCount, totalMoving, newLotNumber, 1, // Default total_lots to 1, will be updated by recalculate
                 userId, originalShipment.id
             ]
         );
@@ -2737,8 +2737,8 @@ router.post("/:shipUniqid/split-shipment", async (req, res) => {
             ]
         );
 
-         // 4. Copy existing shipment_po_document entries to the new shipment
-         const [existingPoDocuments] = await conn.query(
+        // 4. Copy existing shipment_po_document entries to the new shipment
+        const [existingPoDocuments] = await conn.query(
             `SELECT document_type_id FROM shipment_po_document WHERE shipment_id = ?`,
             [originalShipment.id]
         );
@@ -2832,7 +2832,7 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
     const files = req.files || [];
     const userId = req.session?.user?.id;
     const userName = req.session?.user?.name || 'System';
-    
+
     const conn = await db.promise().getConnection();
     try {
         await conn.beginTransaction();
@@ -2848,7 +2848,7 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
 
         const [[commonDocType]] = await conn.query(`SELECT id FROM document_type WHERE code = 'underloading_common_photo' LIMIT 1`);
 
-         const keptCommonImages = JSON.parse(keptCommonImagesJson || '[]');
+        const keptCommonImages = JSON.parse(keptCommonImagesJson || '[]');
 
         // --- Handle Image Deletions (if editing) ---
         if (isEditing) {
@@ -2883,7 +2883,7 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
                 const isImage = file.mimetype && file.mimetype.startsWith('image/');
                 const isVideo = file.mimetype && file.mimetype.startsWith('video/');
                 let thumbPath = null;
-                
+
                 if (isImage) {
                     // Generate thumbnail for images only
                     const thumbName = `thumb_${path.basename(file.path)}`;
@@ -2894,7 +2894,7 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
                     // For videos, use the video file itself as thumbnail (or null)
                     thumbPath = null;
                 }
-                
+
                 const originalPath = path.posix.join("uploads", "shipment", path.basename(file.path));
                 await conn.query(
                     `INSERT INTO shipment_file (shipment_id, document_type_id, file_name, file_path, thumbnail_path, mime_type, size_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -2913,7 +2913,7 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
         }
         const changes = [];
 
-       
+
 
         for (const container of containers) {
             let containerId;
@@ -2950,7 +2950,7 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
                 const isImage = file.mimetype && file.mimetype.startsWith('image/');
                 const isVideo = file.mimetype && file.mimetype.startsWith('video/');
                 let thumbPath = null;
-                
+
                 if (isImage) {
                     // Generate thumbnail for images only
                     const thumbName = `thumb_${path.basename(file.path)}`;
@@ -3216,7 +3216,7 @@ router.post("/:shipUniqid/underloading-air", upload.any(), async (req, res) => {
                 const isImage = file.mimetype && file.mimetype.startsWith('image/');
                 const isVideo = file.mimetype && file.mimetype.startsWith('video/');
                 let thumbPath = null;
-                
+
                 if (isImage) {
                     // Generate thumbnail for images only
                     const thumbName = `thumb_${path.basename(file.path)}`;
@@ -3227,7 +3227,7 @@ router.post("/:shipUniqid/underloading-air", upload.any(), async (req, res) => {
                     // For videos, use null for thumbnail
                     thumbPath = null;
                 }
-                
+
                 const originalPath = path.posix.join("uploads", "shipment", path.basename(file.path));
                 await conn.query(
                     `INSERT INTO shipment_file (shipment_id, document_type_id, file_name, file_path, thumbnail_path, mime_type, size_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -3381,11 +3381,11 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
     const conn = await db.promise().getConnection();
 
     try {
-        await conn.beginTransaction();        
+        await conn.beginTransaction();
 
         const {
             confirm_sailing_date, confirm_departure_time, confirm_vessel_name, confirm_eta_date, bl_no, confirm_shipping_line, confirm_discharge_port_agent,
-            confirm_airway_bill_no, confirm_flight_no, confirm_airline, confirm_arrival_date, confirm_arrival_time, 
+            confirm_airway_bill_no, confirm_flight_no, confirm_airline, confirm_arrival_date, confirm_arrival_time,
             confirm_free_time,
             // New: linked AP purchase bill (ap_bills.id)
             purchase_bill_id,
@@ -3561,12 +3561,12 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
                     purchase_bill_id = ?,
                     supplier_logger_installed = ?,
                     logger_count = ?
-                 WHERE id = ?`, 
+                 WHERE id = ?`,
                 [
                     confirm_sailing_date,
                     (confirm_departure_time && confirm_departure_time.trim() !== '') ? confirm_departure_time : null,
-                    confirm_airway_bill_no, confirm_flight_no, confirm_airline, 
-                    confirm_arrival_date, (confirm_arrival_time && confirm_arrival_time.trim() !== '') ? confirm_arrival_time : null, 
+                    confirm_airway_bill_no, confirm_flight_no, confirm_airline,
+                    confirm_arrival_date, (confirm_arrival_time && confirm_arrival_time.trim() !== '') ? confirm_arrival_time : null,
                     is_mofa_required === '1' ? 1 : 0,
                     original_doc_receipt_mode || null, doc_receipt_person_name || null, doc_receipt_person_contact || null,
                     doc_receipt_courier_no || null, doc_receipt_courier_company || null, doc_receipt_tracking_link || null,
@@ -3589,11 +3589,11 @@ router.post("/:shipUniqid/sail", upload.any(), async (req, res) => {
                     purchase_bill_id = ?,
                     supplier_logger_installed = ?,
                     logger_count = ?
-                 WHERE id = ?`, 
+                 WHERE id = ?`,
                 [
                     confirm_sailing_date,
                     confirm_vessel_name, confirm_eta_date,
-                    bl_no, confirm_shipping_line, confirm_discharge_port_agent, 
+                    bl_no, confirm_shipping_line, confirm_discharge_port_agent,
                     confirm_free_time ? parseInt(confirm_free_time, 10) : null,
                     is_mofa_required === '1' ? 1 : 0,
                     original_doc_receipt_mode || null, doc_receipt_person_name || null, doc_receipt_person_contact || null,
@@ -3732,8 +3732,16 @@ router.post("/:shipUniqid/transition/cleared", clearedUploads, async (req, res) 
             transporter_name,
             hauler_code,
             transport_from_place,
-            transport_to_place
+            transport_to_place,
+            kept_main_file_ids: keptMainFileIdsRaw
         } = req.body;
+
+        let keptMainFileIds = [];
+        try {
+            keptMainFileIds = JSON.parse(keptMainFileIdsRaw || '[]');
+        } catch {
+            keptMainFileIds = [];
+        }
 
         let containerReturnsPayload = [];
         try {
@@ -3786,6 +3794,22 @@ router.post("/:shipUniqid/transition/cleared", clearedUploads, async (req, res) 
             acc[dt.code] = dt.id;
             return acc;
         }, {});
+
+        // --- 2a. Remove deleted files (that were not kept) ---
+        const managedDocTypeIds = Object.values(docTypeIdLookup).filter(Boolean);
+        if (managedDocTypeIds.length > 0) {
+            if (keptMainFileIds.length > 0) {
+                await conn.query(
+                    `DELETE FROM shipment_file WHERE shipment_id = ? AND document_type_id IN (?) AND id NOT IN (?)`,
+                    [shipment.id, managedDocTypeIds, keptMainFileIds]
+                );
+            } else {
+                await conn.query(
+                    `DELETE FROM shipment_file WHERE shipment_id = ? AND document_type_id IN (?)`,
+                    [shipment.id, managedDocTypeIds]
+                );
+            }
+        }
 
         for (const [fieldName, files] of Object.entries(filesByField)) {
             const docTypeCode = docTypeMap[fieldName];
@@ -3986,10 +4010,10 @@ router.post("/:shipUniqid/transition/cleared", clearedUploads, async (req, res) 
             : "Cleared details saved. Upload pending items before moving to Cleared.";
 
         await conn.commit();
-        res.json({ 
-            ok: true, 
-            shipUniqid, 
-            toStageId: toStageId, 
+        res.json({
+            ok: true,
+            shipUniqid,
+            toStageId: toStageId,
             transitioned: canTransition && fromStageId === 4,
             updated: { from_stage_id: fromStageId },
             missingRequirements,
@@ -4395,68 +4419,68 @@ router.post("/:shipUniqid/recalculate-lots", async (req, res) => {
 
 /* ---------- Get Dubai Trade Container Status (Scraping) ---------- */
 router.get("/dubai-trade-status/:containerNo", async (req, res) => {
-     const pool = db.promise();
-  const containerNo = (req.params.containerNo || '').trim().toUpperCase();
-  const shipmentContainerId = Number(req.query.scId || 0) || null;     // REQUIRED for cache key
-  const shipmentId = Number(req.query.shipmentId || 0) || null;        // for bookkeeping
-  const forceLive = req.query.forceLive === 'true';                    // Force live fetch, skip cache
+    const pool = db.promise();
+    const containerNo = (req.params.containerNo || '').trim().toUpperCase();
+    const shipmentContainerId = Number(req.query.scId || 0) || null;     // REQUIRED for cache key
+    const shipmentId = Number(req.query.shipmentId || 0) || null;        // for bookkeeping
+    const forceLive = req.query.forceLive === 'true';                    // Force live fetch, skip cache
 
-  if (!containerNo) return res.status(400).json({ ok: false, error: 'Container number is required.' });
-  if (!shipmentContainerId) return res.status(400).json({ ok: false, error: 'scId (shipment_container_id) is required.' });
+    if (!containerNo) return res.status(400).json({ ok: false, error: 'Container number is required.' });
+    if (!shipmentContainerId) return res.status(400).json({ ok: false, error: 'scId (shipment_container_id) is required.' });
 
-  try {
-    // 1) Try cache (within last 3 hours) - skip if forceLive is true
-    if (!forceLive) {
-      const [[cached]] = await pool.query(
-        `SELECT raw_data, last_fetched_at
+    try {
+        // 1) Try cache (within last 3 hours) - skip if forceLive is true
+        if (!forceLive) {
+            const [[cached]] = await pool.query(
+                `SELECT raw_data, last_fetched_at
            FROM dubai_trade_container_status
           WHERE container_no = ? AND shipment_container_id = ?
           ORDER BY last_fetched_at DESC
           LIMIT 1`,
-        [containerNo, shipmentContainerId]
-      );
+                [containerNo, shipmentContainerId]
+            );
 
-      // Use minutes for a more precise time comparison to avoid timezone-related issues.
-      const minutesSinceLastFetch = cached ? dayjs().diff(dayjs(cached.last_fetched_at), 'minute') : Infinity;
+            // Use minutes for a more precise time comparison to avoid timezone-related issues.
+            const minutesSinceLastFetch = cached ? dayjs().diff(dayjs(cached.last_fetched_at), 'minute') : Infinity;
 
-      if (cached && minutesSinceLastFetch < 180) { // 180 minutes = 3 hours
-        console.log(`[API] Serving cached Dubai Trade data for container: ${containerNo}`);
-        const payload = JSON.parse(cached.raw_data || '{}');
+            if (cached && minutesSinceLastFetch < 180) { // 180 minutes = 3 hours
+                console.log(`[API] Serving cached Dubai Trade data for container: ${containerNo}`);
+                const payload = JSON.parse(cached.raw_data || '{}');
+                return res.json({
+                    ok: true,
+                    source: 'cache',
+                    lastFetchedAt: cached.last_fetched_at,
+                    data: payload,
+                });
+            }
+        }
+
+        // 2) Cache miss or forceLive -> fetch live
+        if (forceLive) {
+            console.log(`[API] Force live fetch requested for container: ${containerNo}`);
+        } else {
+            console.log(`[API] Cache miss, fetching live data for container: ${containerNo}`);
+        }
+        const live = await fetchContainerDataFromDubaiTrade(containerNo);
+        if (!live || !live.containerNumber) {
+            return res.status(502).json({ ok: false, error: 'Failed to fetch from Dubai Trade.' });
+        }
+
+        // 3) Upsert
+        // Use the centralized save function to ensure consistency with the cron job
+        await saveOrUpdateContainerData(pool, containerNo, live, shipmentId, shipmentContainerId);
+
+        console.log(`[API] Successfully fetched live data for container: ${containerNo}`);
         return res.json({
-          ok: true,
-          source: 'cache',
-          lastFetchedAt: cached.last_fetched_at,
-          data: payload,
+            ok: true,
+            source: 'live',
+            lastFetchedAt: dayjs().tz(process.env.TZ || 'Asia/Dubai').format('YYYY-MM-DD HH:mm:ss'),
+            data: live,
         });
-      }
+    } catch (err) {
+        console.error('DubaiTrade status error:', err);
+        return res.status(500).json({ ok: false, error: 'Internal error' });
     }
-
-    // 2) Cache miss or forceLive -> fetch live
-    if (forceLive) {
-      console.log(`[API] Force live fetch requested for container: ${containerNo}`);
-    } else {
-      console.log(`[API] Cache miss, fetching live data for container: ${containerNo}`);
-    }
-    const live = await fetchContainerDataFromDubaiTrade(containerNo);
-    if (!live || !live.containerNumber) {
-      return res.status(502).json({ ok: false, error: 'Failed to fetch from Dubai Trade.' });
-    }
-
-    // 3) Upsert
-    // Use the centralized save function to ensure consistency with the cron job
-    await saveOrUpdateContainerData(pool, containerNo, live, shipmentId, shipmentContainerId);
-
-    console.log(`[API] Successfully fetched live data for container: ${containerNo}`);
-    return res.json({
-      ok: true,
-      source: 'live',
-      lastFetchedAt: dayjs().tz(process.env.TZ || 'Asia/Dubai').format('YYYY-MM-DD HH:mm:ss'),
-      data: live,
-    });
-  } catch (err) {
-    console.error('DubaiTrade status error:', err);
-    return res.status(500).json({ ok: false, error: 'Internal error' });
-  }
 });
 
 export default router;

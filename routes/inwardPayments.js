@@ -110,18 +110,18 @@ const generatePaymentNumber = async (conn) => {
     WHERE payment_number LIKE 'PAY-IN-%' AND direction = 'IN'
     ORDER BY payment_number DESC LIMIT 1
   `);
-  
+
   if (rows.length === 0) {
     return 'PAY-IN-000001';
   }
-  
+
   const lastNumber = rows[0].payment_number;
   const match = lastNumber.match(/PAY-IN-(\d+)/);
   if (match) {
     const num = parseInt(match[1], 10) + 1;
     return `PAY-IN-${String(num).padStart(6, '0')}`;
   }
-  
+
   return 'PAY-IN-000001';
 };
 
@@ -131,7 +131,7 @@ router.get('/payments/customers/search', requireAuth, async (req, res) => {
   try {
     const { q = '' } = req.query;
     const searchTerm = `%${q}%`;
-    
+
     let query = `
       SELECT 
         v.id,
@@ -147,16 +147,16 @@ router.get('/payments/customers/search', requireAuth, async (req, res) => {
         AND v.is_deleted = 0
     `;
     const params = [];
-    
+
     if (q && q.trim()) {
       query += ` AND (v.display_name LIKE ? OR v.company_name LIKE ?)`;
       params.push(searchTerm, searchTerm);
     }
-    
+
     query += ` ORDER BY v.display_name ASC LIMIT 50`;
-    
+
     const [customers] = await db.promise().query(query, params);
-    
+
     res.json(customers || []);
   } catch (e) {
     console.error('Error searching customers:', e);
@@ -171,7 +171,7 @@ router.get('/payments/customer/:id/open-invoices', requireAuth, async (req, res)
   try {
     const { id } = req.params;
     const { currency_id } = req.query;
-    
+
     // Build WHERE clause - filter by currency if provided
     let currencyFilter = '';
     const params = [id];
@@ -179,7 +179,7 @@ router.get('/payments/customer/:id/open-invoices', requireAuth, async (req, res)
       currencyFilter = ' AND ai.currency_id = ?';
       params.push(parseInt(currency_id));
     }
-    
+
     // Calculate outstanding amount for each invoice
     // Use amount_bank (payment currency) when payment currency matches invoice currency
     // Check if invoice_id column exists, otherwise use alloc_type and reference_id
@@ -192,6 +192,9 @@ router.get('/payments/customer/:id/open-invoices', requireAuth, async (req, res)
         ai.total,
         ai.currency_id,
         c.name AS currency_code,
+        ai.sales_order_id,
+        ai.sales_order_number,
+        so.order_no AS sales_order_no,
         COALESCE(
           (SELECT SUM(
             CASE 
@@ -222,13 +225,14 @@ router.get('/payments/customer/:id/open-invoices', requireAuth, async (req, res)
         )) as outstanding_amount
       FROM ar_invoices ai
       LEFT JOIN currency c ON c.id = ai.currency_id
+      LEFT JOIN sales_orders so ON so.id = ai.sales_order_id
       WHERE ai.customer_id = ? 
         AND ai.status_id = 1
         ${currencyFilter}
       HAVING outstanding_amount > 0.01
       ORDER BY ai.invoice_date ASC
     `, params);
-    
+
     // Update open_balance fields in ar_invoices table for each invoice
     for (const invoice of invoices) {
       await conn.query(`
@@ -237,7 +241,7 @@ router.get('/payments/customer/:id/open-invoices', requireAuth, async (req, res)
         WHERE id = ?
       `, [invoice.outstanding_amount, invoice.id]);
     }
-    
+
     res.json(invoices || []);
   } catch (e) {
     console.error('Error fetching open invoices:', e);
@@ -253,25 +257,30 @@ router.get('/payments/inward', requireAuth, async (req, res) => {
     const { page = 1, per_page = 25, search = '', status_id, edit_request_status } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(per_page);
     const searchTerm = `%${search}%`;
-    
+
     let whereClause = "WHERE p.direction = 'IN' AND p.party_type = 'CUSTOMER' AND (p.is_deleted = 0 OR p.is_deleted IS NULL)";
     const params = [];
-    
+
     if (search) {
       whereClause += " AND (p.payment_number LIKE ? OR p.cheque_no LIKE ? OR p.tt_ref_no LIKE ? OR v.display_name LIKE ?)";
       params.push(searchTerm, searchTerm, searchTerm, searchTerm);
     }
-    
+
     if (status_id) {
       whereClause += " AND p.status_id = ?";
       params.push(parseInt(status_id, 10));
     }
-    
+
     if (edit_request_status !== undefined && edit_request_status !== null) {
       whereClause += " AND p.edit_request_status = ?";
       params.push(parseInt(edit_request_status, 10));
     }
-    
+
+    if (req.query.created_by) {
+      whereClause += " AND p.created_by = ?";
+      params.push(parseInt(req.query.created_by, 10));
+    }
+
     const [rows] = await db.promise().query(`
       SELECT 
         p.*,
@@ -299,14 +308,14 @@ router.get('/payments/inward', requireAuth, async (req, res) => {
       ORDER BY p.transaction_date DESC, p.id DESC
       LIMIT ? OFFSET ?
     `, [...params, parseInt(per_page), offset]);
-    
+
     const [countRows] = await db.promise().query(`
       SELECT COUNT(*) AS total
       FROM tbl_payment p
       LEFT JOIN vendor v ON v.id = p.party_id
       ${whereClause}
     `, params);
-    
+
     res.json({
       data: rows || [],
       total: countRows[0]?.total || 0,
@@ -325,7 +334,7 @@ router.get('/payments/inward/:id', requireAuth, async (req, res) => {
     const { id } = req.params;
     const isNumeric = /^\d+$/.test(id);
     const whereField = isNumeric ? 'p.id' : 'p.payment_uniqid';
-    
+
     const [payments] = await db.promise().query(`
       SELECT 
         p.*,
@@ -352,13 +361,13 @@ router.get('/payments/inward/:id', requireAuth, async (req, res) => {
       LEFT JOIN payment_type pt ON pt.id = p.payment_type_id
       WHERE ${whereField} = ? AND p.direction = 'IN' AND p.party_type = 'CUSTOMER' AND (p.is_deleted = 0 OR p.is_deleted IS NULL)
     `, [id]);
-    
+
     if (payments.length === 0) {
       return res.status(404).json(errPayload('Payment not found', 'NOT_FOUND'));
     }
-    
+
     const payment = payments[0];
-    
+
     // Get allocations
     const [allocations] = await db.promise().query(`
       SELECT 
@@ -387,9 +396,9 @@ router.get('/payments/inward/:id', requireAuth, async (req, res) => {
       LEFT JOIN vendor v ON v.id = COALESCE(pa.buyer_id, ai.customer_id, pi.buyer_id)
       WHERE pa.payment_id = ?
     `, [payment.id]);
-    
+
     payment.allocations = allocations || [];
-    
+
     res.json(payment);
   } catch (e) {
     console.error('Error fetching payment:', e);
@@ -401,18 +410,22 @@ router.get('/payments/inward/:id', requireAuth, async (req, res) => {
 router.post('/payments/inward', requireAuth, requirePerm('Sales', 'create'), paymentUpload, async (req, res) => {
   const conn = await db.promise().getConnection();
   const userId = req.session?.user?.id;
-  
+
   try {
     await conn.beginTransaction();
-    
-    // Parse FormData fields
+
+    // Parse allocations: may be array (JSON body) or JSON string (FormData)
     let allocations = [];
     try {
-      allocations = req.body.allocations ? JSON.parse(req.body.allocations) : [];
+      if (Array.isArray(req.body.allocations)) {
+        allocations = req.body.allocations;
+      } else if (req.body.allocations && typeof req.body.allocations === 'string') {
+        allocations = JSON.parse(req.body.allocations);
+      }
     } catch (e) {
       allocations = [];
     }
-    
+
     const {
       transaction_date,
       payment_type,
@@ -426,19 +439,19 @@ router.post('/payments/inward', requireAuth, requirePerm('Sales', 'create'), pay
       reference_no,
       notes
     } = req.body;
-    
+
     // Get customer_id from first allocation if not in body
     let customer_id = req.body.customer_id;
     if (!customer_id && allocations.length > 0 && allocations[0].customer_id) {
       customer_id = allocations[0].customer_id;
     }
-    
+
     // Validation
     if (!transaction_date || (!payment_type && !payment_type_id) || !customer_id) {
       await conn.rollback();
       return res.status(400).json(errPayload('Transaction date, payment type, and customer are required', 'VALIDATION_ERROR'));
     }
-    
+
     // Get payment type code if only ID is provided
     let paymentTypeCode = payment_type;
     if (!paymentTypeCode && payment_type_id) {
@@ -449,12 +462,12 @@ router.post('/payments/inward', requireAuth, requirePerm('Sales', 'create'), pay
       }
       paymentTypeCode = pt.code;
     }
-    
+
     if (!['CASH', 'CHEQUE', 'TT'].includes(paymentTypeCode)) {
       await conn.rollback();
       return res.status(400).json(errPayload('Invalid payment type. Must be CASH, CHEQUE, or TT', 'VALIDATION_ERROR'));
     }
-    
+
     // Payment type specific validation
     if (paymentTypeCode === 'CHEQUE') {
       if (!bank_account_id) {
@@ -466,7 +479,7 @@ router.post('/payments/inward', requireAuth, requirePerm('Sales', 'create'), pay
         return res.status(400).json(errPayload('Cheque number and cheque date are required for CHEQUE payments', 'VALIDATION_ERROR'));
       }
     }
-    
+
     if (paymentTypeCode === 'TT') {
       if (!bank_account_id) {
         await conn.rollback();
@@ -477,36 +490,36 @@ router.post('/payments/inward', requireAuth, requirePerm('Sales', 'create'), pay
         return res.status(400).json(errPayload('TT reference number and value date are required for TT payments', 'VALIDATION_ERROR'));
       }
     }
-    
+
     if (!allocations || allocations.length === 0) {
       await conn.rollback();
       return res.status(400).json(errPayload('At least one allocation is required', 'VALIDATION_ERROR'));
     }
-    
+
     // Determine account (bank or cash) - only required for CHEQUE and TT, not CASH
     const accountId = bank_account_id || cash_account_id;
     if (paymentTypeCode !== 'CASH' && !accountId) {
       await conn.rollback();
       return res.status(400).json(errPayload('Bank account or cash account is required', 'VALIDATION_ERROR'));
     }
-    
+
     // Get account details (if account is provided)
     let accountCurrency = 'AED'; // Payment currency (bank/cash currency)
     let currencyId = null;       // currency.id for this payment
     let effectiveFxRate = 1.0;
-    
+
     if (accountId) {
       const [[account]] = await conn.query(`
         SELECT id, currency_code, acc_currency 
         FROM acc_bank_details 
         WHERE id = ?
       `, [accountId]);
-      
+
       if (!account) {
         await conn.rollback();
         return res.status(404).json(errPayload('Account not found', 'NOT_FOUND'));
       }
-      
+
       currencyId = account.acc_currency || null;
       accountCurrency = account.currency_code || 'AED';
       if (!accountCurrency && account.acc_currency) {
@@ -532,14 +545,14 @@ router.post('/payments/inward', requireAuth, requirePerm('Sales', 'create'), pay
           console.warn('Error resolving currency_id for payment:', e);
         }
       }
-      
+
       // Get FX rate for transaction date
       const fxRate = await getBankExchangeRate(accountId, transaction_date);
       if (!fxRate && accountCurrency !== 'AED') {
         await conn.rollback();
         return res.status(400).json(errPayload(`No exchange rate found for account currency ${accountCurrency} on ${transaction_date}`, 'VALIDATION_ERROR'));
       }
-      
+
       effectiveFxRate = fxRate || 1.0;
     } else {
       // CASH payments without a specific bank/cash account - default to base currency (e.g., AED)
@@ -552,33 +565,33 @@ router.post('/payments/inward', requireAuth, requirePerm('Sales', 'create'), pay
         console.warn('Error resolving base currency_id for CASH payment:', e);
       }
     }
-    
+
     // Calculate total amount from allocations
     const totalAmount = allocations.reduce((sum, a) => sum + parseFloat(a.amount || 0), 0);
-    
+
     if (totalAmount <= 0) {
       await conn.rollback();
       return res.status(400).json(errPayload('Total amount must be greater than zero', 'VALIDATION_ERROR'));
     }
-    
+
     const totalAmountBase = totalAmount * effectiveFxRate;
-    
+
     // Generate payment number
     const paymentNumber = await generatePaymentNumber(conn);
-    
+
     // Check for duplicate payment number
     const [existing] = await conn.query(`
       SELECT id FROM tbl_payment WHERE payment_number = ?
     `, [paymentNumber]);
-    
+
     if (existing.length > 0) {
       await conn.rollback();
       return res.status(409).json(errPayload('Payment number already exists', 'DUPLICATE'));
     }
-    
+
     // Generate unique ID
     const paymentUniqid = `in_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
-    
+
     // Insert payment with status_id = 3 (DRAFT)
     const [paymentResult] = await conn.query(`
       INSERT INTO tbl_payment (
@@ -597,9 +610,9 @@ router.post('/payments/inward', requireAuth, requirePerm('Sales', 'create'), pay
       customer_id, currencyId || null, accountCurrency, totalAmount, totalAmountBase, effectiveFxRate,
       notes || null, userId, userId
     ]);
-    
+
     const paymentId = paymentResult.insertId;
-    
+
     // Validate allocations don't exceed outstanding (for invoice allocations)
     for (const alloc of allocations) {
       if (alloc.type === 'invoice' && alloc.invoice_id) {
@@ -626,37 +639,37 @@ router.post('/payments/inward', requireAuth, requirePerm('Sales', 'create'), pay
           FROM ar_invoices ai
           WHERE ai.id = ?
         `, [alloc.invoice_id]);
-        
+
         if (invoices.length === 0) {
           await conn.rollback();
           return res.status(404).json(errPayload(`Invoice ${alloc.invoice_id} not found`, 'NOT_FOUND'));
         }
-        
+
         const invoice = invoices[0];
         const outstanding = parseFloat(invoice.total) - parseFloat(invoice.received_amount);
         const allocAmountBase = parseFloat(alloc.amount || 0) * effectiveFxRate;
-        
+
         // Sum all allocations for this invoice in the current request
         const totalAllocatedForInvoice = allocations
           .filter(a => a.type === 'invoice' && a.invoice_id === alloc.invoice_id)
           .reduce((sum, a) => sum + (parseFloat(a.amount || 0) * effectiveFxRate), 0);
-        
+
         if (totalAllocatedForInvoice > outstanding + 0.01) {
           await conn.rollback();
           return res.status(400).json(errPayload(`Allocation amount (${totalAllocatedForInvoice.toFixed(2)}) exceeds outstanding balance (${outstanding.toFixed(2)}) for invoice ${invoice.invoice_number || alloc.invoice_id}`, 'VALIDATION_ERROR'));
         }
       }
     }
-    
+
     // Insert allocations
     for (const alloc of allocations) {
       const { type, allocation_type, invoice_id, proforma_id, customer_id: allocCustomerId, amount } = alloc;
       const finalCustomerId = allocCustomerId || customer_id;
-      
+
       // Determine alloc_type and reference_id based on allocation_type or type
       let allocType = null;
       let referenceId = null;
-      
+
       if (allocation_type === 'balance' || type === 'invoice') {
         allocType = 'invoice';
         if (!invoice_id) {
@@ -676,42 +689,42 @@ router.post('/payments/inward', requireAuth, requirePerm('Sales', 'create'), pay
         await conn.rollback();
         return res.status(400).json(errPayload('Invalid allocation type. Must be balance/invoice or advance/proforma', 'VALIDATION_ERROR'));
       }
-      
+
       if (!amount) {
         await conn.rollback();
         return res.status(400).json(errPayload('Allocation amount is required', 'VALIDATION_ERROR'));
       }
-      
+
       // Validate invoice belongs to customer and get invoice number
       let referenceNumber = null;
       if (allocType === 'invoice' && referenceId) {
         const [invoices] = await conn.query(`
           SELECT invoice_number FROM ar_invoices WHERE id = ? AND customer_id = ?
         `, [referenceId, finalCustomerId]);
-        
+
         if (invoices.length === 0) {
           await conn.rollback();
           return res.status(404).json(errPayload(`Invoice ${referenceId} not found or does not belong to customer`, 'NOT_FOUND'));
         }
         referenceNumber = invoices[0].invoice_number || null;
       }
-      
+
       // Validate proforma belongs to customer and get proforma invoice number
       if (allocType === 'advance' && referenceId) {
         const [proformas] = await conn.query(`
           SELECT proforma_invoice_no FROM proforma_invoice WHERE id = ? AND buyer_id = ?
         `, [referenceId, finalCustomerId]);
-        
+
         if (proformas.length === 0) {
           await conn.rollback();
           return res.status(404).json(errPayload(`Proforma invoice ${referenceId} not found or does not belong to customer`, 'NOT_FOUND'));
         }
         referenceNumber = proformas[0].proforma_invoice_no || null;
       }
-      
+
       const allocAmount = parseFloat(amount);
       const allocAmountBase = allocAmount * effectiveFxRate;
-      
+
       await conn.query(`
         INSERT INTO tbl_payment_allocation (
           payment_id, alloc_type, reference_id, buyer_id, reference_number, amount_bank, amount_base, created_by, created_at
@@ -720,7 +733,7 @@ router.post('/payments/inward', requireAuth, requirePerm('Sales', 'create'), pay
         paymentId, allocType, referenceId, finalCustomerId, referenceNumber, allocAmount, allocAmountBase, userId
       ]);
     }
-    
+
     // Update open_balance for all invoices affected by this payment
     const invoiceIds = allocations
       .filter(a => (a.allocation_type === 'balance' || a.type === 'invoice') && a.invoice_id)
@@ -728,7 +741,7 @@ router.post('/payments/inward', requireAuth, requirePerm('Sales', 'create'), pay
     for (const invoiceId of invoiceIds) {
       await updateInvoiceOutstanding(conn, invoiceId, currencyId);
     }
-    
+
     // Update open_balance for all proforma invoices affected by this payment
     const proformaIds = allocations
       .filter(a => (a.allocation_type === 'advance' || a.type === 'proforma') && (a.proforma_id || (a.allocation_type === 'advance' && a.reference_id)))
@@ -737,7 +750,7 @@ router.post('/payments/inward', requireAuth, requirePerm('Sales', 'create'), pay
     for (const proformaId of proformaIds) {
       await updateProformaOpenBalance(conn, proformaId, currencyId);
     }
-    
+
     // Handle attachments
     if (req.files && req.files.length > 0) {
       const attachmentValues = req.files.map(f => [
@@ -748,14 +761,14 @@ router.post('/payments/inward', requireAuth, requirePerm('Sales', 'create'), pay
         f.size || null,
         userId
       ]);
-      
+
       await conn.query(`
         INSERT INTO tbl_payment_attachments 
         (payment_id, file_name, file_path, mime_type, size_bytes, created_by, created_at)
         VALUES ?
       `, [attachmentValues.map(v => [...v, new Date()])]);
     }
-    
+
     // Log history - CREATED
     await conn.query(`
       INSERT INTO history (module, module_id, user_id, action, details)
@@ -767,9 +780,9 @@ router.post('/payments/inward', requireAuth, requirePerm('Sales', 'create'), pay
       'CREATED',
       JSON.stringify({ payment_number: paymentNumber })
     ]);
-    
+
     await conn.commit();
-    
+
     // Fetch and return created payment
     const [createdPayment] = await db.promise().query(`
       SELECT 
@@ -785,7 +798,7 @@ router.post('/payments/inward', requireAuth, requirePerm('Sales', 'create'), pay
       LEFT JOIN status s ON s.id = p.status_id
       WHERE p.id = ?
     `, [paymentId]);
-    
+
     res.status(201).json(createdPayment[0] || { id: paymentId, message: 'Payment created successfully' });
   } catch (e) {
     await conn.rollback();
@@ -800,44 +813,48 @@ router.post('/payments/inward', requireAuth, requirePerm('Sales', 'create'), pay
 router.put('/payments/inward/:id', requireAuth, requirePerm('Sales', 'edit'), paymentUpload, async (req, res) => {
   const conn = await db.promise().getConnection();
   const userId = req.session?.user?.id;
-  
+
   try {
     await conn.beginTransaction();
-    
+
     const { id } = req.params;
     const isNumeric = /^\d+$/.test(id);
     const whereField = isNumeric ? 'id' : 'payment_uniqid';
-    
+
     // Get existing payment
     const [payments] = await conn.query(`
       SELECT * FROM tbl_payment 
       WHERE ${whereField} = ? AND direction = 'IN' AND party_type = 'CUSTOMER' AND (is_deleted = 0 OR is_deleted IS NULL)
     `, [id]);
-    
+
     if (payments.length === 0) {
       await conn.rollback();
       return res.status(404).json(errPayload('Payment not found', 'NOT_FOUND'));
     }
-    
+
     const existingPayment = payments[0];
-    
+
     // Allow editing for: DRAFT (3), REJECTED (2), SUBMITTED_FOR_APPROVAL (8), or payments with approved edit requests (edit_request_status = 1)
     const allowedStatusIds = [2, 3, 8]; // REJECTED, DRAFT, SUBMITTED_FOR_APPROVAL
     const canEdit = allowedStatusIds.includes(existingPayment.status_id) || existingPayment.edit_request_status === 1;
-    
+
     if (!canEdit) {
       await conn.rollback();
       return res.status(400).json(errPayload('Only draft, rejected, submitted for approval payments, or payments with approved edit requests can be edited', 'VALIDATION_ERROR'));
     }
-    
-    // Parse FormData fields
+
+    // Parse allocations: may be array (JSON body) or JSON string (FormData)
     let allocations = [];
     try {
-      allocations = req.body.allocations ? JSON.parse(req.body.allocations) : [];
+      if (Array.isArray(req.body.allocations)) {
+        allocations = req.body.allocations;
+      } else if (req.body.allocations && typeof req.body.allocations === 'string') {
+        allocations = JSON.parse(req.body.allocations);
+      }
     } catch (e) {
       allocations = [];
     }
-    
+
     const {
       transaction_date,
       payment_type,
@@ -851,19 +868,19 @@ router.put('/payments/inward/:id', requireAuth, requirePerm('Sales', 'edit'), pa
       reference_no,
       notes
     } = req.body;
-    
+
     // Get customer_id from first allocation if not in body
     let customer_id = req.body.customer_id;
     if (!customer_id && allocations.length > 0 && allocations[0].customer_id) {
       customer_id = allocations[0].customer_id;
     }
-    
+
     // Validation
     if (!transaction_date || (!payment_type && !payment_type_id) || !customer_id) {
       await conn.rollback();
       return res.status(400).json(errPayload('Transaction date, payment type, and customer are required', 'VALIDATION_ERROR'));
     }
-    
+
     // Get payment type code if only ID is provided
     let paymentTypeCode = payment_type;
     if (!paymentTypeCode && payment_type_id) {
@@ -874,12 +891,12 @@ router.put('/payments/inward/:id', requireAuth, requirePerm('Sales', 'edit'), pa
       }
       paymentTypeCode = pt.code;
     }
-    
+
     if (!['CASH', 'CHEQUE', 'TT'].includes(paymentTypeCode)) {
       await conn.rollback();
       return res.status(400).json(errPayload('Invalid payment type. Must be CASH, CHEQUE, or TT', 'VALIDATION_ERROR'));
     }
-    
+
     // Payment type specific validation
     if (paymentTypeCode === 'CHEQUE') {
       if (!bank_account_id) {
@@ -891,7 +908,7 @@ router.put('/payments/inward/:id', requireAuth, requirePerm('Sales', 'edit'), pa
         return res.status(400).json(errPayload('Cheque number and cheque date are required for CHEQUE payments', 'VALIDATION_ERROR'));
       }
     }
-    
+
     if (paymentTypeCode === 'TT') {
       if (!bank_account_id) {
         await conn.rollback();
@@ -902,36 +919,36 @@ router.put('/payments/inward/:id', requireAuth, requirePerm('Sales', 'edit'), pa
         return res.status(400).json(errPayload('TT reference number and value date are required for TT payments', 'VALIDATION_ERROR'));
       }
     }
-    
+
     if (!allocations || allocations.length === 0) {
       await conn.rollback();
       return res.status(400).json(errPayload('At least one allocation is required', 'VALIDATION_ERROR'));
     }
-    
+
     // Determine account (bank or cash)
     const accountId = bank_account_id || cash_account_id;
     if (paymentTypeCode !== 'CASH' && !accountId) {
       await conn.rollback();
       return res.status(400).json(errPayload('Bank account or cash account is required', 'VALIDATION_ERROR'));
     }
-    
+
     // Get account details
     let accountCurrency = 'AED';
     let currencyId = null;
     let effectiveFxRate = 1.0;
-    
+
     if (accountId) {
       const [[account]] = await conn.query(`
         SELECT id, currency_code, acc_currency 
         FROM acc_bank_details 
         WHERE id = ?
       `, [accountId]);
-      
+
       if (!account) {
         await conn.rollback();
         return res.status(404).json(errPayload('Account not found', 'NOT_FOUND'));
       }
-      
+
       currencyId = account.acc_currency || null;
       accountCurrency = account.currency_code || 'AED';
       if (!accountCurrency && account.acc_currency) {
@@ -957,13 +974,13 @@ router.put('/payments/inward/:id', requireAuth, requirePerm('Sales', 'edit'), pa
           console.warn('Error resolving currency_id for payment:', e);
         }
       }
-      
+
       const fxRate = await getBankExchangeRate(accountId, transaction_date);
       if (!fxRate && accountCurrency !== 'AED') {
         await conn.rollback();
         return res.status(400).json(errPayload(`No exchange rate found for account currency ${accountCurrency} on ${transaction_date}`, 'VALIDATION_ERROR'));
       }
-      
+
       effectiveFxRate = fxRate || 1.0;
     } else {
       try {
@@ -975,17 +992,17 @@ router.put('/payments/inward/:id', requireAuth, requirePerm('Sales', 'edit'), pa
         console.warn('Error resolving base currency_id for CASH payment:', e);
       }
     }
-    
+
     // Calculate total amount from allocations
     const totalAmount = allocations.reduce((sum, a) => sum + parseFloat(a.amount || 0), 0);
-    
+
     if (totalAmount <= 0) {
       await conn.rollback();
       return res.status(400).json(errPayload('Total amount must be greater than zero', 'VALIDATION_ERROR'));
     }
-    
+
     const totalAmountBase = totalAmount * effectiveFxRate;
-    
+
     // If payment is approved and has GL journal, soft-delete the journal before updating
     if (existingPayment.status_id === 1) {
       await conn.query(`
@@ -994,7 +1011,7 @@ router.put('/payments/inward/:id', requireAuth, requirePerm('Sales', 'edit'), pa
         WHERE source_type = 'INWARD_PAYMENT' AND source_id = ?
       `, [existingPayment.id]);
     }
-    
+
     // Update payment
     await conn.query(`
       UPDATE tbl_payment SET
@@ -1028,7 +1045,7 @@ router.put('/payments/inward/:id', requireAuth, requirePerm('Sales', 'edit'), pa
       customer_id, currencyId || null, accountCurrency, totalAmount, totalAmountBase, effectiveFxRate,
       notes || null, userId, existingPayment.id
     ]);
-    
+
     // Fetch existing allocations before deleting (to update open_balance for removed ones)
     const [existingAllocationsRows] = await conn.query(`
       SELECT 
@@ -1038,10 +1055,10 @@ router.put('/payments/inward/:id', requireAuth, requirePerm('Sales', 'edit'), pa
       WHERE pa.payment_id = ?
     `, [existingPayment.id]);
     const existingAllocations = existingAllocationsRows || [];
-    
+
     // Delete existing allocations
     await conn.query(`DELETE FROM tbl_payment_allocation WHERE payment_id = ?`, [existingPayment.id]);
-    
+
     // Validate allocations don't exceed outstanding
     for (const alloc of allocations) {
       if (alloc.type === 'invoice' && alloc.invoice_id) {
@@ -1069,36 +1086,36 @@ router.put('/payments/inward/:id', requireAuth, requirePerm('Sales', 'edit'), pa
           FROM ar_invoices ai
           WHERE ai.id = ?
         `, [existingPayment.id, alloc.invoice_id]);
-        
+
         if (invoices.length === 0) {
           await conn.rollback();
           return res.status(404).json(errPayload(`Invoice ${alloc.invoice_id} not found`, 'NOT_FOUND'));
         }
-        
+
         const invoice = invoices[0];
         const outstanding = parseFloat(invoice.total) - parseFloat(invoice.received_amount);
         const allocAmountBase = parseFloat(alloc.amount || 0) * effectiveFxRate;
-        
+
         const totalAllocatedForInvoice = allocations
           .filter(a => a.type === 'invoice' && a.invoice_id === alloc.invoice_id)
           .reduce((sum, a) => sum + (parseFloat(a.amount || 0) * effectiveFxRate), 0);
-        
+
         if (totalAllocatedForInvoice > outstanding + 0.01) {
           await conn.rollback();
           return res.status(400).json(errPayload(`Allocation amount (${totalAllocatedForInvoice.toFixed(2)}) exceeds outstanding balance (${outstanding.toFixed(2)}) for invoice ${invoice.invoice_number || alloc.invoice_id}`, 'VALIDATION_ERROR'));
         }
       }
     }
-    
+
     // Insert new allocations
     for (const alloc of allocations) {
       const { type, allocation_type, invoice_id, proforma_id, customer_id: allocCustomerId, amount } = alloc;
       const finalCustomerId = allocCustomerId || customer_id;
-      
+
       // Determine alloc_type and reference_id based on allocation_type or type
       let allocType = null;
       let referenceId = null;
-      
+
       if (allocation_type === 'balance' || type === 'invoice') {
         allocType = 'invoice';
         if (!invoice_id) {
@@ -1118,42 +1135,42 @@ router.put('/payments/inward/:id', requireAuth, requirePerm('Sales', 'edit'), pa
         await conn.rollback();
         return res.status(400).json(errPayload('Invalid allocation type. Must be balance/invoice or advance/proforma', 'VALIDATION_ERROR'));
       }
-      
+
       if (!amount) {
         await conn.rollback();
         return res.status(400).json(errPayload('Allocation amount is required', 'VALIDATION_ERROR'));
       }
-      
+
       // Validate invoice belongs to customer and get invoice number
       let referenceNumber = null;
       if (allocType === 'invoice' && referenceId) {
         const [invoices] = await conn.query(`
           SELECT invoice_number FROM ar_invoices WHERE id = ? AND customer_id = ?
         `, [referenceId, finalCustomerId]);
-        
+
         if (invoices.length === 0) {
           await conn.rollback();
           return res.status(404).json(errPayload(`Invoice ${referenceId} not found or does not belong to customer`, 'NOT_FOUND'));
         }
         referenceNumber = invoices[0].invoice_number || null;
       }
-      
+
       // Validate proforma belongs to customer and get proforma invoice number
       if (allocType === 'advance' && referenceId) {
         const [proformas] = await conn.query(`
           SELECT proforma_invoice_no FROM proforma_invoice WHERE id = ? AND buyer_id = ?
         `, [referenceId, finalCustomerId]);
-        
+
         if (proformas.length === 0) {
           await conn.rollback();
           return res.status(404).json(errPayload(`Proforma invoice ${referenceId} not found or does not belong to customer`, 'NOT_FOUND'));
         }
         referenceNumber = proformas[0].proforma_invoice_no || null;
       }
-      
+
       const allocAmount = parseFloat(amount);
       const allocAmountBase = allocAmount * effectiveFxRate;
-      
+
       await conn.query(`
         INSERT INTO tbl_payment_allocation (
           payment_id, alloc_type, reference_id, buyer_id, reference_number, amount_bank, amount_base, created_by, created_at
@@ -1162,7 +1179,7 @@ router.put('/payments/inward/:id', requireAuth, requirePerm('Sales', 'edit'), pa
         existingPayment.id, allocType, referenceId, finalCustomerId, referenceNumber, allocAmount, allocAmountBase, userId
       ]);
     }
-    
+
     // Update open_balance for all invoices affected by this payment
     const invoiceIds = allocations
       .filter(a => (a.allocation_type === 'balance' || a.type === 'invoice') && a.invoice_id)
@@ -1170,7 +1187,7 @@ router.put('/payments/inward/:id', requireAuth, requirePerm('Sales', 'edit'), pa
     for (const invoiceId of invoiceIds) {
       await updateInvoiceOutstanding(conn, invoiceId, currencyId);
     }
-    
+
     // Update open_balance for all proforma invoices affected by this payment
     const proformaIds = allocations
       .filter(a => (a.allocation_type === 'advance' || a.type === 'proforma') && (a.proforma_id || (a.allocation_type === 'advance' && a.reference_id)))
@@ -1179,7 +1196,7 @@ router.put('/payments/inward/:id', requireAuth, requirePerm('Sales', 'edit'), pa
     for (const proformaId of proformaIds) {
       await updateProformaOpenBalance(conn, proformaId, currencyId);
     }
-    
+
     // Also update invoices/proformas from old allocations that were removed
     const oldInvoiceIds = existingAllocations
       .filter(a => a.alloc_type === 'invoice' && a.reference_id)
@@ -1197,7 +1214,7 @@ router.put('/payments/inward/:id', requireAuth, requirePerm('Sales', 'edit'), pa
         await updateProformaOpenBalance(conn, proformaId, currencyId);
       }
     }
-    
+
     // Handle attachments (add new ones, existing ones remain)
     if (req.files && req.files.length > 0) {
       const attachmentValues = req.files.map(f => [
@@ -1208,26 +1225,26 @@ router.put('/payments/inward/:id', requireAuth, requirePerm('Sales', 'edit'), pa
         f.size || null,
         userId
       ]);
-      
+
       await conn.query(`
         INSERT INTO tbl_payment_attachments 
         (payment_id, file_name, file_path, mime_type, size_bytes, created_by, created_at)
         VALUES ?
       `, [attachmentValues.map(v => [...v, new Date()])]);
     }
-    
+
     // Log history - STATUS_CHANGED if status changed, otherwise UPDATED
     const oldStatusId = existingPayment.status_id;
     const newStatusId = 3; // Always reset to DRAFT on update
-    
+
     if (oldStatusId !== newStatusId) {
       // Fetch status names for history
       const [fromStatusRows] = await conn.query(`SELECT name FROM status WHERE id = ? LIMIT 1`, [oldStatusId]);
       const [toStatusRows] = await conn.query(`SELECT name FROM status WHERE id = ? LIMIT 1`, [newStatusId]);
-      
+
       const fromStatusName = fromStatusRows[0]?.name || 'N/A';
       const toStatusName = toStatusRows[0]?.name || 'Draft';
-      
+
       await conn.query(`
         INSERT INTO history (module, module_id, user_id, action, details)
         VALUES (?, ?, ?, ?, ?)
@@ -1245,7 +1262,7 @@ router.put('/payments/inward/:id', requireAuth, requirePerm('Sales', 'edit'), pa
         })
       ]);
     }
-    
+
     // Log history - UPDATED
     await conn.query(`
       INSERT INTO history (module, module_id, user_id, action, details)
@@ -1257,9 +1274,9 @@ router.put('/payments/inward/:id', requireAuth, requirePerm('Sales', 'edit'), pa
       'UPDATED',
       JSON.stringify({ payment_number: existingPayment.payment_number })
     ]);
-    
+
     await conn.commit();
-    
+
     // Fetch and return updated payment
     const [updatedPayment] = await db.promise().query(`
       SELECT 
@@ -1275,7 +1292,7 @@ router.put('/payments/inward/:id', requireAuth, requirePerm('Sales', 'edit'), pa
       LEFT JOIN status s ON s.id = p.status_id
       WHERE p.id = ?
     `, [existingPayment.id]);
-    
+
     res.json(updatedPayment[0] || { id: existingPayment.id, message: 'Payment updated successfully' });
   } catch (e) {
     await conn.rollback();
@@ -1290,54 +1307,54 @@ router.put('/payments/inward/:id', requireAuth, requirePerm('Sales', 'edit'), pa
 router.post('/payments/inward/:id/approve', requireAuth, requirePerm('CUSTOMER_PAYMENT', 'approve'), async (req, res) => {
   const conn = await db.promise().getConnection();
   const userId = req.session?.user?.id;
-  
+
   try {
     await conn.beginTransaction();
-    
+
     const { id } = req.params;
     const { comment, reconcile_date, reconcile_number } = req.body;
-    
+
     // Validate mandatory reconcile fields
     if (!reconcile_date || !reconcile_date.trim()) {
       await conn.rollback();
       return res.status(400).json(errPayload('Reconcile date is required for approval', 'VALIDATION_ERROR'));
     }
-    
+
     if (!reconcile_number || !reconcile_number.trim()) {
       await conn.rollback();
       return res.status(400).json(errPayload('Reconcile number is required for approval', 'VALIDATION_ERROR'));
     }
     const isNumeric = /^\d+$/.test(id);
     const whereField = isNumeric ? 'id' : 'payment_uniqid';
-    
+
     // Get payment
     const [payments] = await conn.query(`
       SELECT * FROM tbl_payment WHERE ${whereField} = ? AND direction = 'IN' AND party_type = 'CUSTOMER'
     `, [id]);
-    
+
     if (payments.length === 0) {
       await conn.rollback();
       return res.status(404).json(errPayload('Payment not found', 'NOT_FOUND'));
     }
-    
+
     const payment = payments[0];
-    
+
     // Validate status is Submitted for Approval (8)
     if (payment.status_id !== 8) {
       await conn.rollback();
       return res.status(400).json(errPayload('Only payments submitted for approval can be approved', 'VALIDATION_ERROR'));
     }
-    
+
     // Get allocations
     const [allocations] = await conn.query(`
       SELECT * FROM tbl_payment_allocation WHERE payment_id = ?
     `, [payment.id]);
-    
+
     if (allocations.length === 0) {
       await conn.rollback();
       return res.status(400).json(errPayload('Payment has no allocations', 'VALIDATION_ERROR'));
     }
-    
+
     // Validate allocations don't exceed outstanding (re-check at approval time)
     for (const alloc of allocations) {
       if (alloc.alloc_type === 'invoice' && alloc.invoice_id) {
@@ -1362,22 +1379,22 @@ router.post('/payments/inward/:id/approve', requireAuth, requirePerm('CUSTOMER_P
           FROM ar_invoices ai
           WHERE ai.id = ?
         `, [alloc.invoice_id]);
-        
+
         if (invoices.length === 0) {
           await conn.rollback();
           return res.status(404).json(errPayload(`Invoice ${alloc.invoice_id} not found`, 'NOT_FOUND'));
         }
-        
+
         const invoice = invoices[0];
         const outstanding = parseFloat(invoice.total) - parseFloat(invoice.received_amount);
-        
+
         if (parseFloat(alloc.amount_base) > outstanding + 0.01) {
           await conn.rollback();
           return res.status(400).json(errPayload(`Allocation exceeds outstanding for invoice ${alloc.invoice_id}`, 'VALIDATION_ERROR'));
         }
       }
     }
-    
+
     // Determine account (bank or cash) for GL entry
     let accountCoaId = null;
 
@@ -1419,7 +1436,7 @@ router.post('/payments/inward/:id/approve', requireAuth, requirePerm('CUSTOMER_P
 
       accountCoaId = account.coa_id;
     }
-    
+
     // Get Accounts Receivable (A/R) account from chart of accounts
     // Try to get by name "Accounts Receivable (A/R)" or fallback to id 1
     const [arAccounts] = await conn.query(`
@@ -1434,7 +1451,7 @@ router.post('/payments/inward/:id/approve', requireAuth, requirePerm('CUSTOMER_P
       await conn.rollback();
       return res.status(400).json(errPayload('Accounts Receivable account not found in chart of accounts', 'VALIDATION_ERROR'));
     }
-    
+
     // Before creating a new GL journal, soft-delete any existing journal for this payment
     await conn.query(`
       UPDATE gl_journals 
@@ -1487,14 +1504,14 @@ router.post('/payments/inward/:id/approve', requireAuth, requirePerm('CUSTOMER_P
     // Create separate GL journal lines for each allocation
     // Each allocation gets a pair of lines: Bank/Cash debit and AR credit
     const journalLines = [];
-    
+
     for (const alloc of allocations) {
       const allocForeignAmount = parseFloat(alloc.amount_bank || 0);
-      
+
       // Determine invoice_id and is_advance based on allocation type
       let invoiceId = null;
       let isAdvance = 0;
-      
+
       if (alloc.alloc_type === 'invoice') {
         // Balance allocation - use reference_id as invoice_id
         invoiceId = alloc.reference_id || null;
@@ -1504,7 +1521,7 @@ router.post('/payments/inward/:id/approve', requireAuth, requirePerm('CUSTOMER_P
         invoiceId = alloc.reference_id || null;
         isAdvance = 1;
       }
-      
+
       // Build description based on allocation type
       let allocDescription = '';
       if (alloc.alloc_type === 'invoice' && invoiceId) {
@@ -1522,7 +1539,7 @@ router.post('/payments/inward/:id/approve', requireAuth, requirePerm('CUSTOMER_P
       } else {
         allocDescription = `Payment allocation - ${payment.payment_number}`;
       }
-      
+
       // Add Bank/Cash debit line for this allocation
       journalLines.push({
         account_id: accountCoaId,
@@ -1533,7 +1550,7 @@ router.post('/payments/inward/:id/approve', requireAuth, requirePerm('CUSTOMER_P
         invoice_id: invoiceId,
         is_advance: isAdvance
       });
-      
+
       // Add AR credit line for this allocation
       journalLines.push({
         account_id: arAccountId,
@@ -1545,7 +1562,7 @@ router.post('/payments/inward/:id/approve', requireAuth, requirePerm('CUSTOMER_P
         is_advance: isAdvance
       });
     }
-    
+
     // Create GL journal entry with multiple lines (one pair per allocation)
     await glService.createJournal(conn, {
       source_type: 'INWARD_PAYMENT',
@@ -1563,7 +1580,7 @@ router.post('/payments/inward/:id/approve', requireAuth, requirePerm('CUSTOMER_P
       reconcile_number: reconcile_number || null,
       lines: journalLines
     });
-    
+
     // Update payment status to APPROVED (1) with reconcile fields
     await conn.query(`
       UPDATE tbl_payment 
@@ -1571,7 +1588,7 @@ router.post('/payments/inward/:id/approve', requireAuth, requirePerm('CUSTOMER_P
           reconcile_date = ?, reconcile_number = ?
       WHERE id = ?
     `, [userId, reconcile_date, reconcile_number.trim(), payment.id]);
-    
+
     // Add history entry with approval comment
     await conn.query(`
       INSERT INTO history (module, module_id, user_id, action, details)
@@ -1586,7 +1603,7 @@ router.post('/payments/inward/:id/approve', requireAuth, requirePerm('CUSTOMER_P
         payment_number: payment.payment_number
       })
     ]);
-    
+
     // Update outstanding_amount and open_balance for all invoices affected by this payment
     const invoiceIds = allocations
       .filter(a => a.alloc_type === 'invoice' && a.reference_id)
@@ -1594,7 +1611,7 @@ router.post('/payments/inward/:id/approve', requireAuth, requirePerm('CUSTOMER_P
     for (const invoiceId of invoiceIds) {
       await updateInvoiceOutstanding(conn, invoiceId, payment.currency_id);
     }
-    
+
     // Update open_balance for all proforma invoices affected by this payment
     const proformaIds = allocations
       .filter(a => a.alloc_type === 'advance' && a.reference_id)
@@ -1602,14 +1619,14 @@ router.post('/payments/inward/:id/approve', requireAuth, requirePerm('CUSTOMER_P
     for (const proformaId of proformaIds) {
       await updateProformaOpenBalance(conn, proformaId, payment.currency_id);
     }
-    
+
     await conn.commit();
-    
+
     // Fetch and return updated payment
     const [updatedPayment] = await conn.query(`
       SELECT * FROM tbl_payment WHERE id = ?
     `, [payment.id]);
-    
+
     res.json(updatedPayment[0]);
   } catch (e) {
     await conn.rollback();
@@ -1624,36 +1641,36 @@ router.post('/payments/inward/:id/approve', requireAuth, requirePerm('CUSTOMER_P
 router.put('/payments/inward/:id/status', requireAuth, requirePerm('Sales', 'edit'), async (req, res) => {
   const conn = await db.promise().getConnection();
   const userId = req.session?.user?.id;
-  
+
   try {
     await conn.beginTransaction();
-    
+
     const { id } = req.params;
     const { status_id, reason, comment } = req.body;
-    
+
     if (!status_id) {
       await conn.rollback();
       return res.status(400).json(errPayload('status_id is required', 'VALIDATION_ERROR'));
     }
-    
+
     const isNumeric = /^\d+$/.test(id);
     const whereField = isNumeric ? 'id' : 'payment_uniqid';
-    
+
     // Get payment
     const [payments] = await conn.query(`
       SELECT id, status_id FROM tbl_payment 
       WHERE ${whereField} = ? AND direction = 'IN' AND party_type = 'CUSTOMER'
     `, [id]);
-    
+
     if (payments.length === 0) {
       await conn.rollback();
       return res.status(404).json(errPayload('Payment not found', 'NOT_FOUND'));
     }
-    
+
     const payment = payments[0];
     const oldStatusId = payment.status_id;
     const newStatusId = parseInt(status_id, 10);
-    
+
     // Allow status change from DRAFT (3) to SUBMITTED_FOR_APPROVAL (8)
     // Or from SUBMITTED_FOR_APPROVAL (8) to REJECTED (2)
     if (oldStatusId === 3 && newStatusId === 8) {
@@ -1664,37 +1681,37 @@ router.put('/payments/inward/:id/status', requireAuth, requirePerm('Sales', 'edi
       await conn.rollback();
       return res.status(400).json(errPayload('Invalid status transition. Only DRAFT to SUBMITTED_FOR_APPROVAL or SUBMITTED_FOR_APPROVAL to REJECTED is allowed', 'VALIDATION_ERROR'));
     }
-    
+
     // Fetch status names for history
     const [fromStatusRows] = await conn.query(`SELECT name, colour, bg_colour FROM status WHERE id = ? LIMIT 1`, [oldStatusId]);
     const [toStatusRows] = await conn.query(`SELECT name, colour, bg_colour FROM status WHERE id = ? LIMIT 1`, [newStatusId]);
-    
+
     const fromStatusName = fromStatusRows[0]?.name || 'N/A';
     const toStatusName = toStatusRows[0]?.name || 'N/A';
-    
+
     // Update status
     await conn.query(`
       UPDATE tbl_payment SET status_id = ? WHERE id = ?
     `, [newStatusId, payment.id]);
-    
+
     // Add history entry
     const action = (oldStatusId === 8 && newStatusId === 2) ? 'REJECTED' : 'STATUS_CHANGED';
-    const historyDetails = (oldStatusId === 8 && newStatusId === 2) 
+    const historyDetails = (oldStatusId === 8 && newStatusId === 2)
       ? JSON.stringify({
-          reason: reason || comment || 'No reason provided.',
-          comment: comment || reason || null,
-          from_status_id: oldStatusId,
-          to_status_id: newStatusId,
-          from_status_name: fromStatusName,
-          to_status_name: toStatusName
-        })
+        reason: reason || comment || 'No reason provided.',
+        comment: comment || reason || null,
+        from_status_id: oldStatusId,
+        to_status_id: newStatusId,
+        from_status_name: fromStatusName,
+        to_status_name: toStatusName
+      })
       : JSON.stringify({
-          from_status_id: oldStatusId,
-          to_status_id: newStatusId,
-          from_status_name: fromStatusName,
-          to_status_name: toStatusName
-        });
-    
+        from_status_id: oldStatusId,
+        to_status_id: newStatusId,
+        from_status_name: fromStatusName,
+        to_status_name: toStatusName
+      });
+
     await conn.query(`
       INSERT INTO history (module, module_id, user_id, action, details)
       VALUES (?, ?, ?, ?, ?)
@@ -1705,9 +1722,9 @@ router.put('/payments/inward/:id/status', requireAuth, requirePerm('Sales', 'edi
       action,
       historyDetails
     ]);
-    
+
     await conn.commit();
-    
+
     res.json({
       status_id: newStatusId,
       status_name: toStatusRows[0]?.name || 'N/A',
@@ -1863,7 +1880,7 @@ router.post('/payments/inward/:id/decide-edit-request', requireAuth, requirePerm
         'edit_rejection_reason = NULL'
       ];
       const updateValues = [userId];
-      
+
       // Include reconcile fields if provided
       if (reconcile_date) {
         updateFields.push('reconcile_date = ?');
@@ -1873,9 +1890,9 @@ router.post('/payments/inward/:id/decide-edit-request', requireAuth, requirePerm
         updateFields.push('reconcile_number = ?');
         updateValues.push(reconcile_number);
       }
-      
+
       updateValues.push(payment.id);
-      
+
       await conn.query(`
         UPDATE tbl_payment SET 
           ${updateFields.join(', ')}
@@ -1917,8 +1934,8 @@ router.post('/payments/inward/:id/decide-edit-request', requireAuth, requirePerm
     }
 
     await conn.commit();
-    res.json({ 
-      success: true, 
+    res.json({
+      success: true,
       message: `Edit request ${decision === 'approve' ? 'approved' : 'rejected'} successfully`,
       edit_request_status: decision === 'approve' ? 1 : 2
     });
@@ -1937,22 +1954,22 @@ router.get('/payments/inward/:id/attachments', requireAuth, async (req, res) => 
     const { id } = req.params;
     const isNumeric = /^\d+$/.test(id);
     const whereField = isNumeric ? 'id' : 'payment_uniqid';
-    
+
     const [payments] = await db.promise().query(`
       SELECT id FROM tbl_payment WHERE ${whereField} = ? AND direction = 'IN' AND party_type = 'CUSTOMER' AND (is_deleted = 0 OR is_deleted IS NULL)
     `, [id]);
-    
+
     if (payments.length === 0) {
       return res.status(404).json(errPayload('Payment not found', 'NOT_FOUND'));
     }
-    
+
     const [attachments] = await db.promise().query(`
       SELECT id, file_name, file_path, mime_type, size_bytes, created_at
       FROM tbl_payment_attachments
       WHERE payment_id = ?
       ORDER BY created_at DESC
     `, [payments[0].id]);
-    
+
     res.json(attachments || []);
   } catch (e) {
     console.error('Error fetching attachments:', e);
@@ -1964,30 +1981,30 @@ router.get('/payments/inward/:id/attachments', requireAuth, async (req, res) => 
 router.post('/payments/inward/:id/attachments', requireAuth, requirePerm('Sales', 'edit'), paymentUpload, async (req, res) => {
   const conn = await db.promise().getConnection();
   const userId = req.session?.user?.id;
-  
+
   try {
     await conn.beginTransaction();
-    
+
     const { id } = req.params;
     const isNumeric = /^\d+$/.test(id);
     const whereField = isNumeric ? 'id' : 'payment_uniqid';
-    
+
     const [payments] = await conn.query(`
       SELECT id FROM tbl_payment WHERE ${whereField} = ? AND direction = 'IN' AND party_type = 'CUSTOMER'
     `, [id]);
-    
+
     if (payments.length === 0) {
       await conn.rollback();
       return res.status(404).json(errPayload('Payment not found', 'NOT_FOUND'));
     }
-    
+
     const paymentId = payments[0].id;
-    
+
     if (!req.files || req.files.length === 0) {
       await conn.rollback();
       return res.status(400).json(errPayload('No files were uploaded', 'VALIDATION_ERROR'));
     }
-    
+
     const attachmentValues = req.files.map(f => [
       paymentId,
       f.originalname,
@@ -1996,13 +2013,13 @@ router.post('/payments/inward/:id/attachments', requireAuth, requirePerm('Sales'
       f.size || null,
       userId
     ]);
-    
+
     await conn.query(`
       INSERT INTO tbl_payment_attachments 
       (payment_id, file_name, file_path, mime_type, size_bytes, created_by)
       VALUES ?
     `, [attachmentValues]);
-    
+
     await conn.commit();
     res.status(201).json({ success: true, message: 'Attachments added successfully' });
   } catch (e) {
@@ -2020,17 +2037,17 @@ router.get('/payments/inward/:id/journal-entries', requireAuth, async (req, res)
     const { id } = req.params;
     const isNumeric = /^\d+$/.test(id);
     const whereField = isNumeric ? 'id' : 'payment_uniqid';
-    
+
     const [payments] = await db.promise().query(`
       SELECT id FROM tbl_payment WHERE ${whereField} = ? AND direction = 'IN' AND party_type = 'CUSTOMER' AND (is_deleted = 0 OR is_deleted IS NULL)
     `, [id]);
-    
+
     if (payments.length === 0) {
       return res.status(404).json(errPayload('Payment not found', 'NOT_FOUND'));
     }
-    
+
     const paymentId = payments[0].id;
-    
+
     // Fetch GL journal entries for this payment (non-deleted journals and lines)
     const [journalEntries] = await db.promise().query(`
       SELECT 
@@ -2063,7 +2080,7 @@ router.get('/payments/inward/:id/journal-entries', requireAuth, async (req, res)
         AND (gj.is_deleted = 0 OR gj.is_deleted IS NULL)
       ORDER BY gj.journal_date DESC, gj.id DESC, gjl.line_no ASC
     `, [paymentId]);
-    
+
     res.json({ data: journalEntries || [] });
   } catch (e) {
     console.error('Error fetching journal entries:', e);
@@ -2077,17 +2094,17 @@ router.get('/payments/inward/:id/history', requireAuth, async (req, res) => {
     const { id } = req.params;
     const isNumeric = /^\d+$/.test(id);
     const whereField = isNumeric ? 'id' : 'payment_uniqid';
-    
+
     const [payments] = await db.promise().query(`
       SELECT id FROM tbl_payment WHERE ${whereField} = ? AND direction = 'IN' AND party_type = 'CUSTOMER' AND (is_deleted = 0 OR is_deleted IS NULL)
     `, [id]);
-    
+
     if (payments.length === 0) {
       return res.status(404).json(errPayload('Payment not found', 'NOT_FOUND'));
     }
-    
+
     const paymentId = payments[0].id;
-    
+
     const [history] = await db.promise().query(`
       SELECT 
         h.id,
@@ -2100,7 +2117,7 @@ router.get('/payments/inward/:id/history', requireAuth, async (req, res) => {
       WHERE h.module = 'inward_payment' AND h.module_id = ?
       ORDER BY h.created_at DESC
     `, [paymentId]);
-    
+
     res.json(history || []);
   } catch (e) {
     console.error('Error fetching history:', e);
@@ -2112,40 +2129,40 @@ router.get('/payments/inward/:id/history', requireAuth, async (req, res) => {
 router.delete('/payments/inward/:id/attachments/:attachmentId', requireAuth, requirePerm('Sales', 'delete'), async (req, res) => {
   const conn = await db.promise().getConnection();
   const userId = req.session?.user?.id;
-  
+
   try {
     await conn.beginTransaction();
-    
+
     const { id, attachmentId } = req.params;
     const isNumeric = /^\d+$/.test(id);
     const whereField = isNumeric ? 'id' : 'payment_uniqid';
-    
+
     const [payments] = await conn.query(`
       SELECT id FROM tbl_payment WHERE ${whereField} = ? AND direction = 'IN' AND party_type = 'CUSTOMER' AND (is_deleted = 0 OR is_deleted IS NULL)
     `, [id]);
-    
+
     if (payments.length === 0) {
       await conn.rollback();
       return res.status(404).json(errPayload('Payment not found', 'NOT_FOUND'));
     }
-    
+
     const paymentId = payments[0].id;
-    
+
     // Check if attachment exists and belongs to this payment
     const [attachments] = await conn.query(`
       SELECT id, file_name FROM tbl_payment_attachments WHERE id = ? AND payment_id = ?
     `, [attachmentId, paymentId]);
-    
+
     if (attachments.length === 0) {
       await conn.rollback();
       return res.status(404).json(errPayload('Attachment not found', 'NOT_FOUND'));
     }
-    
+
     // Delete attachment
     await conn.query(`
       DELETE FROM tbl_payment_attachments WHERE id = ?
     `, [attachmentId]);
-    
+
     // Log history
     await conn.query(`
       INSERT INTO history (module, module_id, user_id, action, details)
@@ -2157,7 +2174,7 @@ router.delete('/payments/inward/:id/attachments/:attachmentId', requireAuth, req
       'ATTACHMENT_DELETED',
       JSON.stringify({ attachment_id: attachmentId, file_name: attachments[0].file_name })
     ]);
-    
+
     await conn.commit();
     res.json({ success: true, message: 'Attachment deleted successfully' });
   } catch (e) {
@@ -2173,43 +2190,43 @@ router.delete('/payments/inward/:id/attachments/:attachmentId', requireAuth, req
 router.delete('/payments/inward/:id', requireAuth, requirePerm('Sales', 'delete'), async (req, res) => {
   const conn = await db.promise().getConnection();
   const userId = req.session?.user?.id;
-  
+
   try {
     await conn.beginTransaction();
-    
+
     const { id } = req.params;
     const isNumeric = /^\d+$/.test(id);
     const whereField = isNumeric ? 'id' : 'payment_uniqid';
-    
+
     const [payments] = await conn.query(`
       SELECT id, payment_number, status_id FROM tbl_payment 
       WHERE ${whereField} = ? AND direction = 'IN' AND party_type = 'CUSTOMER' AND (is_deleted = 0 OR is_deleted IS NULL)
     `, [id]);
-    
+
     if (payments.length === 0) {
       await conn.rollback();
       return res.status(404).json(errPayload('Payment not found', 'NOT_FOUND'));
     }
-    
+
     const payment = payments[0];
-    
+
     // Only allow deletion of DRAFT payments
     if (payment.status_id !== 3) {
       await conn.rollback();
       return res.status(400).json(errPayload('Only draft payments can be deleted', 'VALIDATION_ERROR'));
     }
-    
+
     // Soft delete payment
     await conn.query(`
       UPDATE tbl_payment SET is_deleted = 1, updated_by = ?, updated_at = NOW() WHERE id = ?
     `, [userId, payment.id]);
-    
+
     // Soft delete associated GL journals if any
     await conn.query(`
       UPDATE gl_journals SET is_deleted = 1 
       WHERE source_type = 'INWARD_PAYMENT' AND source_id = ?
     `, [payment.id]);
-    
+
     // Log history
     await conn.query(`
       INSERT INTO history (module, module_id, user_id, action, details)
@@ -2221,7 +2238,7 @@ router.delete('/payments/inward/:id', requireAuth, requirePerm('Sales', 'delete'
       'DELETED',
       JSON.stringify({ payment_number: payment.payment_number })
     ]);
-    
+
     await conn.commit();
     res.json({ success: true, message: 'Payment deleted successfully' });
   } catch (e) {

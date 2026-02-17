@@ -1,0 +1,370 @@
+[
+  {
+    "Field": "id",
+    "Type": "int(11)",
+    "Null": "NO",
+    "Key": "PRI",
+    "Default": null,
+    "Extra": "auto_increment"
+  },
+  {
+    "Field": "payment_uniqid",
+    "Type": "varchar(50)",
+    "Null": "NO",
+    "Key": "UNI",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "payment_number",
+    "Type": "varchar(100)",
+    "Null": "YES",
+    "Key": "UNI",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "is_customer_payment",
+    "Type": "int(11)",
+    "Null": "NO",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "transaction_date",
+    "Type": "date",
+    "Null": "NO",
+    "Key": "MUL",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "payment_type",
+    "Type": "enum('CASH','CHEQUE','TT')",
+    "Null": "YES",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "payment_type_id",
+    "Type": "int(11)",
+    "Null": "YES",
+    "Key": "MUL",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "cheque_no",
+    "Type": "varchar(200)",
+    "Null": "YES",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "cheque_date",
+    "Type": "date",
+    "Null": "YES",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "tt_ref_no",
+    "Type": "varchar(200)",
+    "Null": "YES",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "value_date",
+    "Type": "date",
+    "Null": "YES",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "reference_no",
+    "Type": "varchar(200)",
+    "Null": "YES",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "bank_account_id",
+    "Type": "int(11)",
+    "Null": "YES",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "cash_account_id",
+    "Type": "int(11)",
+    "Null": "YES",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "transaction_type",
+    "Type": "varchar(50)",
+    "Null": "YES",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "ref_chq_no",
+    "Type": "varchar(200)",
+    "Null": "YES",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "direction",
+    "Type": "enum('IN','OUT')",
+    "Null": "NO",
+    "Key": "MUL",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "party_type",
+    "Type": "enum('CUSTOMER','SUPPLIER','OTHER')",
+    "Null": "NO",
+    "Key": "MUL",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "party_id",
+    "Type": "int(11)",
+    "Null": "NO",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "currency_id",
+    "Type": "int(100)",
+    "Null": "YES",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "currency_code",
+    "Type": "varchar(10)",
+    "Null": "NO",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "total_amount_bank",
+    "Type": "decimal(18,4)",
+    "Null": "NO",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "total_amount_base",
+    "Type": "decimal(18,4)",
+    "Null": "NO",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "fx_rate",
+    "Type": "decimal(18,6)",
+    "Null": "YES",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "notes",
+    "Type": "text",
+    "Null": "YES",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "status_id",
+    "Type": "int(11)",
+    "Null": "YES",
+    "Key": "",
+    "Default": "3",
+    "Extra": ""
+  },
+  {
+    "Field": "edit_request_status",
+    "Type": "int(11)",
+    "Null": "YES",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "edit_requested_by",
+    "Type": "int(11)",
+    "Null": "YES",
+    "Key": "MUL",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "edit_requested_at",
+    "Type": "datetime",
+    "Null": "YES",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "edit_request_reason",
+    "Type": "text",
+    "Null": "YES",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "edit_approved_by",
+    "Type": "int(11)",
+    "Null": "YES",
+    "Key": "MUL",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "edit_approved_at",
+    "Type": "datetime",
+    "Null": "YES",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "edit_rejection_reason",
+    "Type": "text",
+    "Null": "YES",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "approved_by",
+    "Type": "int(11)",
+    "Null": "YES",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "approved_at",
+    "Type": "datetime",
+    "Null": "YES",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "status",
+    "Type": "enum('DRAFT','POSTED','CANCELLED')",
+    "Null": "YES",
+    "Key": "MUL",
+    "Default": "DRAFT",
+    "Extra": ""
+  },
+  {
+    "Field": "reconcile_date",
+    "Type": "date",
+    "Null": "YES",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "reconcile_number",
+    "Type": "varchar(200)",
+    "Null": "YES",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "user_id",
+    "Type": "int(11)",
+    "Null": "YES",
+    "Key": "MUL",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "created_at",
+    "Type": "datetime",
+    "Null": "YES",
+    "Key": "",
+    "Default": "current_timestamp()",
+    "Extra": ""
+  },
+  {
+    "Field": "created_by",
+    "Type": "int(11)",
+    "Null": "YES",
+    "Key": "MUL",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "updated_at",
+    "Type": "datetime",
+    "Null": "YES",
+    "Key": "",
+    "Default": "current_timestamp()",
+    "Extra": "on update current_timestamp()"
+  },
+  {
+    "Field": "updated_by",
+    "Type": "int(11)",
+    "Null": "YES",
+    "Key": "MUL",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "posted_at",
+    "Type": "datetime",
+    "Null": "YES",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "posted_by",
+    "Type": "int(11)",
+    "Null": "YES",
+    "Key": "MUL",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "is_deleted",
+    "Type": "int(11)",
+    "Null": "NO",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  }
+]

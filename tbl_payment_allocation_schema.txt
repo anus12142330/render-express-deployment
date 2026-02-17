@@ -1,0 +1,114 @@
+[
+  {
+    "Field": "id",
+    "Type": "int(11)",
+    "Null": "NO",
+    "Key": "PRI",
+    "Default": null,
+    "Extra": "auto_increment"
+  },
+  {
+    "Field": "payment_id",
+    "Type": "int(11)",
+    "Null": "NO",
+    "Key": "MUL",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "supplier_id",
+    "Type": "int(100)",
+    "Null": "YES",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "buyer_id",
+    "Type": "int(100)",
+    "Null": "YES",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "bill_id",
+    "Type": "int(11)",
+    "Null": "YES",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "po_id",
+    "Type": "int(11)",
+    "Null": "YES",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "alloc_type",
+    "Type": "varchar(50)",
+    "Null": "NO",
+    "Key": "MUL",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "reference_id",
+    "Type": "int(11)",
+    "Null": "YES",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "reference_number",
+    "Type": "varchar(200)",
+    "Null": "YES",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "amount_bank",
+    "Type": "decimal(18,4)",
+    "Null": "NO",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "amount_base",
+    "Type": "decimal(18,4)",
+    "Null": "NO",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "fx_rate",
+    "Type": "decimal(18,6)",
+    "Null": "YES",
+    "Key": "",
+    "Default": null,
+    "Extra": ""
+  },
+  {
+    "Field": "created_at",
+    "Type": "datetime",
+    "Null": "YES",
+    "Key": "",
+    "Default": "current_timestamp()",
+    "Extra": ""
+  },
+  {
+    "Field": "created_by",
+    "Type": "int(11)",
+    "Null": "YES",
+    "Key": "MUL",
+    "Default": null,
+    "Extra": ""
+  }
+]

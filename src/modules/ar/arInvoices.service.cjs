@@ -299,12 +299,18 @@ async function postInvoice(conn, invoiceId, userId) {
         salesAccountTotals[line.sales_account_id] += lineTotal;
     }
 
-    // Use invoice subtotal instead of sum of line totals to avoid rounding issues
-    // Distribute the invoice subtotal proportionally across sales accounts
-    const invoiceSubtotal = parseFloat(invoice.subtotal || 0);
-    if (totalLineTotals > 0 && invoiceSubtotal > 0 && Math.abs(totalLineTotals - invoiceSubtotal) > 0.01) {
-        // There's a rounding difference - distribute invoice subtotal proportionally
-        const adjustmentRatio = invoiceSubtotal / totalLineTotals;
+    // Calculate the expected total revenue to be credited to Sales accounts to ensure a balanced journal.
+    // Formula: Revenue = Total (AR) + Discount (Debit) - Tax (Credit)
+    const invoiceTotal = parseFloat(invoice.total);
+    const invoiceTaxTotal = parseFloat(invoice.tax_total || 0);
+    const discountAmount = parseFloat(invoice.discount_amount || 0);
+    const targetRevenue = Math.round((invoiceTotal + discountAmount - invoiceTaxTotal) * 100) / 100;
+
+    // Distribute the target revenue proportionally across sales accounts instead of using subtotal
+    if (totalLineTotals > 0 && targetRevenue > 0 && Math.abs(totalLineTotals - targetRevenue) > 0.01) {
+        // There's a difference between line totals and target revenue (e.g. inclusive tax or rounding)
+        // Distribute target revenue proportionally
+        const adjustmentRatio = targetRevenue / totalLineTotals;
         let adjustedTotal = 0;
         const accountIds = Object.keys(salesAccountTotals);
 
@@ -316,16 +322,16 @@ async function postInvoice(conn, invoiceId, userId) {
             adjustedTotal += salesAccountTotals[accountId];
         }
 
-        // Last account gets the remainder to ensure exact match with invoice subtotal
+        // Last account gets the remainder to ensure exact match with target revenue
         if (accountIds.length > 0) {
             const lastAccountId = accountIds[accountIds.length - 1];
-            salesAccountTotals[lastAccountId] = Math.round((invoiceSubtotal - adjustedTotal) * 100) / 100;
+            salesAccountTotals[lastAccountId] = Math.round((targetRevenue - adjustedTotal) * 100) / 100;
         }
     }
     // If totals match (within tolerance), use the calculated totals as-is
 
-    const invoiceTotal = parseFloat(invoice.total);
-    const invoiceTaxTotal = parseFloat(invoice.tax_total || 0);
+    // Total Line totals as defined by header values
+    // invoiceTotal and invoiceTaxTotal already parsed above
 
     const journalLines = [
         {
@@ -359,8 +365,8 @@ async function postInvoice(conn, invoiceId, userId) {
         }
     }
 
-    // Ensure sales revenue matches invoice subtotal exactly (handle rounding differences)
-    const difference = Math.round((invoiceSubtotal - totalSalesRevenue) * 100) / 100;
+    // Ensure sales revenue matches target revenue exactly (handle rounding differences)
+    const difference = Math.round((targetRevenue - totalSalesRevenue) * 100) / 100;
     if (Math.abs(difference) > 0.01) {
         // There's a rounding difference - adjust the largest sales account
         const accountIds = Object.keys(salesAccountTotals);
@@ -384,8 +390,10 @@ async function postInvoice(conn, invoiceId, userId) {
     }
 
     // Add Discount line if discount exists
-    const discountAmount = parseFloat(invoice.discount_amount || 0);
-    if (discountAmount > 0 && discountAccountId) {
+    if (discountAmount > 0) {
+        if (!discountAccountId) {
+            throw new Error('Sales Discount account not found. Please ensure account with code/ID 19 exists.');
+        }
         journalLines.push({
             account_id: discountAccountId,
             debit: discountAmount,
