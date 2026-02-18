@@ -214,31 +214,9 @@ router.get('/invoices/:id/payment-allocations', async (req, res, next) => {
               AND pa.alloc_type = 'invoice'
               AND (p.is_deleted = 0 OR p.is_deleted IS NULL)
               AND (p.status_id IN (1, 3, 8) OR p.status_id IS NULL)
-
-            UNION ALL
-
-            SELECT
-                ara.id,
-                ara.allocated_amount as amount_bank,
-                (ara.allocated_amount * COALESCE(curr.conversion_rate, 1)) as amount_base,
-                ar.id as payment_id,
-                ar.receipt_uniqid as payment_uniqid,
-                ar.receipt_number as payment_number,
-                ar.receipt_date as transaction_date,
-                'RECEIPT' as payment_type,
-                1 as status_id,
-                ar.currency_id as payment_currency_id,
-                curr.name as payment_currency_code,
-                'Posted' as payment_status_name,
-                'Receipt' as payment_type_name
-            FROM ar_receipt_allocations ara
-            INNER JOIN ar_receipts ar ON ar.id = ara.receipt_id
-            LEFT JOIN currency curr ON curr.id = ar.currency_id
-            WHERE ara.invoice_id = ?
-              AND ar.status = 'POSTED'
             
             ORDER BY transaction_date DESC, payment_id DESC
-        `, [invoice.id, invoice.id]);
+        `, [invoice.id]);
 
         // Calculate totals
         const totalAmount = parseFloat(invoice.total || 0);

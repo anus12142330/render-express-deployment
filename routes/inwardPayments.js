@@ -295,7 +295,11 @@ router.get('/payments/inward', requireAuth, async (req, res) => {
         approved_user.name AS approved_by_name,
         p.reconcile_date,
         p.reconcile_number,
-        edit_req_user.name AS edit_requested_by_name
+        edit_req_user.name AS edit_requested_by_name,
+        (SELECT COUNT(*) FROM tbl_payment_attachments a WHERE a.payment_id = p.id) AS attachment_count,
+        (SELECT a.file_path FROM tbl_payment_attachments a WHERE a.payment_id = p.id ORDER BY a.id ASC LIMIT 1) AS first_attachment_path,
+        (SELECT a.mime_type FROM tbl_payment_attachments a WHERE a.payment_id = p.id ORDER BY a.id ASC LIMIT 1) AS first_attachment_mime_type,
+        (SELECT a.file_name FROM tbl_payment_attachments a WHERE a.payment_id = p.id ORDER BY a.id ASC LIMIT 1) AS first_attachment_file_name
       FROM tbl_payment p
       LEFT JOIN vendor v ON v.id = p.party_id
       LEFT JOIN acc_bank_details b ON b.id = p.bank_account_id
@@ -399,6 +403,14 @@ router.get('/payments/inward/:id', requireAuth, async (req, res) => {
 
     payment.allocations = allocations || [];
 
+    const [attachments] = await db.promise().query(`
+      SELECT id, file_name, file_path, mime_type, size_bytes, created_at
+      FROM tbl_payment_attachments
+      WHERE payment_id = ?
+      ORDER BY id ASC
+    `, [payment.id]);
+    payment.attachments = attachments || [];
+
     res.json(payment);
   } catch (e) {
     console.error('Error fetching payment:', e);
@@ -409,7 +421,7 @@ router.get('/payments/inward/:id', requireAuth, async (req, res) => {
 // POST /api/payments/inward - Create inward payment (DRAFT)
 router.post('/payments/inward', requireAuth, requirePerm('Sales', 'create'), paymentUpload, async (req, res) => {
   const conn = await db.promise().getConnection();
-  const userId = req.session?.user?.id;
+  const userId = req.user?.id ?? req.session?.user?.id;
 
   try {
     await conn.beginTransaction();
@@ -751,23 +763,24 @@ router.post('/payments/inward', requireAuth, requirePerm('Sales', 'create'), pay
       await updateProformaOpenBalance(conn, proformaId, currencyId);
     }
 
-    // Handle attachments
+    // Handle attachments - save to existing tbl_payment_attachments
     if (req.files && req.files.length > 0) {
       const attachmentValues = req.files.map(f => [
         paymentId,
-        f.originalname,
+        f.originalname || 'attachment',
         relPath(f),
         f.mimetype || null,
-        f.size || null,
-        userId
+        f.size || 0,
+        userId,
+        new Date()
       ]);
-
       await conn.query(`
         INSERT INTO tbl_payment_attachments 
         (payment_id, file_name, file_path, mime_type, size_bytes, created_by, created_at)
         VALUES ?
-      `, [attachmentValues.map(v => [...v, new Date()])]);
+      `, [attachmentValues]);
     }
+
 
     // Log history - CREATED
     await conn.query(`
@@ -812,7 +825,7 @@ router.post('/payments/inward', requireAuth, requirePerm('Sales', 'create'), pay
 // PUT /api/payments/inward/:id - Update inward payment (DRAFT only)
 router.put('/payments/inward/:id', requireAuth, requirePerm('Sales', 'edit'), paymentUpload, async (req, res) => {
   const conn = await db.promise().getConnection();
-  const userId = req.session?.user?.id;
+  const userId = req.user?.id ?? req.session?.user?.id;
 
   try {
     await conn.beginTransaction();
@@ -1215,22 +1228,40 @@ router.put('/payments/inward/:id', requireAuth, requirePerm('Sales', 'edit'), pa
       }
     }
 
+    // Handle deleted attachments
+    if (req.body.deleted_attachments) {
+      let deletedIds = [];
+      try {
+        deletedIds = JSON.parse(req.body.deleted_attachments);
+      } catch (e) {
+        // checks if it is a single id
+        if (typeof req.body.deleted_attachments === 'string' || typeof req.body.deleted_attachments === 'number') {
+          deletedIds = [req.body.deleted_attachments];
+        } else if (Array.isArray(req.body.deleted_attachments)) {
+          deletedIds = req.body.deleted_attachments;
+        }
+      }
+
+      if (Array.isArray(deletedIds) && deletedIds.length > 0) {
+        // Optional: Fetch file paths to delete physical files if needed
+        // const [filesToDelete] = await conn.query('SELECT file_path FROM tbl_payment_attachments WHERE id IN (?) AND payment_id = ?', [deletedIds, existingPayment.id]);
+
+        await conn.query('DELETE FROM tbl_payment_attachments WHERE id IN (?) AND payment_id = ?', [deletedIds, existingPayment.id]);
+      }
+    }
+
     // Handle attachments (add new ones, existing ones remain)
     if (req.files && req.files.length > 0) {
       const attachmentValues = req.files.map(f => [
         existingPayment.id,
-        f.originalname,
+        f.originalname || 'attachment',
         relPath(f),
-        f.mimetype || null,
-        f.size || null,
-        userId
+        f.mimetype || null
       ]);
-
       await conn.query(`
-        INSERT INTO tbl_payment_attachments 
-        (payment_id, file_name, file_path, mime_type, size_bytes, created_by, created_at)
+        INSERT INTO tbl_payment_attachments (payment_id, file_name, file_path, mime_type)
         VALUES ?
-      `, [attachmentValues.map(v => [...v, new Date()])]);
+      `, [attachmentValues]);
     }
 
     // Log history - STATUS_CHANGED if status changed, otherwise UPDATED
@@ -1980,7 +2011,7 @@ router.get('/payments/inward/:id/attachments', requireAuth, async (req, res) => 
 // POST /api/payments/inward/:id/attachments - Add attachments to payment
 router.post('/payments/inward/:id/attachments', requireAuth, requirePerm('Sales', 'edit'), paymentUpload, async (req, res) => {
   const conn = await db.promise().getConnection();
-  const userId = req.session?.user?.id;
+  const userId = req.user?.id ?? req.session?.user?.id;
 
   try {
     await conn.beginTransaction();
@@ -2007,16 +2038,12 @@ router.post('/payments/inward/:id/attachments', requireAuth, requirePerm('Sales'
 
     const attachmentValues = req.files.map(f => [
       paymentId,
-      f.originalname,
+      f.originalname || 'attachment',
       relPath(f),
-      f.mimetype || null,
-      f.size || null,
-      userId
+      f.mimetype || null
     ]);
-
     await conn.query(`
-      INSERT INTO tbl_payment_attachments 
-      (payment_id, file_name, file_path, mime_type, size_bytes, created_by)
+      INSERT INTO tbl_payment_attachments (payment_id, file_name, file_path, mime_type)
       VALUES ?
     `, [attachmentValues]);
 

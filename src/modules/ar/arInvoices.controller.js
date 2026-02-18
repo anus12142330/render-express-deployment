@@ -37,8 +37,8 @@ async function listInvoices(req, res, next) {
 
         const [rows] = await pool.query(`
             SELECT ai.*, v.display_name as customer_name, c.name as currency_code,
-                (SELECT COALESCE(SUM(ra.allocated_amount), 0) FROM ar_receipt_allocations ra WHERE ra.invoice_id = ai.id) as received_amount,
-                (ai.total - COALESCE((SELECT SUM(ra.allocated_amount) FROM ar_receipt_allocations ra WHERE ra.invoice_id = ai.id), 0)) as outstanding_amount
+                (SELECT COALESCE(SUM(CASE WHEN p.currency_id = ai.currency_id THEN pa.amount_bank ELSE pa.amount_base END), 0) FROM tbl_payment_allocation pa INNER JOIN tbl_payment p ON p.id = pa.payment_id WHERE pa.alloc_type = 'invoice' AND pa.reference_id = ai.id AND (p.is_deleted = 0 OR p.is_deleted IS NULL) AND p.status_id = 1 AND p.direction = 'IN') as received_amount,
+                (ai.total - COALESCE((SELECT SUM(CASE WHEN p.currency_id = ai.currency_id THEN pa.amount_bank ELSE pa.amount_base END) FROM tbl_payment_allocation pa INNER JOIN tbl_payment p ON p.id = pa.payment_id WHERE pa.alloc_type = 'invoice' AND pa.reference_id = ai.id AND (p.is_deleted = 0 OR p.is_deleted IS NULL) AND p.status_id = 1 AND p.direction = 'IN'), 0)) as outstanding_amount
             FROM ar_invoices ai
             LEFT JOIN vendor v ON v.id = ai.customer_id
             LEFT JOIN currency c ON c.id = ai.currency_id
@@ -73,9 +73,10 @@ async function getInvoice(req, res, next) {
 
         const invoice = invoices[0];
         const [lines] = await pool.query(`
-            SELECT ail.*, um.name as uom_name
+            SELECT ail.*, um.name as uom_name, p.product_name
             FROM ar_invoice_lines ail
             LEFT JOIN uom_master um ON um.id = ail.uom_id
+            LEFT JOIN products p ON p.id = ail.product_id
             WHERE ail.invoice_id = ?
             ORDER BY ail.line_no
         `, [invoice.id]);

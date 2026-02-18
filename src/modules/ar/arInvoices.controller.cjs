@@ -188,11 +188,9 @@ async function listInvoices(req, res, next) {
         const [rows] = await pool.query(`
             SELECT ai.*, v.display_name as customer_name, c.name as currency_code,
                 (
-                    COALESCE((SELECT SUM(ra.allocated_amount) FROM ar_receipt_allocations ra INNER JOIN ar_receipts ar_receipt ON ar_receipt.id = ra.receipt_id WHERE ra.invoice_id = ai.id AND ar_receipt.status = 'POSTED'), 0) +
                     COALESCE((SELECT SUM(CASE WHEN p.currency_id = ai.currency_id THEN pa.amount_bank ELSE pa.amount_base END) FROM tbl_payment_allocation pa INNER JOIN tbl_payment p ON p.id = pa.payment_id WHERE pa.alloc_type = 'invoice' AND pa.reference_id = ai.id AND (p.is_deleted = 0 OR p.is_deleted IS NULL) AND p.status_id = 1 AND p.direction = 'IN'), 0)
                 ) as received_amount,
                 (ai.total - (
-                    COALESCE((SELECT SUM(ra.allocated_amount) FROM ar_receipt_allocations ra INNER JOIN ar_receipts ar_receipt ON ar_receipt.id = ra.receipt_id WHERE ra.invoice_id = ai.id AND ar_receipt.status = 'POSTED'), 0) +
                     COALESCE((SELECT SUM(CASE WHEN p.currency_id = ai.currency_id THEN pa.amount_bank ELSE pa.amount_base END) FROM tbl_payment_allocation pa INNER JOIN tbl_payment p ON p.id = pa.payment_id WHERE pa.alloc_type = 'invoice' AND pa.reference_id = ai.id AND (p.is_deleted = 0 OR p.is_deleted IS NULL) AND p.status_id = 1 AND p.direction = 'IN'), 0)
                 )) as outstanding_amount,
                 s.name as status_name, s.id as status_id, s.colour as status_colour, s.bg_colour as status_bg_colour,
@@ -266,6 +264,7 @@ async function getInvoice(req, res, next) {
                 um.name as uom_name,
                 p.item_type,
                 p.item_id,
+                p.product_name,
                 t.tax_name,
                 (SELECT pi.file_path 
                  FROM product_images pi 

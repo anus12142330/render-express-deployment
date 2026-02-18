@@ -70,11 +70,9 @@ async function getReceipt(req, res, next) {
         const [allocations] = await pool.query(`
             SELECT ara.*, ai.invoice_number, ai.invoice_date, ai.total as invoice_total,
                 (
-                    COALESCE((SELECT SUM(ra.allocated_amount) FROM ar_receipt_allocations ra INNER JOIN ar_receipts ar_receipt ON ar_receipt.id = ra.receipt_id WHERE ra.invoice_id = ai.id AND ar_receipt.status = 'POSTED'), 0) +
                     COALESCE((SELECT SUM(CASE WHEN p.currency_id = ai.currency_id THEN pa.amount_bank ELSE pa.amount_base END) FROM tbl_payment_allocation pa INNER JOIN tbl_payment p ON p.id = pa.payment_id WHERE pa.alloc_type = 'invoice' AND pa.reference_id = ai.id AND (p.is_deleted = 0 OR p.is_deleted IS NULL) AND p.status_id = 1 AND p.direction = 'IN'), 0)
                 ) as invoice_received_amount,
                 (ai.total - (
-                    COALESCE((SELECT SUM(ra.allocated_amount) FROM ar_receipt_allocations ra INNER JOIN ar_receipts ar_receipt ON ar_receipt.id = ra.receipt_id WHERE ra.invoice_id = ai.id AND ar_receipt.status = 'POSTED'), 0) +
                     COALESCE((SELECT SUM(CASE WHEN p.currency_id = ai.currency_id THEN pa.amount_bank ELSE pa.amount_base END) FROM tbl_payment_allocation pa INNER JOIN tbl_payment p ON p.id = pa.payment_id WHERE pa.alloc_type = 'invoice' AND pa.reference_id = ai.id AND (p.is_deleted = 0 OR p.is_deleted IS NULL) AND p.status_id = 1 AND p.direction = 'IN'), 0)
                 )) as invoice_outstanding
             FROM ar_receipt_allocations ara
@@ -214,16 +212,13 @@ async function getOpenInvoices(req, res, next) {
         const [rows] = await pool.query(`
             SELECT ai.id, ai.invoice_number, ai.invoice_date, ai.due_date, ai.total,
                 (
-                    COALESCE((SELECT SUM(ra.allocated_amount) FROM ar_receipt_allocations ra INNER JOIN ar_receipts ar_receipt ON ar_receipt.id = ra.receipt_id WHERE ra.invoice_id = ai.id AND ar_receipt.status = 'POSTED'), 0) +
                     COALESCE((SELECT SUM(CASE WHEN p.currency_id = ai.currency_id THEN pa.amount_bank ELSE pa.amount_base END) FROM tbl_payment_allocation pa INNER JOIN tbl_payment p ON p.id = pa.payment_id WHERE pa.alloc_type = 'invoice' AND pa.reference_id = ai.id AND (p.is_deleted = 0 OR p.is_deleted IS NULL) AND p.status_id = 1 AND p.direction = 'IN'), 0)
                 ) as received_amount,
                 (ai.total - (
-                    COALESCE((SELECT SUM(ra.allocated_amount) FROM ar_receipt_allocations ra INNER JOIN ar_receipts ar_receipt ON ar_receipt.id = ra.receipt_id WHERE ra.invoice_id = ai.id AND ar_receipt.status = 'POSTED'), 0) +
                     COALESCE((SELECT SUM(CASE WHEN p.currency_id = ai.currency_id THEN pa.amount_bank ELSE pa.amount_base END) FROM tbl_payment_allocation pa INNER JOIN tbl_payment p ON p.id = pa.payment_id WHERE pa.alloc_type = 'invoice' AND pa.reference_id = ai.id AND (p.is_deleted = 0 OR p.is_deleted IS NULL) AND p.status_id = 1 AND p.direction = 'IN'), 0)
                 )) as outstanding_amount
             FROM ar_invoices ai
-            LEFT JOIN ar_receipt_allocations ra ON ra.invoice_id = ai.id
-            WHERE ai.customer_id = ? AND ai.status = 'POSTED'
+            WHERE ai.customer_id = ? AND ai.status_id = 1
             GROUP BY ai.id
             HAVING outstanding_amount > 0
             ORDER BY ai.invoice_date ASC
