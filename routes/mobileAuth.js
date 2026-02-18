@@ -90,52 +90,79 @@ router.get("/dashboard", authenticateMobile, async (req, res) => {
   try {
     const period = String(req.query.period || "year").toLowerCase(); // 'month' | 'year'
     const isMonth = period === "month";
+    const userId = req.mobileUser.id;
+
+    const { isSuperAdmin } = await loadMobilePermissions(userId);
 
     let currentTotal = 0;
+    let currentCount = 0;
     let prevTotal = 0;
     let chartData = [];
 
+    const userFilter = isSuperAdmin ? "" : " AND so.created_by = ?";
+    const params = isSuperAdmin ? [] : [userId];
+
     try {
+      // Current Period
       const [rows] = await db.promise().query(
         isMonth
-          ? `SELECT COALESCE(SUM(grand_total), 0) AS total FROM sales_orders
-             WHERE created_at >= DATE_FORMAT(NOW(), '%Y-%m-01')
-               AND created_at < DATE_FORMAT(NOW(), '%Y-%m-01') + INTERVAL 1 MONTH`
-          : `SELECT COALESCE(SUM(grand_total), 0) AS total FROM sales_orders
-             WHERE created_at >= DATE_FORMAT(NOW(), '%Y-01-01')
-               AND created_at < DATE_FORMAT(NOW(), '%Y-01-01') + INTERVAL 1 YEAR`
+          ? `SELECT COUNT(*) AS count, COALESCE(SUM(so.grand_total / NULLIF(c.conversion_rate, 0)), 0) AS total 
+             FROM sales_orders so
+             LEFT JOIN currency c ON c.id = so.currency_id
+             WHERE so.created_at >= DATE_FORMAT(NOW(), '%Y-%m-01')
+               AND so.created_at < DATE_FORMAT(NOW(), '%Y-%m-01') + INTERVAL 1 MONTH
+               ${userFilter}`
+          : `SELECT COUNT(*) AS count, COALESCE(SUM(so.grand_total / NULLIF(c.conversion_rate, 0)), 0) AS total 
+             FROM sales_orders so
+             LEFT JOIN currency c ON c.id = so.currency_id
+             WHERE so.created_at >= DATE_FORMAT(NOW(), '%Y-01-01')
+               AND so.created_at < DATE_FORMAT(NOW(), '%Y-01-01') + INTERVAL 1 YEAR
+               ${userFilter}`,
+        params
       );
+      currentCount = Number(rows[0]?.count ?? 0);
       currentTotal = Number(rows[0]?.total ?? 0);
 
+      // Previous Period
       const [prevRows] = await db.promise().query(
         isMonth
-          ? `SELECT COALESCE(SUM(grand_total), 0) AS total FROM sales_orders
-             WHERE created_at >= DATE_FORMAT(NOW(), '%Y-%m-01') - INTERVAL 1 MONTH
-               AND created_at < DATE_FORMAT(NOW(), '%Y-%m-01')`
-          : `SELECT COALESCE(SUM(grand_total), 0) AS total FROM sales_orders
-             WHERE created_at >= DATE_FORMAT(NOW(), '%Y-01-01') - INTERVAL 1 YEAR
-               AND created_at < DATE_FORMAT(NOW(), '%Y-01-01')`
+          ? `SELECT COALESCE(SUM(so.grand_total / NULLIF(c.conversion_rate, 0)), 0) AS total 
+             FROM sales_orders so
+             LEFT JOIN currency c ON c.id = so.currency_id
+             WHERE so.created_at >= DATE_FORMAT(NOW(), '%Y-%m-01') - INTERVAL 1 MONTH
+               AND so.created_at < DATE_FORMAT(NOW(), '%Y-%m-01')
+               ${userFilter}`
+          : `SELECT COALESCE(SUM(so.grand_total / NULLIF(c.conversion_rate, 0)), 0) AS total 
+             FROM sales_orders so
+             LEFT JOIN currency c ON c.id = so.currency_id
+             WHERE so.created_at >= DATE_FORMAT(NOW(), '%Y-01-01') - INTERVAL 1 YEAR
+               AND so.created_at < DATE_FORMAT(NOW(), '%Y-01-01')
+               ${userFilter}`,
+        params
       );
       prevTotal = Number(prevRows[0]?.total ?? 0);
 
       const interval = isMonth ? "1 MONTH" : "1 YEAR";
       const [chartRows] = await db.promise().query(
-        `SELECT COALESCE(SUM(grand_total), 0) AS value, DATE(created_at) AS date
-         FROM sales_orders
-         WHERE created_at >= NOW() - INTERVAL ${interval}
-         GROUP BY DATE(created_at)
+        `SELECT COALESCE(SUM(so.grand_total / NULLIF(c.conversion_rate, 0)), 0) AS value, DATE(so.created_at) AS date
+         FROM sales_orders so
+         LEFT JOIN currency c ON c.id = so.currency_id
+         WHERE so.created_at >= NOW() - INTERVAL ${interval}
+         ${userFilter}
+         GROUP BY DATE(so.created_at)
          ORDER BY date ASC
-         LIMIT 30`
+         LIMIT 30`,
+        params
       );
       chartData = (chartRows || []).map((r) => ({ value: Number(r.value), date: r.date }));
     } catch (dbErr) {
-      console.warn("mobile dashboard (sales_orders may not exist):", dbErr.message);
+      console.warn("mobile dashboard db error:", dbErr.message);
     }
 
     const trend = prevTotal > 0 ? Math.round(((currentTotal - prevTotal) / prevTotal) * 100) : 0;
 
     res.json({
-      totalOrder: Math.round(currentTotal * 100) / 100,
+      totalOrder: currentCount,
       totalIncome: Math.round(currentTotal * 100) / 100,
       trend,
       period,

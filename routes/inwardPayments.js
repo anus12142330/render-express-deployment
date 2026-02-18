@@ -132,6 +132,32 @@ router.get('/payments/customers/search', requireAuth, async (req, res) => {
     const { q = '' } = req.query;
     const searchTerm = `%${q}%`;
 
+    const authUserId = req.user?.id || req.session?.user?.id;
+    if (!authUserId) return res.status(401).json({ error: 'Unauthorized' });
+
+    // Check for 'view_all' permission for Customers
+    const [adm] = await db.promise().query(
+      `SELECT 1 FROM user_role ur JOIN role r ON r.id = ur.role_id
+         WHERE ur.user_id=? AND r.name='Super Admin' LIMIT 1`,
+      [authUserId]
+    );
+    const isSuperAdmin = adm.length > 0;
+
+    let canViewAll = isSuperAdmin;
+    if (!canViewAll) {
+      const [ok] = await db.promise().query(
+        `SELECT 1 FROM user_role ur
+             JOIN role_permission rp ON rp.role_id = ur.role_id AND rp.allowed=1
+             JOIN menu_module m ON m.id = rp.module_id
+             JOIN permission_action a ON a.id = rp.action_id
+             WHERE ur.user_id=? AND m.key_name='Customers' AND a.key_name='view_all' LIMIT 1`,
+        [authUserId]
+      );
+      canViewAll = ok.length > 0;
+    }
+
+    const effectiveUserId = canViewAll ? null : authUserId;
+
     let query = `
       SELECT 
         v.id,
@@ -145,8 +171,10 @@ router.get('/payments/customers/search', requireAuth, async (req, res) => {
       LEFT JOIN currency c ON c.id = vo.currency_id
       WHERE v.company_type_id = 2 
         AND v.is_deleted = 0
+        ${effectiveUserId ? 'AND v.user_id = ?' : ''}
     `;
     const params = [];
+    if (effectiveUserId) params.push(effectiveUserId);
 
     if (q && q.trim()) {
       query += ` AND (v.display_name LIKE ? OR v.company_name LIKE ?)`;
@@ -261,6 +289,32 @@ router.get('/payments/inward', requireAuth, async (req, res) => {
     let whereClause = "WHERE p.direction = 'IN' AND p.party_type = 'CUSTOMER' AND (p.is_deleted = 0 OR p.is_deleted IS NULL)";
     const params = [];
 
+    const authUserId = req.user?.id || req.session?.user?.id;
+    if (!authUserId) return res.status(401).json({ error: 'Unauthorized' });
+
+    // Check for 'view_all' permission
+    const [adm] = await db.promise().query(
+      `SELECT 1 FROM user_role ur JOIN role r ON r.id = ur.role_id
+         WHERE ur.user_id=? AND r.name='Super Admin' LIMIT 1`,
+      [authUserId]
+    );
+    const isSuperAdmin = adm.length > 0;
+
+    let canViewAll = isSuperAdmin;
+    if (!canViewAll) {
+      const [ok] = await db.promise().query(
+        `SELECT 1 FROM user_role ur
+             JOIN role_permission rp ON rp.role_id = ur.role_id AND rp.allowed=1
+             JOIN menu_module m ON m.id = rp.module_id
+             JOIN permission_action a ON a.id = rp.action_id
+             WHERE ur.user_id=? AND m.key_name='CUSTOMER_PAYMENT' AND a.key_name='view_all' LIMIT 1`,
+        [authUserId]
+      );
+      canViewAll = ok.length > 0;
+    }
+
+    const effectiveUserId = canViewAll ? null : authUserId;
+
     if (search) {
       whereClause += " AND (p.payment_number LIKE ? OR p.cheque_no LIKE ? OR p.tt_ref_no LIKE ? OR v.display_name LIKE ?)";
       params.push(searchTerm, searchTerm, searchTerm, searchTerm);
@@ -276,7 +330,10 @@ router.get('/payments/inward', requireAuth, async (req, res) => {
       params.push(parseInt(edit_request_status, 10));
     }
 
-    if (req.query.created_by) {
+    if (effectiveUserId) {
+      whereClause += " AND p.created_by = ?";
+      params.push(effectiveUserId);
+    } else if (req.query.created_by) {
       whereClause += " AND p.created_by = ?";
       params.push(parseInt(req.query.created_by, 10));
     }
@@ -339,6 +396,30 @@ router.get('/payments/inward/:id', requireAuth, async (req, res) => {
     const isNumeric = /^\d+$/.test(id);
     const whereField = isNumeric ? 'p.id' : 'p.payment_uniqid';
 
+    const authUserId = req.user?.id || req.session?.user?.id;
+    if (!authUserId) return res.status(401).json({ error: 'Unauthorized' });
+
+    // Check for 'view_all' permission
+    const [adm] = await db.promise().query(
+      `SELECT 1 FROM user_role ur JOIN role r ON r.id = ur.role_id
+         WHERE ur.user_id=? AND r.name='Super Admin' LIMIT 1`,
+      [authUserId]
+    );
+    const isSuperAdmin = adm.length > 0;
+
+    let canViewAll = isSuperAdmin;
+    if (!canViewAll) {
+      const [ok] = await db.promise().query(
+        `SELECT 1 FROM user_role ur
+             JOIN role_permission rp ON rp.role_id = ur.role_id AND rp.allowed=1
+             JOIN menu_module m ON m.id = rp.module_id
+             JOIN permission_action a ON a.id = rp.action_id
+             WHERE ur.user_id=? AND m.key_name='CUSTOMER_PAYMENT' AND a.key_name='view_all' LIMIT 1`,
+        [authUserId]
+      );
+      canViewAll = ok.length > 0;
+    }
+
     const [payments] = await db.promise().query(`
       SELECT 
         p.*,
@@ -371,6 +452,11 @@ router.get('/payments/inward/:id', requireAuth, async (req, res) => {
     }
 
     const payment = payments[0];
+
+    // Ownership check
+    if (!canViewAll && payment.created_by !== authUserId) {
+      return res.status(403).json(errPayload('Forbidden: You do not have permission to view this payment', 'FORBIDDEN'));
+    }
 
     // Get allocations
     const [allocations] = await db.promise().query(`

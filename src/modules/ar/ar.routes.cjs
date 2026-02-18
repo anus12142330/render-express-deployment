@@ -86,8 +86,37 @@ router.get('/proforma-invoices', async (req, res, next) => {
         const customerId = req.query.customer_id ? parseInt(req.query.customer_id, 10) : null;
         const statusId = req.query.status_id ? parseInt(req.query.status_id, 10) : null;
 
+        const authUserId = req.user?.id || req.session?.user?.id;
+        if (!authUserId) return res.status(401).json({ error: 'Unauthorized' });
+
+        // Check for 'view_all' permission
+        const [adm] = await pool.query(
+            `SELECT 1 FROM user_role ur JOIN role r ON r.id = ur.role_id
+             WHERE ur.user_id=? AND r.name='Super Admin' LIMIT 1`,
+            [authUserId]
+        );
+        const isSuperAdmin = adm.length > 0;
+
+        let canViewAll = isSuperAdmin;
+        if (!canViewAll) {
+            const [ok] = await pool.query(
+                `SELECT 1 FROM user_role ur
+                 JOIN role_permission rp ON rp.role_id = ur.role_id AND rp.allowed=1
+                 JOIN menu_module m ON m.id = rp.module_id
+                 JOIN permission_action a ON a.id = rp.action_id
+                 WHERE ur.user_id=? AND m.key_name='ProformaInvoices' AND a.key_name='view_all' LIMIT 1`,
+                [authUserId]
+            );
+            canViewAll = ok.length > 0;
+        }
+
         let whereClause = 'WHERE 1=1';
         const params = [];
+
+        if (!canViewAll) {
+            whereClause += ' AND pi.user_id = ?';
+            params.push(authUserId);
+        }
 
         if (customerId) {
             whereClause += ' AND pi.buyer_id = ?';
@@ -132,6 +161,30 @@ router.get('/proforma-invoices/:id', async (req, res, next) => {
         const isNumeric = /^\d+$/.test(id);
         const whereField = isNumeric ? 'pi.id' : 'pi.uniqid';
 
+        const authUserId = req.user?.id || req.session?.user?.id;
+        if (!authUserId) return res.status(401).json({ error: 'Unauthorized' });
+
+        // Check for 'view_all' permission
+        const [adm] = await pool.query(
+            `SELECT 1 FROM user_role ur JOIN role r ON r.id = ur.role_id
+             WHERE ur.user_id=? AND r.name='Super Admin' LIMIT 1`,
+            [authUserId]
+        );
+        const isSuperAdmin = adm.length > 0;
+
+        let canViewAll = isSuperAdmin;
+        if (!canViewAll) {
+            const [ok] = await pool.query(
+                `SELECT 1 FROM user_role ur
+                 JOIN role_permission rp ON rp.role_id = ur.role_id AND rp.allowed=1
+                 JOIN menu_module m ON m.id = rp.module_id
+                 JOIN permission_action a ON a.id = rp.action_id
+                 WHERE ur.user_id=? AND m.key_name='ProformaInvoices' AND a.key_name='view_all' LIMIT 1`,
+                [authUserId]
+            );
+            canViewAll = ok.length > 0;
+        }
+
         const [[header]] = await pool.query(`
             SELECT pi.*, c.display_name as customer_name, c.id as customer_id,
                    curr.id as currency_id, curr.name as currency_code,
@@ -144,6 +197,11 @@ router.get('/proforma-invoices/:id', async (req, res, next) => {
 
         if (!header) {
             return res.status(404).json({ error: 'Proforma invoice not found' });
+        }
+
+        // Ownership check
+        if (!canViewAll && header.user_id !== authUserId) {
+            return res.status(403).json({ error: 'Forbidden: You do not have permission to view this proforma invoice' });
         }
 
         const [items] = await pool.query(`

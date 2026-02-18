@@ -152,10 +152,40 @@ async function listInvoices(req, res, next) {
         let whereClause = 'WHERE 1=1';
         const params = [];
 
-        if (createdBy) {
+        const authUserId = req.user?.id || req.session?.user?.id;
+        if (!authUserId) return res.status(401).json({ error: 'Unauthorized' });
+
+        // Check for 'view_all' permission
+        const [adm] = await pool.query(
+            `SELECT 1 FROM user_role ur JOIN role r ON r.id = ur.role_id
+             WHERE ur.user_id=? AND r.name='Super Admin' LIMIT 1`,
+            [authUserId]
+        );
+        const isSuperAdmin = adm.length > 0;
+
+        let canViewAll = isSuperAdmin;
+        if (!canViewAll) {
+            const [ok] = await pool.query(
+                `SELECT 1 FROM user_role ur
+                 JOIN role_permission rp ON rp.role_id = ur.role_id AND rp.allowed=1
+                 JOIN menu_module m ON m.id = rp.module_id
+                 JOIN permission_action a ON a.id = rp.action_id
+                 WHERE ur.user_id=? AND m.key_name='Invoices' AND a.key_name='view_all' LIMIT 1`,
+                [authUserId]
+            );
+            canViewAll = ok.length > 0;
+        }
+
+        const effectiveUserId = canViewAll ? null : authUserId;
+
+        if (effectiveUserId) {
+            whereClause += ' AND ai.user_id = ?';
+            params.push(effectiveUserId);
+        } else if (createdBy) {
             whereClause += ' AND ai.user_id = ?';
             params.push(createdBy);
         }
+
         if (customerId) {
             whereClause += ' AND ai.customer_id = ?';
             params.push(customerId);
@@ -232,6 +262,30 @@ async function getInvoice(req, res, next) {
         const isNumeric = /^\d+$/.test(id);
         const whereField = isNumeric ? 'ai.id' : 'ai.invoice_uniqid';
 
+        const authUserId = req.user?.id || req.session?.user?.id;
+        if (!authUserId) return res.status(401).json({ error: 'Unauthorized' });
+
+        // Check for 'view_all' permission
+        const [adm] = await pool.query(
+            `SELECT 1 FROM user_role ur JOIN role r ON r.id = ur.role_id
+             WHERE ur.user_id=? AND r.name='Super Admin' LIMIT 1`,
+            [authUserId]
+        );
+        const isSuperAdmin = adm.length > 0;
+
+        let canViewAll = isSuperAdmin;
+        if (!canViewAll) {
+            const [ok] = await pool.query(
+                `SELECT 1 FROM user_role ur
+                 JOIN role_permission rp ON rp.role_id = ur.role_id AND rp.allowed=1
+                 JOIN menu_module m ON m.id = rp.module_id
+                 JOIN permission_action a ON a.id = rp.action_id
+                 WHERE ur.user_id=? AND m.key_name='Invoices' AND a.key_name='view_all' LIMIT 1`,
+                [authUserId]
+            );
+            canViewAll = ok.length > 0;
+        }
+
         const [invoices] = await pool.query(`
             SELECT ai.*, v.display_name as customer_name, 
                    c.name as currency_code,
@@ -258,6 +312,11 @@ async function getInvoice(req, res, next) {
         }
 
         const invoice = invoices[0];
+
+        // Ownership check
+        if (!canViewAll && invoice.user_id !== authUserId) {
+            return res.status(403).json({ error: 'Forbidden: You do not have permission to view this invoice' });
+        }
         const [lines] = await pool.query(`
             SELECT 
                 ail.*, 

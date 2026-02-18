@@ -1,4 +1,5 @@
 import express from 'express';
+import { hasPermission } from '../middleware/authz.js';
 import db from '../db.js';
 import crypto from 'crypto';
 import multer from 'multer';
@@ -84,17 +85,35 @@ const like = (s = '') => `%${s}%`;
 ================================ */
 router.get('/full', async (req, res) => {
     const { search = '' } = req.query;
+
+    const user = req.session?.user || req.mobileUser;
+    const authUserId = user?.id;
+
+    if (!authUserId) {
+        return res.status(401).json(errPayload('Not logged in', 'AUTH_ERROR'));
+    }
+
     try {
+        const canViewAll = await hasPermission(authUserId, 'Customers', 'view_all');
+        const canViewOwn = await hasPermission(authUserId, 'Customers', 'view');
+
+        if (!canViewAll && !canViewOwn) {
+            return res.status(403).json(errPayload('Forbidden: You do not have permission to view customers', 'FORBIDDEN'));
+        }
+
+        const effectiveUserId = canViewAll ? null : authUserId;
+
         const [rows] = await db.promise().query(
             `
       SELECT v.id, v.display_name AS name, v.uniqid
       FROM vendor v
       WHERE v.company_type_id = ?
         AND (v.display_name LIKE ? OR v.company_name LIKE ?)
+        ${effectiveUserId ? 'AND v.user_id = ?' : ''}
       ORDER BY v.display_name ASC
       LIMIT 100
       `,
-            [COMPANY_TYPE_CUSTOMER, like(search), like(search)]
+            [COMPANY_TYPE_CUSTOMER, like(search), like(search)].concat(effectiveUserId ? [effectiveUserId] : [])
         );
         res.json(rows);
     } catch (err) {
@@ -110,9 +129,26 @@ router.get('/', async (req, res) => {
     const limit = parseInt(req.query.limit || 25, 10);
     const offset = parseInt(req.query.offset || 0, 10);
     const search = String(req.query.search || '');
-    const userId = req.query.user_id;
+
+    // Get user from session (populated by optionalBearerSession) or mobileUser
+    const user = req.session?.user || req.mobileUser;
+    const authUserId = user?.id;
+
+    if (!authUserId) {
+        return res.status(401).json(errPayload('Not logged in', 'AUTH_ERROR'));
+    }
 
     try {
+        const canViewAll = await hasPermission(authUserId, 'Customers', 'view_all');
+        const canViewOwn = await hasPermission(authUserId, 'Customers', 'view');
+
+        if (!canViewAll && !canViewOwn) {
+            return res.status(403).json(errPayload('Forbidden: You do not have permission to view customers', 'FORBIDDEN'));
+        }
+
+        // Only filter by user_id if they DON'T have view_all
+        const effectiveUserId = canViewAll ? null : authUserId;
+
         const [data] = await db.promise().query(
             `
       SELECT
@@ -137,12 +173,12 @@ router.get('/', async (req, res) => {
           v.email_address LIKE ? OR
           v.phone_work LIKE ?
         )
-        ${userId ? 'AND v.user_id = ?' : ''}
+        ${effectiveUserId ? 'AND v.user_id = ?' : ''}
       ORDER BY v.display_name ASC
       LIMIT ? OFFSET ?
       `,
             [COMPANY_TYPE_CUSTOMER, like(search), like(search), like(search), like(search)]
-                .concat(userId ? [userId] : [])
+                .concat(effectiveUserId ? [effectiveUserId] : [])
                 .concat([limit, offset])
         );
 
@@ -157,9 +193,9 @@ router.get('/', async (req, res) => {
           v.email_address LIKE ? OR
           v.phone_work LIKE ?
         )
-        ${userId ? 'AND v.user_id = ?' : ''}
+        ${effectiveUserId ? 'AND v.user_id = ?' : ''}
       `,
-            [COMPANY_TYPE_CUSTOMER, like(search), like(search), like(search), like(search)].concat(userId ? [userId] : [])
+            [COMPANY_TYPE_CUSTOMER, like(search), like(search), like(search), like(search)].concat(effectiveUserId ? [effectiveUserId] : [])
         );
 
         res.json({ data, total: countRows[0]?.total || 0 });
