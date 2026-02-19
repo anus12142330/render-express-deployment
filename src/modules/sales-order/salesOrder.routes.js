@@ -51,7 +51,7 @@ router.post('/:id/attachments', requireAuth, requirePerm('SalesOrders', 'edit'),
 router.delete('/:id/attachments/:attachmentId', requireAuth, requirePerm('SalesOrders', 'edit'), deleteHeaderAttachment);
 
 // Submit
-router.post('/:id/submit', requireAuth, requirePerm('SalesOrders', 'submit'), submitSalesOrder);
+router.post('/:id/submit', requireAuth, requirePerm('SalesOrders', 'view'), submitSalesOrder);
 
 // Dispatch
 router.post('/:id/dispatch', requireAuth, requirePerm('SalesOrders', 'dispatch'), dispatchUpload.array('attachments', 20), dispatchSalesOrder);
