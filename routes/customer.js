@@ -748,21 +748,31 @@ router.put('/:id', uploadCustomer.array('attachments'), async (req, res) => {
             [company_name, display_name, email_address, phone_work, phone_mobile, safeTags, remarks, website, userId, asIntCustomerType(customer_type), safeCustomerOf, customerId, COMPANY_TYPE_CUSTOMER,]
         );
 
-        await conn.query(
-            `INSERT INTO vendor_other (vendor_id, tax_treatment_id, tax_registration_number, source_supply_id, currency_id, payment_terms_id, business_type_other, outlets_count, avg_weekly_purchase, has_cold_storage)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON DUPLICATE KEY UPDATE
-                tax_treatment_id = VALUES(tax_treatment_id),
-                tax_registration_number = VALUES(tax_registration_number),
-                source_supply_id = VALUES(source_supply_id),
-                currency_id = VALUES(currency_id),
-                payment_terms_id = VALUES(payment_terms_id),
-                business_type_other = VALUES(business_type_other),
-                outlets_count = VALUES(outlets_count),
-                avg_weekly_purchase = VALUES(avg_weekly_purchase),
-                has_cold_storage = VALUES(has_cold_storage)`,
-            [customerId, tax_treatment_id, tax_registration_number, source_supply_id, currency_id, payment_terms_id, business_type_other, outlets_count, avg_weekly_purchase, has_cold_storage]
-        );
+        // Explicitly check for existing vendor_other record to avoid duplicates if unique constraint is missing
+        const [existingVendorOther] = await conn.query('SELECT id FROM vendor_other WHERE vendor_id = ?', [customerId]);
+
+        if (existingVendorOther.length > 0) {
+            await conn.query(
+                `UPDATE vendor_other SET
+                 tax_treatment_id = ?,
+                 tax_registration_number = ?,
+                 source_supply_id = ?,
+                 currency_id = ?,
+                 payment_terms_id = ?,
+                 business_type_other = ?,
+                 outlets_count = ?,
+                 avg_weekly_purchase = ?,
+                 has_cold_storage = ?
+                 WHERE vendor_id = ?`,
+                [tax_treatment_id, tax_registration_number, source_supply_id, currency_id, payment_terms_id, business_type_other, outlets_count, avg_weekly_purchase, has_cold_storage, customerId]
+            );
+        } else {
+            await conn.query(
+                `INSERT INTO vendor_other (vendor_id, tax_treatment_id, tax_registration_number, source_supply_id, currency_id, payment_terms_id, business_type_other, outlets_count, avg_weekly_purchase, has_cold_storage)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [customerId, tax_treatment_id, tax_registration_number, source_supply_id, currency_id, payment_terms_id, business_type_other, outlets_count, avg_weekly_purchase, has_cold_storage]
+            );
+        }
 
         // Use UPDATE instead of DELETE/INSERT to avoid accidentally deleting other address types.
         await conn.query(
