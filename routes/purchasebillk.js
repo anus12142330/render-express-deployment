@@ -49,7 +49,7 @@ const addHistory = async (conn, { module, moduleId, userId, action, details }) =
 router.get('/', async (req, res, next) => {
     try {
         const page = Math.max(parseInt(req.query.page || "1", 10), 1);
-        const per_page = Math.min(Math.max(parseInt(req.query.per_page || "5", 10), 1), 100);
+        const per_page = Math.min(Math.max(parseInt(req.query.per_page || "25", 10), 1), 100);
         const offset = (page - 1) * per_page;
         const search = (req.query.search || "").trim();
         const vendorId = req.query.vendor_id ? parseInt(req.query.vendor_id, 10) : null;

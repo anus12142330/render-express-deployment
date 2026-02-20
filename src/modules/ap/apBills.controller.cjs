@@ -858,20 +858,38 @@ async function cancelBill(req, res, next) {
 
 async function getSourcePOs(req, res, next) {
     try {
-        const { vendor_id } = req.query;
-        if (!vendor_id) {
+        const { vendor_id, search, limit } = req.query;
+        const searchTrimmed = (search || '').trim();
+        const limitNum = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 500);
+
+        // For Service Bill: allow search by PO number (4+ chars) without vendor_id
+        const hasSearch = searchTrimmed.length >= 4;
+        const hasVendor = vendor_id && Number.isFinite(Number(vendor_id));
+
+        if (!hasSearch && !hasVendor) {
             return res.json([]);
         }
 
-        // Get POs that are in states: Issued (4), Approved (5), Confirmed (7), Partially Received (8)
-        // Also include Draft (3) and Submitted for Approval (8) if needed
+        const params = [];
+        let whereClause = 'WHERE po.status_id IN (3, 4, 5, 7, 8)';
+        if (hasVendor) {
+            whereClause += ' AND po.vendor_id = ?';
+            params.push(vendor_id);
+        }
+        if (hasSearch) {
+            whereClause += ' AND (po.po_number LIKE ? OR po.po_uniqid LIKE ?)';
+            const searchPattern = `%${searchTrimmed}%`;
+            params.push(searchPattern, searchPattern);
+        }
+
         const [pos] = await pool.query(`
-            SELECT po.id, po.po_number, po.po_uniqid, v.display_name as vendor_name
+            SELECT po.id, po.vendor_id, po.po_number, po.po_uniqid, v.display_name as vendor_name
             FROM purchase_orders po
             JOIN vendor v ON v.id = po.vendor_id
-            WHERE po.vendor_id = ? AND po.status_id IN (3, 4, 5, 7, 8)
+            ${whereClause}
             ORDER BY po.po_date DESC
-        `, [vendor_id]);
+            LIMIT ?
+        `, [...params, limitNum]);
 
         res.json(pos || []);
     } catch (error) {

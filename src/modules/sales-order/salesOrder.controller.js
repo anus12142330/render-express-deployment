@@ -45,7 +45,7 @@ export const listSalesOrders = async (req, res) => {
 
         // Handle both offset/limit (mobile) and page/pageSize (web)
         let page = parsePage(req.query.page);
-        let pageSize = parsePageSize(req.query.pageSize ?? req.query.page_size ?? req.query.limit, 20);
+        let pageSize = parsePageSize(req.query.pageSize ?? req.query.page_size ?? req.query.limit, 25);
 
         if (req.query.offset !== undefined && req.query.page === undefined) {
             page = Math.floor(Number(req.query.offset) / pageSize) + 1;

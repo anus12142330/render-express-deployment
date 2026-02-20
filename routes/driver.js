@@ -35,9 +35,9 @@ const q = async (sql, params = []) => (await db.promise().query(sql, params))[0]
 const asArray = (v) => (v === undefined ? [] : Array.isArray(v) ? v : [v]);
 // Normalize to DATE-only string (avoid timezone shifts)
 const normDate = (s) => {
-  if (!s) return null;
-  const m = String(s).match(/^(\d{4}-\d{2}-\d{2})/);
-  return m ? m[1] : null;
+    if (!s) return null;
+    const m = String(s).match(/^(\d{4}-\d{2}-\d{2})/);
+    return m ? m[1] : null;
 };
 
 // Make paths URL-safe (Windows -> web)
@@ -63,8 +63,32 @@ router.get('/', async (req, res, next) => {
         } catch (error) { return next(error); }
     }
     try {
-        const drivers = await q('SELECT * FROM drivers WHERE is_deleted = 0');
-        res.json(drivers);
+        const page = Math.max(parseInt(req.query.page || "1", 10), 1);
+        const per_page = Math.min(Math.max(parseInt(req.query.per_page || "25", 10), 1), 100);
+        const offset = (page - 1) * per_page;
+        const search = req.query.search || "";
+
+        const whereClauses = ["is_deleted = 0"];
+        const params = [];
+
+        if (search) {
+            whereClauses.push("(name LIKE ? OR employee_id LIKE ? OR contact_number LIKE ?)");
+            const s = `%${search}%`;
+            params.push(s, s, s);
+        }
+
+        const countQuery = `SELECT COUNT(*) as total FROM drivers WHERE ${whereClauses.join(' AND ')}`;
+        const [{ total }] = await q(countQuery, params);
+
+        let query = `SELECT * FROM drivers WHERE ${whereClauses.join(' AND ')} ORDER BY name ASC LIMIT ? OFFSET ?`;
+        const data = await q(query, [...params, per_page, offset]);
+
+        res.json({
+            data,
+            total,
+            page,
+            per_page
+        });
     } catch (err) {
         res.status(500).json({ error: 'Failed to fetch drivers', details: err.message });
     }
@@ -72,74 +96,74 @@ router.get('/', async (req, res, next) => {
 
 // GET a single driver by ID
 router.get('/:id', async (req, res) => {
-  try {
-    const [driver] = await q('SELECT * FROM drivers WHERE id = ? AND is_deleted = 0', [req.params.id]);
-    if (!driver) return res.status(404).json({ error: 'Driver not found' }); 
+    try {
+        const [driver] = await q('SELECT * FROM drivers WHERE id = ? AND is_deleted = 0', [req.params.id]);
+        if (!driver) return res.status(404).json({ error: 'Driver not found' });
 
-    const [documents, emergency_contacts] = await Promise.all([
-      q(
-      // Use the same alias as Fleet for consistency
-      'SELECT id, driver_id, document_path as file_path, document_type as attachment_name, DATE_FORMAT(expiry_date, "%Y-%m-%d") AS expiry_date, mime_type, size_bytes FROM driver_documents WHERE driver_id = ?',
-      [req.params.id]
-      ),
-      q(
-        'SELECT * FROM driver_emergency_contacts WHERE driver_id = ?',
-        [req.params.id]
-      )
-    ]);
+        const [documents, emergency_contacts] = await Promise.all([
+            q(
+                // Use the same alias as Fleet for consistency
+                'SELECT id, driver_id, document_path as file_path, document_type as attachment_name, DATE_FORMAT(expiry_date, "%Y-%m-%d") AS expiry_date, mime_type, size_bytes FROM driver_documents WHERE driver_id = ?',
+                [req.params.id]
+            ),
+            q(
+                'SELECT * FROM driver_emergency_contacts WHERE driver_id = ?',
+                [req.params.id]
+            )
+        ]);
 
-    // The frontend expects the attachments array to be named 'attachments'
-    const attachments = documents;
-    res.json({ ...driver, attachments, emergency_contacts });
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch driver', details: err.message });
-  }
+        // The frontend expects the attachments array to be named 'attachments'
+        const attachments = documents;
+        res.json({ ...driver, attachments, emergency_contacts });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch driver', details: err.message });
+    }
 });
 
 // GET a single driver by UNIQID
 // --- keep this near the top, BEFORE '/:id'
 router.get('/by-uniqid/:uniqid', async (req, res) => {
-  try {
-    const { uniqid } = req.params;
-    const { with_history } = req.query;
+    try {
+        const { uniqid } = req.params;
+        const { with_history } = req.query;
 
-    const [driver] = await q(
-      'SELECT * FROM drivers WHERE uniqid = ? AND is_deleted = 0',
-      [uniqid]
-    );
-    if (!driver) return res.status(404).json({ error: 'Driver not found' });
-
-    const [documents, emergency_contacts] = await Promise.all([
-      q(
-        'SELECT id, driver_id, document_path as file_path, document_type as attachment_name, DATE_FORMAT(expiry_date, "%Y-%m-%d") AS expiry_date, mime_type, size_bytes FROM driver_documents WHERE driver_id = ?',
-        [driver.id]
-      ),
-      q(
-        'SELECT * FROM driver_emergency_contacts WHERE driver_id = ?',
-        [driver.id]
-      )
-    ]);
-
-    // Try driver_history first; fall back to empty if table/column not present
-    let history = [];
-    if (with_history) {
-      try {
-        // Adjust the table/column below to your actual schema if needed.
-        history = await q(
-          "SELECT h.*, u.name as user_name FROM history h LEFT JOIN user u ON u.id = h.user_id WHERE h.module = 'drivers' AND h.module_id = ? ORDER BY h.created_at DESC",
-          [driver.id]
+        const [driver] = await q(
+            'SELECT * FROM drivers WHERE uniqid = ? AND is_deleted = 0',
+            [uniqid]
         );
-      } catch (e) {
-        // If driver_history doesn't exist or column missing, ignore gracefully
-        history = [];
-      }
-    }
+        if (!driver) return res.status(404).json({ error: 'Driver not found' });
 
-    const attachments = documents;
-    res.json({ ...driver, attachments, history, emergency_contacts });
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch driver by uniqid', details: err.message });
-  }
+        const [documents, emergency_contacts] = await Promise.all([
+            q(
+                'SELECT id, driver_id, document_path as file_path, document_type as attachment_name, DATE_FORMAT(expiry_date, "%Y-%m-%d") AS expiry_date, mime_type, size_bytes FROM driver_documents WHERE driver_id = ?',
+                [driver.id]
+            ),
+            q(
+                'SELECT * FROM driver_emergency_contacts WHERE driver_id = ?',
+                [driver.id]
+            )
+        ]);
+
+        // Try driver_history first; fall back to empty if table/column not present
+        let history = [];
+        if (with_history) {
+            try {
+                // Adjust the table/column below to your actual schema if needed.
+                history = await q(
+                    "SELECT h.*, u.name as user_name FROM history h LEFT JOIN user u ON u.id = h.user_id WHERE h.module = 'drivers' AND h.module_id = ? ORDER BY h.created_at DESC",
+                    [driver.id]
+                );
+            } catch (e) {
+                // If driver_history doesn't exist or column missing, ignore gracefully
+                history = [];
+            }
+        }
+
+        const attachments = documents;
+        res.json({ ...driver, attachments, history, emergency_contacts });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch driver by uniqid', details: err.message });
+    }
 });
 
 // POST a new driver
@@ -148,13 +172,13 @@ router.post('/', upload, async (req, res) => {
     try {
         await conn.beginTransaction();
         const uniqid = crypto.randomUUID();
-        const { 
-            name, employee_id, type, contact_number, email, address, 
-            nationality, blood_group, tag_id, date_of_birth, 
+        const {
+            name, employee_id, type, contact_number, email, address,
+            nationality, blood_group, tag_id, date_of_birth,
             license_number, license_issue_date, license_expiry_date,
             emergency_contacts: emergencyContactsJson
         } = req.body;
-        
+
         let photoPath = null;
         let thumbnailPath = null;
         if (req.files?.photo?.[0]) {
@@ -187,7 +211,7 @@ router.post('/', upload, async (req, res) => {
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `;
         const [result] = await conn.query(sql, [
-            uniqid, name, employee_id, type, contact_number, email || null, address, 
+            uniqid, name, employee_id, type, contact_number, email || null, address,
             nationality || null, blood_group || null, tag_id || null, date_of_birth || null,
             license_number || null, license_issue_date || null, license_expiry_date || null,
             photoPath, thumbnailPath
@@ -207,32 +231,32 @@ router.post('/', upload, async (req, res) => {
         }
 
         if (req.files?.documents && req.files.documents.length) {
-        // Preferred: arrays from FE
-        let docTypes = asArray(req.body['document_type[]']);
-        let docExpiries = asArray(req.body['expiry_date[]']);
+            // Preferred: arrays from FE
+            let docTypes = asArray(req.body['document_type[]']);
+            let docExpiries = asArray(req.body['expiry_date[]']);
 
-        // Fallback: old style doc_type_0 / doc_expiry_0
-        if (docTypes.length === 0 && docExpiries.length === 0) {
-            const tmpT = [], tmpE = [];
-            for (let i = 0; i < req.files.documents.length; i++) {
-            tmpT.push(req.body[`doc_type_${i}`] ?? null);
-            tmpE.push(req.body[`doc_expiry_${i}`] ?? null);
+            // Fallback: old style doc_type_0 / doc_expiry_0
+            if (docTypes.length === 0 && docExpiries.length === 0) {
+                const tmpT = [], tmpE = [];
+                for (let i = 0; i < req.files.documents.length; i++) {
+                    tmpT.push(req.body[`doc_type_${i}`] ?? null);
+                    tmpE.push(req.body[`doc_expiry_${i}`] ?? null);
+                }
+                docTypes = tmpT;
+                docExpiries = tmpE;
             }
-            docTypes = tmpT;
-            docExpiries = tmpE;
-        }
 
-        const insertDocSql = `
+            const insertDocSql = `
             INSERT INTO driver_documents (driver_id, document_path, document_type, expiry_date)
             VALUES (?, ?, ?, ?)
         `;
 
-        for (let i = 0; i < req.files.documents.length; i++) {
-            const f = req.files.documents[i];
-            const t = docTypes[i] ?? null;
-            const d = normDate(docExpiries[i]);         // <- DATE only
-            await conn.query(insertDocSql, [driverId, safePath(f.path), t, d]);
-        }
+            for (let i = 0; i < req.files.documents.length; i++) {
+                const f = req.files.documents[i];
+                const t = docTypes[i] ?? null;
+                const d = normDate(docExpiries[i]);         // <- DATE only
+                await conn.query(insertDocSql, [driverId, safePath(f.path), t, d]);
+            }
         }
 
         // Log creation in history
@@ -265,9 +289,9 @@ router.put('/:id', upload, async (req, res) => {
             return res.status(404).json({ error: 'Driver not found' });
         }
         const oldDriver = oldDriverRows[0];
-        const { 
-            name, employee_id, type, contact_number, email, address, 
-            nationality, blood_group, tag_id, date_of_birth, 
+        const {
+            name, employee_id, type, contact_number, email, address,
+            nationality, blood_group, tag_id, date_of_birth,
             license_number, license_issue_date, license_expiry_date,
             emergency_contacts: emergencyContactsJson, // This is a JSON string
             updated_documents: updatedDocumentsJson, // This is a JSON string
@@ -330,10 +354,10 @@ router.put('/:id', upload, async (req, res) => {
             WHERE id = ?
         `;
         await conn.query(sql, [
-            name, employee_id, type, contact_number, email || null, address, 
+            name, employee_id, type, contact_number, email || null, address,
             nationality || null, blood_group || null, tag_id || null, date_of_birth || null,
             license_number || null, license_issue_date || null, license_expiry_date || null,
-            photoPath, thumbnailPath, 
+            photoPath, thumbnailPath,
             id
         ]);
 
@@ -357,7 +381,7 @@ router.put('/:id', upload, async (req, res) => {
                 const updatePromises = updatedDocuments.map(doc => {
                     return conn.query(
                         'UPDATE driver_documents SET document_type = ?, expiry_date = ? WHERE id = ?',
-                       [doc.document_type, normDate(doc.expiry_date) || null, doc.id]
+                        [doc.document_type, normDate(doc.expiry_date) || null, doc.id]
                     );
                 });
                 await Promise.all(updatePromises);
@@ -468,7 +492,7 @@ router.post('/attachment/:id', attachmentUpload, async (req, res) => {
         sql += ' WHERE id = ?';
         params.push(id);
         await q(sql, params);
-        
+
         const historySql = 'INSERT INTO history (module, module_id, user_id, action, details) VALUES (?, ?, ?, ?, ?)';
         const details = JSON.stringify({ file_name: attachment_name, from_name: oldDoc?.document_type, attachment_id: id });
         await db.promise().query(historySql, ['drivers', oldDoc?.driver_id, req.session?.user?.id || null, 'ATTACHMENT_UPDATED', details]);

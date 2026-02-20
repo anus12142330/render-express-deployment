@@ -64,7 +64,7 @@ const addHistory = async (conn, { module, moduleId, userId, action, details }) =
 // GET /api/opening-balances/batches - List opening balance batches
 router.get('/batches', requireAuth, async (req, res) => {
     try {
-        const { status, edit_request_status, dateFrom, dateTo, search, page = 1, per_page = 20 } = req.query;
+        const { status, edit_request_status, dateFrom, dateTo, search, page = 1, per_page = 25 } = req.query;
         const offset = (parseInt(page) - 1) * parseInt(per_page);
 
         let whereClause = 'WHERE 1=1';
@@ -537,7 +537,7 @@ router.post('/batches/:id/approve', requireAuth, requirePerm('OpeningBalance', '
     try {
         await tx(async (conn) => {
             const batchId = parseInt(req.params.id);
-            
+
             // Check if batch exists and is in Submitted status
             const [batches] = await conn.query(`
                 SELECT * FROM opening_balance_batch WHERE id = ? AND status_id = 8
@@ -548,7 +548,7 @@ router.post('/batches/:id/approve', requireAuth, requirePerm('OpeningBalance', '
             }
 
             const journalId = await openingBalanceService.postOpeningBalance(conn, batchId, userId);
-            
+
             // Log history
             await addHistory(conn, {
                 module: 'opening_balance',
@@ -953,7 +953,7 @@ router.get('/exchange-rate', requireAuth, async (req, res) => {
         const conn = await db.promise().getConnection();
         try {
             const rate = await getExchangeRateForCurrency(conn, currency, date);
-            res.json({ 
+            res.json({
                 currency_code: currency,
                 date: date,
                 rate_to_aed: rate,

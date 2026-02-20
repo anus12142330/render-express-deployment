@@ -26,7 +26,8 @@ const MODULES = [
 
   // --- Purchase ---
   { key_name: 'PurchaseOrders', group_name: 'Purchase', display_name: 'Purchase Orders', sort_order: 10 },
-  { key_name: 'Bills', group_name: 'Purchase', display_name: 'Bills', sort_order: 20 },
+  { key_name: 'PurchaseBills', group_name: 'Purchase', display_name: 'Purchase Bills', sort_order: 20 },
+  { key_name: 'ServiceBills', group_name: 'Purchase', display_name: 'Service Bills', sort_order: 25 },
 
   // --- Operations ---
   { key_name: 'CargoArrivalSummary', group_name: 'Operations', display_name: 'Cargo Arrival Summary', sort_order: 10 },

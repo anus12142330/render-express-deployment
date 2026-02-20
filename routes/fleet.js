@@ -51,7 +51,7 @@ router.post('/upload', attachmentUpload, async (req, res) => {
         }
 
         const sql = 'INSERT INTO fleet_documents (fleet_id, document_path, thumbnail_path, name, expiry_date, mime_type, size_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)';
-        
+
         const [result] = await db.promise().query(sql, [fleet_id, normalizedPath, thumbnailPath, attachment_name || file.originalname, expiry_date || null, file.mimetype, file.size]);
 
         const historySql = 'INSERT INTO history (module, module_id, user_id, action, details) VALUES (?, ?, ?, ?, ?)';
@@ -141,16 +141,41 @@ router.get('/', async (req, res, next) => {
         } catch (error) { return next(error); }
     }
     try {
+        const { page = 1, per_page = 25, search = '' } = req.query;
+        const limit = parseInt(per_page, 10);
+        const offset = (parseInt(page, 10) - 1) * limit;
+        const searchTerm = `%${search}%`;
+
+        let whereClause = 'WHERE f.is_deleted = 0';
+        const params = [];
+
+        if (search) {
+            whereClause += ' AND (f.vehicle_name LIKE ? OR f.plate_number LIKE ? OR f.brand LIKE ? OR f.model LIKE ?)';
+            params.push(searchTerm, searchTerm, searchTerm, searchTerm);
+        }
+
         const sql = `
             SELECT
                 f.id, f.vehicle_name, f.plate_number, f.brand, f.model, f.is_active, f.tc_no, f.ownership_type, f.owner_company_name, f.vehicle_type_id,
                 fi.thumbnail_path AS thumbnail
             FROM fleets f
             LEFT JOIN fleet_images fi ON f.id = fi.fleet_id AND fi.is_primary = 1
-            WHERE f.is_deleted = 0
+            ${whereClause}
+            ORDER BY f.vehicle_name ASC
+            LIMIT ? OFFSET ?
         `;
-        const fleets = await q(sql);
-        res.json(fleets);
+        const fleets = await q(sql, [...params, limit, offset]);
+
+        const countSql = `SELECT COUNT(*) as total FROM fleets f ${whereClause}`;
+        const totalRows = await q(countSql, params);
+        const total = totalRows[0]?.total || 0;
+
+        res.json({
+            data: fleets,
+            total,
+            page: parseInt(page, 10),
+            per_page: limit
+        });
     } catch (err) {
         res.status(500).json({ error: 'Failed to fetch fleets', details: err.message });
     }
@@ -163,10 +188,10 @@ router.get('/:id', async (req, res) => {
         if (!fleet) {
             return res.status(404).json({ error: 'Fleet not found' });
         }
-        
+
         const history = await q('SELECT h.*, u.name as user_name FROM history h LEFT JOIN user u ON u.id = h.user_id WHERE h.module = "fleets" AND h.module_id = ? ORDER BY h.created_at DESC', [req.params.id]);
         const images = await q('SELECT * FROM fleet_images WHERE fleet_id = ?', [req.params.id]);
-        
+
         // The frontend is expecting the attachments array to be named 'attachments'
         // The table is named 'fleet_documents', so we alias it here.
         const attachments = await q('SELECT id, fleet_id, document_path as file_path, thumbnail_path, name as attachment_name, DATE_FORMAT(expiry_date, "%Y-%m-%d") AS expiry_date, mime_type, size_bytes, category FROM fleet_documents WHERE fleet_id = ?', [req.params.id]);
@@ -301,7 +326,7 @@ router.put('/:id', upload, async (req, res) => {
             plate_number, registration_date, registration_expiry_date, tc_no, primary_image,
             insurance_company, insurance_name, insurance_expiry_date, insurance_issue_date, new_documents_meta, updated_documents_meta,
             ownership_type, owner_company_id, owner_company_name, starting_km, vehicle_service_km, deleted_images, deleted_documents
-            } = req.body;
+        } = req.body;
 
         // If new images are being added and there's no primary image selected (neither old nor new),
         // make the first new image the primary one.
@@ -405,29 +430,29 @@ router.put('/:id', upload, async (req, res) => {
         }
 
         // Update primary status for existing images
-       if (effectivePrimary) {
-   await conn.query('UPDATE fleet_images SET is_primary = 0 WHERE fleet_id = ?', [id]);
+        if (effectivePrimary) {
+            await conn.query('UPDATE fleet_images SET is_primary = 0 WHERE fleet_id = ?', [id]);
 
-   // Case A: existing image -> we receive full stored path (starts with "uploads/")
-   if (String(effectivePrimary).startsWith('uploads/')) {
-     await conn.query(
-       'UPDATE fleet_images SET is_primary = 1 WHERE fleet_id = ? AND image_path = ?',
-       [id, effectivePrimary]
-     );
-     await conn.query('UPDATE fleets SET primary_image = ? WHERE id = ?', [effectivePrimary, id]);
-   } else {
-     // Case B: newly uploaded image -> we received the ORIGINAL filename
-     const match = (req.files.vehicle_images || []).find(f => f.originalname === effectivePrimary);
-     if (match) {
-       const normalizedPath = match.path.replace(/\\/g, '/');
-       await conn.query(
-         'UPDATE fleet_images SET is_primary = 1 WHERE fleet_id = ? AND image_path = ?',
-         [id, normalizedPath]
-       );
-       await conn.query('UPDATE fleets SET primary_image = ? WHERE id = ?', [normalizedPath, id]);
-    }
-   }
- }
+            // Case A: existing image -> we receive full stored path (starts with "uploads/")
+            if (String(effectivePrimary).startsWith('uploads/')) {
+                await conn.query(
+                    'UPDATE fleet_images SET is_primary = 1 WHERE fleet_id = ? AND image_path = ?',
+                    [id, effectivePrimary]
+                );
+                await conn.query('UPDATE fleets SET primary_image = ? WHERE id = ?', [effectivePrimary, id]);
+            } else {
+                // Case B: newly uploaded image -> we received the ORIGINAL filename
+                const match = (req.files.vehicle_images || []).find(f => f.originalname === effectivePrimary);
+                if (match) {
+                    const normalizedPath = match.path.replace(/\\/g, '/');
+                    await conn.query(
+                        'UPDATE fleet_images SET is_primary = 1 WHERE fleet_id = ? AND image_path = ?',
+                        [id, normalizedPath]
+                    );
+                    await conn.query('UPDATE fleets SET primary_image = ? WHERE id = ?', [normalizedPath, id]);
+                }
+            }
+        }
 
         // Handle new documents
         if (req.files.vehicle_documents) {
@@ -475,7 +500,7 @@ router.put('/:id', upload, async (req, res) => {
         if (deleted_documents) {
             const docIds = JSON.parse(deleted_documents);
             if (docIds.length > 0) {
-               await conn.query('DELETE FROM fleet_documents WHERE id IN (?)', [docIds]);
+                await conn.query('DELETE FROM fleet_documents WHERE id IN (?)', [docIds]);
             }
         }
 
