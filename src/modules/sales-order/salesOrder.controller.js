@@ -51,7 +51,9 @@ export const listSalesOrders = async (req, res) => {
             page = Math.floor(Number(req.query.offset) / pageSize) + 1;
         }
 
-        const canViewAll = await hasPermission(userId, 'SalesOrders', 'view_all');
+        const canViewAll = await hasPermission(userId, 'SalesOrders', 'view_all')
+            || await hasPermission(userId, 'Dispatch', 'view_all')
+            || await hasPermission(userId, 'DispatchDelivery', 'view_all');
         const filterByCreatedBy = canViewAll ? null : userId;
 
         const query = {
