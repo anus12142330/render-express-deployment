@@ -288,74 +288,129 @@ const upsertShipmentPoAllocations = async (conn, {
 
     await ensureAllocationTable(conn);
 
-    const poItemIds = [...new Set(allocations.map(a => Number(a.po_item_id)).filter(Boolean))];
-    if (poItemIds.length === 0) return;
+    const allIds = allocations.map(a => Number(a.po_item_id)).filter(id => id && !isNaN(id));
+    const poItemIds = [...new Set(allIds.filter(id => id > 0))];
+    const additionalIds = [...new Set(allIds.filter(id => id < 0))];
 
-    const [poItems] = await conn.query(
-        `SELECT id, item_id AS product_id, quantity FROM purchase_order_items WHERE purchase_order_id = ? AND id IN (?)`,
-        [poId, poItemIds]
-    );
-    const itemMap = new Map(poItems.map(item => [Number(item.id), item]));
+    // --- Regular PO Items Data Fetching ---
+    let itemMap = new Map();
+    let existingAllocatedMap = new Map();
+    let existingPlannedMap = new Map();
+    let existingLoadedMap = new Map();
+    let existingRemainingMap = new Map();
+    let totalsAllocatedMap = new Map();
+    let totalsLoadedMap = new Map();
 
-    const missing = poItemIds.filter(id => !itemMap.has(id));
-    if (missing.length > 0) {
-        throw new Error(`PO item(s) not found: ${missing.join(', ')}`);
+    if (poItemIds.length > 0) {
+        const [poItems] = await conn.query(
+            `SELECT id, item_id AS product_id, quantity FROM purchase_order_items WHERE purchase_order_id = ? AND id IN (?)`,
+            [poId, poItemIds]
+        );
+        itemMap = new Map(poItems.map(item => [Number(item.id), item]));
+
+        const missing = poItemIds.filter(id => !itemMap.has(id));
+        if (missing.length > 0) {
+            throw new Error(`PO item(s) not found: ${missing.join(', ')}`);
+        }
+
+        const [existingRows] = await conn.query(
+            `SELECT po_item_id, planned_quantity, allocated_quantity, loaded_quantity, remaining_quantity FROM shipment_po_item_allocation WHERE shipment_id = ? AND po_item_id IN (?)`,
+            [shipmentId, poItemIds]
+        );
+        existingRows.forEach(row => {
+            const pid = Number(row.po_item_id);
+            existingAllocatedMap.set(pid, toFiniteNumber(row.allocated_quantity));
+            existingPlannedMap.set(pid, toFiniteNumber(row.planned_quantity));
+            existingLoadedMap.set(pid, toFiniteNumber(row.loaded_quantity));
+            existingRemainingMap.set(pid, toFiniteNumber(row.remaining_quantity));
+        });
+
+        const [totalRows] = await conn.query(
+            `SELECT po_item_id,
+                    SUM(allocated_quantity) AS allocated,
+                    SUM(loaded_quantity) AS loaded
+             FROM shipment_po_item_allocation
+             WHERE po_item_id IN (?)
+             GROUP BY po_item_id`,
+            [poItemIds]
+        );
+        totalRows.forEach(row => {
+            const pid = Number(row.po_item_id);
+            totalsAllocatedMap.set(pid, toFiniteNumber(row.allocated));
+            totalsLoadedMap.set(pid, toFiniteNumber(row.loaded));
+        });
     }
 
-    const [existingRows] = await conn.query(
-        `SELECT po_item_id, planned_quantity, allocated_quantity, loaded_quantity, remaining_quantity FROM shipment_po_item_allocation WHERE shipment_id = ? AND po_item_id IN (?)`,
-        [shipmentId, poItemIds]
-    );
-    const existingAllocatedMap = new Map(existingRows.map(row => [Number(row.po_item_id), toFiniteNumber(row.allocated_quantity)]));
-    const existingPlannedMap = new Map(existingRows.map(row => [Number(row.po_item_id), toFiniteNumber(row.planned_quantity)]));
-    const existingLoadedMap = new Map(existingRows.map(row => [Number(row.po_item_id), toFiniteNumber(row.loaded_quantity)]));
-    const existingRemainingMap = new Map(existingRows.map(row => [Number(row.po_item_id), toFiniteNumber(row.remaining_quantity)]));
-
-    const [totalRows] = await conn.query(
-        `SELECT po_item_id,
-                SUM(allocated_quantity) AS allocated,
-                SUM(loaded_quantity) AS loaded
-         FROM shipment_po_item_allocation
-         WHERE po_item_id IN (?)
-         GROUP BY po_item_id`,
-        [poItemIds]
-    );
-    const totalsAllocatedMap = new Map(totalRows.map(row => [Number(row.po_item_id), toFiniteNumber(row.allocated)]));
-    const totalsLoadedMap = new Map(totalRows.map(row => [Number(row.po_item_id), toFiniteNumber(row.loaded)]));
+    // --- Additional Items Data Fetching ---
+    if (additionalIds.length > 0) {
+        // Fetch existing allocations for additional items to support incremental updates (like loaded quantity)
+        const [existingRowsAdd] = await conn.query(
+            `SELECT po_item_id, planned_quantity, allocated_quantity, loaded_quantity FROM shipment_po_item_allocation WHERE shipment_id = ? AND po_item_id IN (?)`,
+            [shipmentId, additionalIds]
+        );
+        existingRowsAdd.forEach(row => {
+            const pid = Number(row.po_item_id);
+            existingAllocatedMap.set(pid, toFiniteNumber(row.allocated_quantity));
+            existingPlannedMap.set(pid, toFiniteNumber(row.planned_quantity));
+            existingLoadedMap.set(pid, toFiniteNumber(row.loaded_quantity));
+            // No remaining map for additional items as they have infinite supply
+        });
+    }
 
     for (const allocation of allocations) {
         const poItemId = Number(allocation.po_item_id);
         if (!poItemId) continue;
-        const poItem = itemMap.get(poItemId);
-        if (!poItem) {
-            throw new Error(`PO item ${poItemId} not found.`);
-        }
 
         const requestedQtyRaw = toFiniteNumber(allocation.quantity);
         const requestedQty = Math.max(requestedQtyRaw, 0);
 
-        const totalAllocated = totalsAllocatedMap.get(poItemId) || 0;
-        const totalLoaded = totalsLoadedMap.get(poItemId) || 0;
-        const existingAllocated = existingAllocatedMap.get(poItemId) || 0;
-        const existingPlanned = existingPlannedMap.get(poItemId) || 0;
-        const existingLoaded = existingLoadedMap.get(poItemId) || 0;
-        const allocatedByOthers = totalAllocated - existingAllocated;
-        const orderedQty = toFiniteNumber(poItem.quantity);
-        const availableQty = Math.max(orderedQty - allocatedByOthers, 0);
+        let nextPlanned, nextAllocated, nextLoaded, remainingGlobal;
+        let productId;
 
-        const nextPlanned = updatePlannedQuantity ? requestedQty : existingPlanned;
-        const nextAllocated = updateAllocatedQuantity ? requestedQty : existingAllocated;
-        const nextLoaded = updateLoadedQuantity ? requestedQty : existingLoaded;
+        if (poItemId > 0) {
+            // Regular PO Item Logic
+            const poItem = itemMap.get(poItemId);
+            if (!poItem) continue;
 
-        if (!skipAvailabilityCheck && nextAllocated > availableQty + 1e-6) {
-            throw new Error(`Allocation for PO item ${poItemId} exceeds the available quantity.`);
+            productId = allocation.product_id ? Number(allocation.product_id) : (poItem.product_id ? Number(poItem.product_id) : null);
+
+            const totalAllocated = totalsAllocatedMap.get(poItemId) || 0;
+            const totalLoaded = totalsLoadedMap.get(poItemId) || 0;
+            const existingAllocated = existingAllocatedMap.get(poItemId) || 0;
+            const existingPlanned = existingPlannedMap.get(poItemId) || 0;
+            const existingLoaded = existingLoadedMap.get(poItemId) || 0;
+
+            const allocatedByOthers = totalAllocated - existingAllocated;
+            const orderedQty = toFiniteNumber(poItem.quantity);
+            const availableQty = Math.max(orderedQty - allocatedByOthers, 0);
+
+            nextPlanned = updatePlannedQuantity ? requestedQty : existingPlanned;
+            nextAllocated = updateAllocatedQuantity ? requestedQty : existingAllocated;
+            nextLoaded = updateLoadedQuantity ? requestedQty : existingLoaded;
+
+            if (!skipAvailabilityCheck && updateAllocatedQuantity && nextAllocated > availableQty + 1e-6) {
+                throw new Error(`Allocation for PO item ${poItemId} exceeds the available quantity.`);
+            }
+
+            const remainingCalcBase = orderedQty - (allocatedByOthers + nextAllocated);
+            remainingGlobal = updateAllocatedQuantity
+                ? Math.max(Number(remainingCalcBase.toFixed(4)), 0)
+                : (existingRemainingMap.get(poItemId) ?? Math.max(Number(remainingCalcBase.toFixed(4)), 0));
+
+        } else {
+            // Additional Product Logic (poItemId < 0)
+            productId = Math.abs(poItemId); // Extract real product ID
+
+            const existingPlanned = existingPlannedMap.get(poItemId) || 0;
+            const existingAllocated = existingAllocatedMap.get(poItemId) || 0;
+            const existingLoaded = existingLoadedMap.get(poItemId) || 0;
+
+            // For additional products, we assume infinite availability, so request is always granted
+            nextPlanned = updatePlannedQuantity ? requestedQty : existingPlanned;
+            nextAllocated = updateAllocatedQuantity ? requestedQty : existingAllocated;
+            nextLoaded = updateLoadedQuantity ? requestedQty : existingLoaded;
+            remainingGlobal = 0;
         }
-
-        const remainingCalcBase = orderedQty - (allocatedByOthers + nextAllocated);
-        const remainingGlobal = updateAllocatedQuantity
-            ? Math.max(Number(remainingCalcBase.toFixed(4)), 0)
-            : (existingRemainingMap.get(poItemId) ?? Math.max(Number(remainingCalcBase.toFixed(4)), 0));
-        const productId = allocation.product_id ? Number(allocation.product_id) : (poItem.product_id ? Number(poItem.product_id) : null);
 
         const insertValues = [
             shipmentId,
@@ -378,7 +433,7 @@ const upsertShipmentPoAllocations = async (conn, {
         updateClauses.push('po_id = VALUES(po_id)');
         if (updateAllocatedQuantity) {
             updateClauses.push('allocated_quantity = VALUES(allocated_quantity)');
-            updateClauses.push('remaining_quantity = GREATEST(VALUES(remaining_quantity), 0)');
+            updateClauses.push('remaining_quantity = VALUES(remaining_quantity)');
         }
         if (updateLoadedQuantity) {
             updateClauses.push('loaded_quantity = VALUES(loaded_quantity)');
@@ -395,16 +450,14 @@ const upsertShipmentPoAllocations = async (conn, {
             insertValues
         );
 
+        // Update local maps for subsequent iterations in case of same item
         if (updateAllocatedQuantity) {
-            totalsAllocatedMap.set(poItemId, allocatedByOthers + nextAllocated);
             existingAllocatedMap.set(poItemId, nextAllocated);
-            existingRemainingMap.set(poItemId, remainingGlobal);
         }
         if (updatePlannedQuantity) {
             existingPlannedMap.set(poItemId, nextPlanned);
         }
         if (updateLoadedQuantity) {
-            totalsLoadedMap.set(poItemId, (totalLoaded - existingLoaded) + nextLoaded);
             existingLoadedMap.set(poItemId, nextLoaded);
         }
     }
@@ -1960,6 +2013,44 @@ router.get("/:shipUniqid/po-allocations", async (req, res) => {
             [shipment.id]
         );
 
+        // Fetch additional products (manual additions not in PO)
+        const [additional] = await db.promise().query(
+            `SELECT p.id as product_id, p.product_name as item_name
+             FROM shipment_additional_product sap
+             JOIN products p ON p.id = sap.product_id
+             WHERE sap.shipment_id = ?`,
+            [shipment.id]
+        );
+
+        // Merge additional products into allocations list
+        // Use negative product_id as a fake po_item_id to distinguish them
+        for (const prod of additional) {
+            const fakePoItemId = -prod.product_id;
+
+            // Check if there is already an allocation record for this additional product
+            let existing = rows.find(r => Number(r.po_item_id) === fakePoItemId);
+
+            if (existing) {
+                // If exists, ensure valid name is populated if missing
+                if (!existing.item_name) existing.item_name = prod.item_name;
+            } else {
+                // If not allocated yet, add a placeholder entry
+                rows.push({
+                    id: null,
+                    po_item_id: fakePoItemId,
+                    product_id: prod.product_id,
+                    po_id: shipment.po_id,
+                    planned_quantity: 0,
+                    allocated_quantity: 0,
+                    loaded_quantity: 0,
+                    remaining_quantity: 0,
+                    allocation_mode: 'partial',
+                    item_name: prod.item_name,
+                    po_quantity: 999999 // Unlimited allocation for additional items
+                });
+            }
+        }
+
         res.json(rows || []);
     } catch (error) {
         res.status(500).json(errPayload("Failed to fetch product allocations.", "DB_ERROR", error.message));
@@ -2750,6 +2841,19 @@ router.post("/:shipUniqid/split-shipment", async (req, res) => {
             );
         }
 
+        // Copy existing shipment_additional_product entries to the new shipment
+        const [existingAdditionalProducts] = await conn.query(
+            `SELECT product_id FROM shipment_additional_product WHERE shipment_id = ?`,
+            [originalShipment.id]
+        );
+
+        for (const prod of existingAdditionalProducts) {
+            await conn.query(
+                `INSERT INTO shipment_additional_product (shipment_id, product_id) VALUES (?, ?)`,
+                [newShipmentId, prod.product_id]
+            );
+        }
+
         // --- Trigger recalculation of lot numbers and total_lots for the entire family ---
         // This ensures total_lots is accurate for all family members after a split.
         await recalculateLotNumbersInternal(conn, originalShipment.id, userId, userName);
@@ -2837,7 +2941,7 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
     try {
         await conn.beginTransaction();
 
-        const [[shipment]] = await conn.query(`SELECT id, po_id, shipment_stage_id FROM shipment WHERE ship_uniqid = ?`, [shipUniqid]);
+        const [[shipment]] = await conn.query(`SELECT s.id, s.po_id, s.shipment_stage_id, po.po_number FROM shipment s LEFT JOIN purchase_orders po ON po.id = s.po_id WHERE s.ship_uniqid = ?`, [shipUniqid]);
         if (!shipment) throw new Error("Shipment not found.");
 
         // Update common shipment details
@@ -2913,9 +3017,34 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
         }
         const changes = [];
 
+        // Helper to generate batch number from PO Number. Assume format like "AGPO-25-10096" -> "25-10096"
+        let baseBatchNo = '';
+        if (shipment.po_number) {
+            const parts = shipment.po_number.split('-');
+            if (parts.length > 1) {
+                // If prefixed like AGPO-25-10096, take everything after first hyphen
+                baseBatchNo = parts.slice(1).join('-');
+            } else {
+                baseBatchNo = shipment.po_number;
+            }
+        }
 
+        // Determine starting container index for batch numbering
+        // Check how many containers already exist for this PO in OTHER shipments (previous partials)
+        const [[{ existingContainerCount }]] = await conn.query(
+            `SELECT COUNT(sc.id) as existingContainerCount 
+             FROM shipment_container sc 
+             JOIN shipment s ON s.id = sc.shipment_id 
+             WHERE s.po_id = ? AND s.id != ?`,
+            [shipment.po_id, shipment.id]
+        );
 
+        // Start indexing from the next number after existing containers
+        let containerIndex = existingContainerCount;
         for (const container of containers) {
+            containerIndex++;
+            const containerSuffix = `C${containerIndex}`;
+
             let containerId;
             // Check if it's an existing container by checking for a numeric ID
             if (container.id && !isNaN(Number(container.id))) {
@@ -2972,16 +3101,23 @@ router.post("/:shipUniqid/underloading-sea", upload.any(), async (req, res) => {
             }
 
 
-            const itemValues = (container.items || []).map(it => {
+            const itemValues = (container.items || []).map((it, itemIdx) => {
                 // Destructure to include product_id and exclude product_option
                 const { product_id, product_name, package_type, package_count, net_weight, gross_weight, hscode } = it;
                 const normalizedProductId = (product_id === undefined || product_id === null || product_id === '') ? null : Number(product_id);
-                return [containerId, normalizedProductId, product_name, package_type, package_count, net_weight, gross_weight, hscode];
+
+                // Check for batch_no from frontend, else generate it
+                // Logic: 25-10096C1-1
+                const itemSuffix = `-${itemIdx + 1}`;
+                const generatedBatchNo = baseBatchNo ? `${baseBatchNo}${containerSuffix}${itemSuffix}` : null;
+                const finalBatchNo = it.batch_no || generatedBatchNo;
+
+                return [containerId, normalizedProductId, product_name, package_type, package_count, net_weight, gross_weight, hscode, finalBatchNo];
             });
 
             if (itemValues.length > 0) {
                 await conn.query(
-                    `INSERT INTO shipment_container_item (container_id, product_id, product_name, package_type, package_count, net_weight, gross_weight, hscode) VALUES ?`,
+                    `INSERT INTO shipment_container_item (container_id, product_id, product_name, package_type, package_count, net_weight, gross_weight, hscode, batch_no) VALUES ?`,
                     [itemValues]
                 );
             }

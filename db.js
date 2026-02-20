@@ -1,20 +1,19 @@
-// src/db.js
-import mysql from "mysql2";
+import mysql from 'mysql2';
+import dotenv from 'dotenv';
+import path from 'path';
 
-const db = mysql.createPool({
-  host: process.env.DB_HOST || "localhost",
-  user: process.env.DB_USER || "root",
-  password: process.env.DB_PASSWORD || "",
-  database: process.env.DB_NAME || "portal_db",
-  port: Number(process.env.DB_PORT || 3306),
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
-  dateStrings: true, // Return DATE and DATETIME as 'YYYY-MM-DD HH:mm:ss' strings
+dotenv.config();
 
-  // keeps idle connections alive (important on Render)
-  enableKeepAlive: true,
-  keepAliveInitialDelay: 10000,
+const pool = mysql.createPool({
+    host: process.env.DB_HOST || 'localhost',
+    user: process.env.DB_USER || 'root',
+    password: process.env.DB_PASSWORD || '',
+    database: process.env.DB_NAME || 'portal_db',
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0,
+    dateStrings: true,
+    multipleStatements: true
 });
 
-export default db;
+export default pool;

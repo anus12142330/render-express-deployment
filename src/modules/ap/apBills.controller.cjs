@@ -25,14 +25,14 @@ function formatValueForDisplay(value, field) {
     if (value === null || value === undefined || value === '') {
         return '—';
     }
-    
+
     // Format numbers with 2 decimal places (handle 0 as valid value)
     if (['subtotal', 'tax_total', 'total'].includes(field)) {
         const num = Number(value);
         if (isNaN(num)) return '—';
         return num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     }
-    
+
     // Format dates
     if (['bill_date', 'due_date'].includes(field) && value) {
         try {
@@ -43,7 +43,7 @@ function formatValueForDisplay(value, field) {
             return String(value);
         }
     }
-    
+
     // For ID fields, value should already be the name from the lookup
     // Just return as string
     return String(value);
@@ -52,25 +52,25 @@ function formatValueForDisplay(value, field) {
 // Helper to get changed fields between old and new values
 function getChangedFields(oldValues, newValues) {
     const changes = [];
-    const fields = ['bill_number', 'bill_date', 'due_date', 'supplier_id', 'company_id', 'shipment_id', 'warehouse_id', 'currency_id', 'subtotal', 'tax_total', 'total', 'notes', 'purchase_order_id'];
-    
+    const fields = ['bill_number', 'bill_date', 'due_date', 'supplier_id', 'company_id', 'shipment_id', 'container_no', 'warehouse_id', 'currency_id', 'subtotal', 'tax_total', 'total', 'notes', 'purchase_order_id'];
+
     fields.forEach(field => {
         const oldVal = oldValues[field];
         const newVal = newValues[field];
-        
+
         // Normalize values for comparison
         let normalizedOld = oldVal;
         let normalizedNew = newVal;
-        
+
         // Handle numeric fields - compare as numbers
         if (['subtotal', 'tax_total', 'total'].includes(field)) {
             normalizedOld = oldVal != null ? Number(oldVal) : null;
             normalizedNew = newVal != null ? Number(newVal) : null;
-            
+
             // Compare numbers with small tolerance for floating point
-            if (normalizedOld !== normalizedNew && 
-                (normalizedOld == null || normalizedNew == null || 
-                 Math.abs((normalizedOld || 0) - (normalizedNew || 0)) > 0.01)) {
+            if (normalizedOld !== normalizedNew &&
+                (normalizedOld == null || normalizedNew == null ||
+                    Math.abs((normalizedOld || 0) - (normalizedNew || 0)) > 0.01)) {
                 changes.push({
                     field,
                     from: formatValueForDisplay(oldVal, field),
@@ -81,7 +81,7 @@ function getChangedFields(oldValues, newValues) {
             // For non-numeric fields, compare as strings (trimmed)
             const oldStr = String(oldVal || '').trim();
             const newStr = String(newVal || '').trim();
-            
+
             if (oldStr !== newStr) {
                 changes.push({
                     field,
@@ -91,7 +91,7 @@ function getChangedFields(oldValues, newValues) {
             }
         }
     });
-    
+
     return changes;
 }
 
@@ -347,6 +347,7 @@ async function createBill(req, res, next) {
                 total,
                 notes,
                 purchase_order_id,
+                container_no,
                 is_reverse_tax,
                 is_service
             } = req.body;
@@ -393,10 +394,10 @@ async function createBill(req, res, next) {
 
             const [billResult] = await conn.query(`
                 INSERT INTO ap_bills 
-                (bill_uniqid, bill_number, bill_date, due_date, supplier_id, purchase_order_id, company_id, shipment_id, warehouse_id, 
+                (bill_uniqid, bill_number, bill_date, due_date, supplier_id, purchase_order_id, company_id, shipment_id, container_no, warehouse_id, 
                  currency_id, subtotal, tax_total, total, notes, is_reverse_tax, is_service, user_id, status_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3)
-            `, [billUniqid, finalBillNumber, bill_date, due_date, parsedSupplierId, parsedPoId, parsedCompanyId, parsedShipmentId, parsedWarehouseId,
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3)
+            `, [billUniqid, finalBillNumber, bill_date, due_date, parsedSupplierId, parsedPoId, parsedCompanyId, parsedShipmentId, container_no, parsedWarehouseId,
                 parsedCurrencyId, parsedSubtotal, parsedTaxTotal, parsedTotal, notes, (parsedIsReverseTax ? 1 : 0), (parsedIsService ? 1 : 0), userId]);
 
             const billId = billResult.insertId;
@@ -421,7 +422,7 @@ async function createBill(req, res, next) {
                 const parsedTaxId = typeof line.tax_id === 'string' ? parseInt(line.tax_id) : (line.tax_id || null);
                 const parsedTaxRate = typeof line.tax_rate === 'string' ? parseFloat(line.tax_rate) : line.tax_rate;
                 const parsedLineTotal = typeof line.line_total === 'string' ? parseFloat(line.line_total) : line.line_total;
-                
+
                 const [lineResult] = await conn.query(`
                     INSERT INTO ap_bill_lines 
                     (bill_id, line_no, product_id, item_name, description, quantity, uom_id, rate, tax_id, tax_rate, line_total)
@@ -440,12 +441,13 @@ async function createBill(req, res, next) {
                         const parsedBatchId = typeof batch.batch_id === 'string' ? parseInt(batch.batch_id) : (batch.batch_id || null);
                         const parsedBatchQuantity = typeof batch.quantity === 'string' ? parseFloat(batch.quantity) : batch.quantity;
                         const parsedUnitCost = typeof batch.unit_cost === 'string' ? parseFloat(batch.unit_cost) : batch.unit_cost;
-                        
+                        const parsedContainerId = typeof batch.container_id === 'string' ? parseInt(batch.container_id) : (batch.container_id || null);
+
                         await conn.query(`
                             INSERT INTO ap_bill_line_batches 
-                            (bill_line_id, batch_id, batch_no, quantity, unit_cost, mfg_date, exp_date)
-                            VALUES (?, ?, ?, ?, ?, ?, ?)
-                        `, [lineId, parsedBatchId, batch.batch_no || '', parsedBatchQuantity, parsedUnitCost, batch.mfg_date || null, batch.exp_date || null]);
+                            (bill_line_id, batch_id, batch_no, container_id, container_no, quantity, unit_cost, mfg_date, exp_date)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        `, [lineId, parsedBatchId, batch.batch_no || '', parsedContainerId, batch.container_no || null, parsedBatchQuantity, parsedUnitCost, batch.mfg_date || null, batch.exp_date || null]);
                     }
                 }
             }
@@ -524,7 +526,7 @@ async function updateBill(req, res, next) {
                     WHERE source_type = 'AP_BILL' AND source_id = ? AND txn_type = 'PURCHASE_BILL_RECEIPT'
                     AND (is_deleted = 0 OR is_deleted IS NULL)
                 `, [bill.id]);
-                
+
                 const [glJournals] = await conn.query(`
                     SELECT COUNT(*) as count FROM gl_journals 
                     WHERE source_type = 'AP_BILL' AND source_id = ?
@@ -534,7 +536,7 @@ async function updateBill(req, res, next) {
                     // Reverse inventory transactions and GL journals before allowing edit
                     // Use reverseBillTransactions (not cancelBill) to reverse without changing status
                     await apBillsService.reverseBillTransactions(conn, bill.id, userId);
-                    
+
                     // Add history entry for reversal
                     await addHistory(conn, {
                         module: 'ap_bill',
@@ -579,6 +581,7 @@ async function updateBill(req, res, next) {
                 total,
                 notes,
                 purchase_order_id,
+                container_no,
                 is_reverse_tax,
                 is_service
             } = req.body;
@@ -638,7 +641,8 @@ async function updateBill(req, res, next) {
                 tax_total: bill.tax_total || 0,
                 total: bill.total || 0,
                 notes: bill.notes || '',
-                purchase_order_id: oldPO[0]?.po_number || (bill.purchase_order_id ? String(bill.purchase_order_id) : '')
+                purchase_order_id: oldPO[0]?.po_number || (bill.purchase_order_id ? String(bill.purchase_order_id) : ''),
+                container_no: bill.container_no || ''
             };
 
             // Get new values (fetch names for IDs)
@@ -660,7 +664,8 @@ async function updateBill(req, res, next) {
                 tax_total: parsedTaxTotal || 0,
                 total: parsedTotal || 0,
                 notes: notes || '',
-                purchase_order_id: newPO[0]?.po_number || (parsedPoId ? String(parsedPoId) : '')
+                purchase_order_id: newPO[0]?.po_number || (parsedPoId ? String(parsedPoId) : ''),
+                container_no: container_no || ''
             };
 
             // Track changes BEFORE updating
@@ -675,11 +680,11 @@ async function updateBill(req, res, next) {
             // Clear edit_request_status when bill is edited (request has been fulfilled)
             await conn.query(`
                 UPDATE ap_bills 
-                SET bill_number = ?, bill_date = ?, due_date = ?, supplier_id = ?, purchase_order_id = ?, company_id = ?, shipment_id = ?, warehouse_id = ?,
+                SET bill_number = ?, bill_date = ?, due_date = ?, supplier_id = ?, purchase_order_id = ?, company_id = ?, shipment_id = ?, container_no = ?, warehouse_id = ?,
                     currency_id = ?, subtotal = ?, tax_total = ?, total = ?, notes = ?, is_reverse_tax = ?, is_service = ?, status_id = ?,
                     edit_request_status = NULL, edit_approved_by = NULL, edit_approved_at = NULL
                 WHERE id = ?
-            `, [bill_number, bill_date, due_date, parsedSupplierId, parsedPoId, parsedCompanyId, parsedShipmentId, parsedWarehouseId,
+            `, [bill_number, bill_date, due_date, parsedSupplierId, parsedPoId, parsedCompanyId, parsedShipmentId, container_no, parsedWarehouseId,
                 parsedCurrencyId, parsedSubtotal, parsedTaxTotal, parsedTotal, notes, (parsedIsReverseTax ? 1 : 0), (parsedIsService ? 1 : 0), newStatusId, bill.id]);
 
             await conn.query(`DELETE FROM ap_bill_line_batches WHERE bill_line_id IN (SELECT id FROM ap_bill_lines WHERE bill_id = ?)`, [bill.id]);
@@ -720,7 +725,7 @@ async function updateBill(req, res, next) {
                 const parsedTaxId = typeof line.tax_id === 'string' ? parseInt(line.tax_id) : (line.tax_id || null);
                 const parsedTaxRate = typeof line.tax_rate === 'string' ? parseFloat(line.tax_rate) : line.tax_rate;
                 const parsedLineTotal = typeof line.line_total === 'string' ? parseFloat(line.line_total) : line.line_total;
-                
+
                 const [lineResult] = await conn.query(`
                     INSERT INTO ap_bill_lines 
                     (bill_id, line_no, product_id, item_name, description, quantity, uom_id, rate, tax_id, tax_rate, line_total)
@@ -739,12 +744,14 @@ async function updateBill(req, res, next) {
                         const parsedBatchId = typeof batch.batch_id === 'string' ? parseInt(batch.batch_id) : (batch.batch_id || null);
                         const parsedBatchQuantity = typeof batch.quantity === 'string' ? parseFloat(batch.quantity) : batch.quantity;
                         const parsedUnitCost = typeof batch.unit_cost === 'string' ? parseFloat(batch.unit_cost) : batch.unit_cost;
-                        
+
+                        const parsedContainerId = typeof batch.container_id === 'string' ? parseInt(batch.container_id) : (batch.container_id || null);
+
                         await conn.query(`
                             INSERT INTO ap_bill_line_batches 
-                            (bill_line_id, batch_id, batch_no, quantity, unit_cost, mfg_date, exp_date)
-                            VALUES (?, ?, ?, ?, ?, ?, ?)
-                        `, [lineId, parsedBatchId, batch.batch_no || '', parsedBatchQuantity, parsedUnitCost, batch.mfg_date || null, batch.exp_date || null]);
+                            (bill_line_id, batch_id, batch_no, container_id, container_no, quantity, unit_cost, mfg_date, exp_date)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        `, [lineId, parsedBatchId, batch.batch_no || '', parsedContainerId, batch.container_no || null, parsedBatchQuantity, parsedUnitCost, batch.mfg_date || null, batch.exp_date || null]);
                     }
                 }
             }
@@ -753,7 +760,7 @@ async function updateBill(req, res, next) {
             if (statusChanged) {
                 const [fromStatusRows] = await conn.query(`SELECT name FROM status WHERE id = ? LIMIT 1`, [originalStatusId]);
                 const [toStatusRows] = await conn.query(`SELECT name FROM status WHERE id = ? LIMIT 1`, [3]); // DRAFT
-                
+
                 const fromStatusName = fromStatusRows[0]?.name || 'N/A';
                 const toStatusName = toStatusRows[0]?.name || 'N/A';
 
@@ -1035,7 +1042,7 @@ async function updateStatus(req, res, next) {
             // Fetch status names from status table
             const [fromStatusRows] = await conn.query(`SELECT name FROM status WHERE id = ? LIMIT 1`, [bill.status_id]);
             const [toStatusRows] = await conn.query(`SELECT name FROM status WHERE id = ? LIMIT 1`, [status_id]);
-            
+
             const fromStatusName = fromStatusRows[0]?.name || 'N/A';
             const toStatusName = toStatusRows[0]?.name || 'N/A';
 
@@ -1059,8 +1066,8 @@ async function updateStatus(req, res, next) {
                 }
             });
 
-            res.json({ 
-                success: true, 
+            res.json({
+                success: true,
                 message: 'Status updated successfully',
                 status_id: parseInt(status_id),
                 status_name: toStatusName
@@ -1167,7 +1174,7 @@ async function rejectBill(req, res, next) {
             // Fetch status names from status table
             const [fromStatusRows] = await conn.query(`SELECT name FROM status WHERE id = ? LIMIT 1`, [bill.status_id]);
             const [toStatusRows] = await conn.query(`SELECT name FROM status WHERE id = ? LIMIT 1`, [2]); // REJECTED status_id = 2
-            
+
             const fromStatusName = fromStatusRows[0]?.name || 'N/A';
             const toStatusName = toStatusRows[0]?.name || 'N/A';
 
@@ -1352,19 +1359,19 @@ async function getBillJournalEntries(req, res, next) {
     try {
         const { id } = req.params;
         const isNumeric = /^\d+$/.test(id);
-        
+
         // First get the bill to get its numeric ID
         const whereField = isNumeric ? 'ab.id' : 'ab.bill_uniqid';
         const [bills] = await pool.query(`
             SELECT ab.id FROM ap_bills ab WHERE ${whereField} = ?
         `, [id]);
-        
+
         if (bills.length === 0) {
             return res.status(404).json({ error: 'Bill not found' });
         }
-        
+
         const billId = bills[0].id;
-        
+
         // Get GL journal entries for this bill
         const [journalLines] = await pool.query(`
             SELECT 
@@ -1388,7 +1395,7 @@ async function getBillJournalEntries(req, res, next) {
             AND (gj.is_deleted = 0 OR gj.is_deleted IS NULL)
             ORDER BY gj.journal_date DESC, gj.id DESC, gjl.line_no ASC
         `, [billId]);
-        
+
         res.json({ data: journalLines || [] });
     } catch (error) {
         next(error);
@@ -1400,7 +1407,7 @@ async function getBillPaymentAllocations(req, res, next) {
         const { id } = req.params;
         const isNumeric = /^\d+$/.test(id);
         const whereField = isNumeric ? 'ab.id' : 'ab.bill_uniqid';
-        
+
         // Get bill info
         const [[bill]] = await pool.query(`
             SELECT ab.id, ab.bill_uniqid, ab.bill_number, ab.total, ab.currency_id, ab.bill_date,
@@ -1410,11 +1417,11 @@ async function getBillPaymentAllocations(req, res, next) {
             LEFT JOIN vendor v ON v.id = ab.supplier_id
             WHERE ${whereField} = ?
         `, [id]);
-        
+
         if (!bill) {
             return res.status(404).json({ error: 'Bill not found' });
         }
-        
+
         // Get payment allocations for this bill
         const [allocations] = await pool.query(`
             SELECT 
@@ -1440,20 +1447,20 @@ async function getBillPaymentAllocations(req, res, next) {
               AND (p.is_deleted = 0 OR p.is_deleted IS NULL)
             ORDER BY p.transaction_date DESC, p.id DESC
         `, [bill.id]);
-        
+
         // Calculate totals
         const totalAmount = parseFloat(bill.total || 0);
         const totalAdjusted = allocations.reduce((sum, alloc) => {
             // Use amount_bank if payment currency matches bill currency, otherwise amount_base
             const billCurrencyId = bill.currency_id;
             const paymentCurrencyId = alloc.payment_currency_id;
-            const amount = (billCurrencyId && paymentCurrencyId && billCurrencyId === paymentCurrencyId) 
-                ? parseFloat(alloc.amount_bank || 0) 
+            const amount = (billCurrencyId && paymentCurrencyId && billCurrencyId === paymentCurrencyId)
+                ? parseFloat(alloc.amount_bank || 0)
                 : parseFloat(alloc.amount_base || 0);
             return sum + amount;
         }, 0);
         const outstanding = totalAmount - totalAdjusted;
-        
+
         res.json({
             bill: {
                 id: bill.id,

@@ -266,6 +266,64 @@ router.get('/from-po/:poId', async (req, res, next) => {
     }
 });
 
+/* ----------------------------- GET DATA FROM SHIPMENT LOT ------- */
+router.get('/from-shipment/:shipmentId', async (req, res, next) => {
+    try {
+        const { shipmentId } = req.params;
+        const [[shipment]] = await db.promise().query(`
+            SELECT s.*, v.display_name as vendor_name, po.po_number 
+            FROM shipment s 
+            LEFT JOIN vendor v ON v.id = s.vendor_id
+            LEFT JOIN purchase_orders po ON po.id = s.po_id
+            WHERE s.id = ? OR s.ship_uniqid = ?
+        `, [shipmentId, shipmentId]);
+
+        if (!shipment) return res.status(404).json({ error: 'Shipment not found' });
+
+        // Get container numbers
+        const [containers] = await db.promise().query(`SELECT container_no FROM shipment_container WHERE shipment_id = ?`, [shipment.id]);
+        const container_nos = containers.map(c => c.container_no).filter(Boolean).join(', ');
+
+        // Get items from containers (package count and package type)
+        // Join with purchase_order_items to get rate and tax_id
+        const [items] = await db.promise().query(`
+            SELECT 
+                sci.product_id,
+                sci.product_name as item_name,
+                SUM(sci.package_count) as quantity,
+                MAX(sci.batch_no) as batch_no,
+                sc.id as container_id,
+                sc.container_no as container_no,
+                sci.package_type as uom_name,
+                (SELECT id FROM uom_master WHERE name = sci.package_type OR acronyms = sci.package_type LIMIT 1) as uom_id,
+                poi.rate,
+                poi.vat_id as tax_id,
+                p.description as product_description,
+                p.purchase_description,
+                p.hscode as product_hscode,
+                (SELECT pd.variety FROM product_details pd WHERE pd.product_id = p.id ORDER BY pd.id ASC LIMIT 1) as variety,
+                (SELECT pd.grade_and_size_code FROM product_details pd WHERE pd.product_id = p.id ORDER BY pd.id ASC LIMIT 1) as grade,
+                (SELECT co.name FROM product_details pd JOIN country co ON co.id = pd.origin_id WHERE pd.product_id = p.id ORDER BY pd.id ASC LIMIT 1) as origin,
+                (SELECT pd.packing_text FROM product_details pd WHERE pd.product_id = p.id ORDER BY pd.id ASC LIMIT 1) as packing,
+                COALESCE(
+                    (SELECT pi.thumbnail_path FROM product_images pi WHERE pi.product_id = sci.product_id AND pi.is_primary = 1 LIMIT 1),
+                    (SELECT pi.thumbnail_path FROM product_images pi WHERE pi.product_id = sci.product_id ORDER BY pi.id ASC LIMIT 1)
+                ) as thumbnail_url
+            FROM shipment_container_item sci
+            JOIN shipment_container sc ON sc.id = sci.container_id
+            LEFT JOIN shipment s ON s.id = sc.shipment_id
+            LEFT JOIN purchase_order_items poi ON poi.purchase_order_id = s.po_id AND poi.item_id = sci.product_id
+            LEFT JOIN products p ON p.id = sci.product_id
+            WHERE sc.shipment_id = ?
+            GROUP BY sc.id, sc.container_no, sci.product_id, sci.product_name, sci.package_type, poi.rate, poi.vat_id, p.description, p.purchase_description, p.hscode
+        `, [shipment.id]);
+
+        res.json({ shipment, container_no: container_nos, items: items || [] });
+    } catch (e) {
+        next(e);
+    }
+});
+
 /* ----------------------------- CREATE ----------------------------- */
 router.post('/', billUpload, async (req, res, next) => {
     const conn = await db.promise().getConnection();
