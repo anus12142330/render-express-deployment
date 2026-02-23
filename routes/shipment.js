@@ -3265,7 +3265,7 @@ router.post("/:shipUniqid/underloading-air", upload.any(), async (req, res) => {
     try {
         await conn.beginTransaction();
 
-        const [[shipment]] = await conn.query(`SELECT id, po_id, airway_bill_no, flight_no, airline, arrival_date, arrival_time, shipment_stage_id FROM shipment WHERE ship_uniqid = ?`, [shipUniqid]);
+        const [[shipment]] = await conn.query(`SELECT s.id, s.po_id, s.airway_bill_no, s.flight_no, s.airline, s.arrival_date, s.arrival_time, s.shipment_stage_id, po.po_number FROM shipment s LEFT JOIN purchase_orders po ON po.id = s.po_id WHERE s.ship_uniqid = ?`, [shipUniqid]);
         if (!shipment) throw new Error("Shipment not found.");
 
         // Update shipment with Airway Bill and Flight No
@@ -3298,13 +3298,28 @@ router.post("/:shipUniqid/underloading-air", upload.any(), async (req, res) => {
             containerId = cResult.insertId;
         }
 
-        // Insert items for the air shipment's container
+        // Insert items for the air shipment's container (generate batch_no like sea: baseBatchNo + A1 + -1, -2, etc.)
         if (items.length > 0) {
-            const itemValues = items.map(it => {
+            let baseBatchNo = '';
+            if (shipment.po_number) {
+                const parts = shipment.po_number.split('-');
+                baseBatchNo = parts.length > 1 ? parts.slice(1).join('-') : shipment.po_number;
+            }
+            const [[{ existingConsignmentCount }]] = await conn.query(
+                `SELECT COUNT(sc.id) as existingConsignmentCount FROM shipment_container sc JOIN shipment s ON s.id = sc.shipment_id JOIN purchase_orders po ON po.id = s.po_id WHERE s.po_id = ? AND s.id != ? AND po.mode_shipment_id = 2`,
+                [shipment.po_id, shipment.id]
+            );
+            const consignmentIndex = (existingConsignmentCount || 0) + 1;
+            const consignmentSuffix = `A${consignmentIndex}`;
+
+            const itemValues = items.map((it, itemIdx) => {
                 const normalizedProductId = (it.product_id === undefined || it.product_id === null || it.product_id === '') ? null : Number(it.product_id);
-                return [containerId, normalizedProductId, it.product_name, it.package_type, it.package_count, it.net_weight, it.gross_weight, it.hscode];
+                const itemSuffix = `-${itemIdx + 1}`;
+                const generatedBatchNo = baseBatchNo ? `${baseBatchNo}${consignmentSuffix}${itemSuffix}` : null;
+                const finalBatchNo = it.batch_no || generatedBatchNo;
+                return [containerId, normalizedProductId, it.product_name, it.package_type, it.package_count, it.net_weight, it.gross_weight, it.hscode, finalBatchNo];
             });
-            await conn.query(`INSERT INTO shipment_container_item (container_id, product_id, product_name, package_type, package_count, net_weight, gross_weight, hscode) VALUES ?`, [itemValues]);
+            await conn.query(`INSERT INTO shipment_container_item (container_id, product_id, product_name, package_type, package_count, net_weight, gross_weight, hscode, batch_no) VALUES ?`, [itemValues]);
         }
 
         if (incomingAllocations.length > 0 && shipment.po_id) {
