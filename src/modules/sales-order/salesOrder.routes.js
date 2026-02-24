@@ -1,5 +1,5 @@
 import express from 'express';
-import { requireAuth, requirePerm } from '../../../middleware/authz.js';
+import { requireAuth, requirePerm, requireAnyPerm } from '../../../middleware/authz.js';
 import {
   listSalesOrders,
   createSalesOrderDraft,
@@ -34,8 +34,15 @@ router.get('/', requireAuth, requirePerm(['SalesOrders', 'Dispatch', 'DispatchDe
 // Approvals (Must be before :id route to not clash)
 router.get('/approvals', requireAuth, requirePerm('SalesOrders', 'approve'), listSalesOrderApprovals);
 
-// Retrieve (allow SalesOrders, Dispatch, or DispatchDelivery view - for dispatch staff)
-router.get('/:id', requireAuth, requirePerm(['SalesOrders', 'Dispatch', 'DispatchDelivery'], 'view'), getSalesOrderDetail);
+// Retrieve (allow view or dispatch - dispatch staff need to load order for Record Shipment)
+router.get('/:id', requireAuth, requireAnyPerm([
+  { moduleKey: 'SalesOrders', actionKey: 'view' },
+  { moduleKey: 'Dispatch', actionKey: 'view' },
+  { moduleKey: 'DispatchDelivery', actionKey: 'view' },
+  { moduleKey: 'SalesOrders', actionKey: 'dispatch' },
+  { moduleKey: 'Dispatch', actionKey: 'dispatch' },
+  { moduleKey: 'DispatchDelivery', actionKey: 'dispatch' }
+]), getSalesOrderDetail);
 
 // Create Draft
 router.post('/', requireAuth, requirePerm('SalesOrders', 'create'), createSalesOrderDraft);
