@@ -1,24 +1,24 @@
 import express from 'express';
 import { requireAuth, requirePerm } from '../../../middleware/authz.js';
 import {
-    listSalesOrders,
-    createSalesOrderDraft,
-    getSalesOrderDetail,
-    updateSalesOrderDraft,
-    upsertSalesOrderItems,
-    uploadHeaderAttachments,
-    submitSalesOrder,
-    listSalesOrderApprovals,
-    dispatchSalesOrder,
-    completeSalesOrder,
-    getNextSequence,
-    deleteHeaderAttachment,
-    rejectSalesOrder,
-    requestSalesOrderEdit,
-    decideSalesOrderEditRequest,
-    approveSalesOrder,
-    deliveredSalesOrder,
-    removeSalesOrderDispatch
+  listSalesOrders,
+  createSalesOrderDraft,
+  getSalesOrderDetail,
+  updateSalesOrderDraft,
+  upsertSalesOrderItems,
+  uploadHeaderAttachments,
+  submitSalesOrder,
+  listSalesOrderApprovals,
+  dispatchSalesOrder,
+  completeSalesOrder,
+  getNextSequence,
+  deleteHeaderAttachment,
+  rejectSalesOrder,
+  requestSalesOrderEdit,
+  decideSalesOrderEditRequest,
+  approveSalesOrder,
+  deliveredSalesOrder,
+  removeSalesOrderDispatch
 } from './salesOrder.controller.js';
 
 import { headerUpload, dispatchUpload, completionUpload, deliveryUpload } from './salesOrder.upload.js';
@@ -28,14 +28,14 @@ const router = express.Router();
 // Next Sequence
 router.get('/next-sequence', requireAuth, requirePerm('SalesOrders', 'create'), getNextSequence);
 
-// List
-router.get('/', requireAuth, requirePerm('SalesOrders', 'view'), listSalesOrders);
+// List (allow SalesOrders, Dispatch, or DispatchDelivery view - for dispatch staff)
+router.get('/', requireAuth, requirePerm(['SalesOrders', 'Dispatch', 'DispatchDelivery'], 'view'), listSalesOrders);
 
 // Approvals (Must be before :id route to not clash)
 router.get('/approvals', requireAuth, requirePerm('SalesOrders', 'approve'), listSalesOrderApprovals);
 
-// Retrieve
-router.get('/:id', requireAuth, requirePerm('SalesOrders', 'view'), getSalesOrderDetail);
+// Retrieve (allow SalesOrders, Dispatch, or DispatchDelivery view - for dispatch staff)
+router.get('/:id', requireAuth, requirePerm(['SalesOrders', 'Dispatch', 'DispatchDelivery'], 'view'), getSalesOrderDetail);
 
 // Create Draft
 router.post('/', requireAuth, requirePerm('SalesOrders', 'create'), createSalesOrderDraft);
@@ -54,11 +54,11 @@ router.delete('/:id/attachments/:attachmentId', requireAuth, requirePerm('SalesO
 router.post('/:id/submit', requireAuth, requirePerm('SalesOrders', 'view'), submitSalesOrder);
 
 // Dispatch
-router.post('/:id/dispatch', requireAuth, requirePerm('SalesOrders', 'dispatch'), dispatchUpload.array('attachments', 20), dispatchSalesOrder);
-router.delete('/:id/dispatch/:dispatchId', requireAuth, requirePerm('SalesOrders', 'dispatch'), removeSalesOrderDispatch);
+router.post('/:id/dispatch', requireAuth, requirePerm(['SalesOrders', 'Dispatch', 'DispatchDelivery'], 'dispatch'), dispatchUpload.array('attachments', 20), dispatchSalesOrder);
+router.delete('/:id/dispatch/:dispatchId', requireAuth, requirePerm(['SalesOrders', 'Dispatch', 'DispatchDelivery'], 'dispatch'), removeSalesOrderDispatch);
 
 // Complete
-router.post('/:id/complete', requireAuth, requirePerm('SalesOrders', 'complete'), completionUpload.array('attachments', 20), completeSalesOrder);
+router.post('/:id/complete', requireAuth, requirePerm(['SalesOrders', 'Dispatch', 'DispatchDelivery'], 'complete'), completionUpload.array('attachments', 20), completeSalesOrder);
 
 // Approve
 router.post('/:id/approve', requireAuth, requirePerm('SalesOrders', 'approve'), approveSalesOrder);
@@ -70,7 +70,7 @@ router.post('/:id/reject', requireAuth, requirePerm('SalesOrders', 'approve'), r
 router.post('/:id/request-edit', requireAuth, requirePerm('SalesOrders', 'edit'), requestSalesOrderEdit);
 
 // Mark as Delivered
-router.post('/:id/delivered', requireAuth, requirePerm('SalesOrders', 'dispatch'), deliveryUpload.array('attachments', 20), deliveredSalesOrder);
+router.post('/:id/delivered', requireAuth, requirePerm(['SalesOrders', 'Dispatch', 'DispatchDelivery'], 'dispatch'), deliveryUpload.array('attachments', 20), deliveredSalesOrder);
 
 router.post('/:id/decide-edit-request', requireAuth, requirePerm('SalesOrders', 'approve'), decideSalesOrderEditRequest);
 
