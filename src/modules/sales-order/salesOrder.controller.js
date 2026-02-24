@@ -54,14 +54,25 @@ export const listSalesOrders = async (req, res) => {
         const canViewAll = await hasPermission(userId, 'SalesOrders', 'view_all')
             || await hasPermission(userId, 'Dispatch', 'view_all')
             || await hasPermission(userId, 'DispatchDelivery', 'view_all');
-        const filterByCreatedBy = canViewAll ? null : userId;
+        const canViewDispatch = await hasPermission(userId, 'Dispatch', 'view') || await hasPermission(userId, 'DispatchDelivery', 'view');
+
+        const statusParam = req.query.status_id || req.query.status_ids || null;
+        const dispatchStatusIds = [8, 1, 11, 9, 12];
+        const isDispatchPipelineRequest = statusParam && (() => {
+            const ids = String(statusParam).split(',').map(s => Number(s.trim())).filter(Number.isFinite);
+            return ids.length > 0 && ids.every(id => dispatchStatusIds.includes(id));
+        })();
+
+        // For dispatch pipeline (status 8,1,11,9,12): always show all records; no created_by filter
+        const skipCreatedByFilter = canViewAll || canViewDispatch || isDispatchPipelineRequest;
+        const filterByCreatedBy = skipCreatedByFilter ? null : userId;
 
         const query = {
             clientId,
             page,
             pageSize,
             search: req.query.search || '',
-            status_id: req.query.status_id || null,
+            status_id: statusParam,
             company_id: req.query.company_id || null,
             customer_id: req.query.customer_id || null,
             date_from: req.query.date_from || null,

@@ -52,6 +52,7 @@ import shipmentDocumentsRoutes from './routes/shipmentDocuments.js';
 import shipmentStageRoutes from './routes/shipmentStage.js';
 import statusRoutes from './routes/status.js';
 import systemSettingsRoutes from './routes/systemSettings.js';
+
 import taxesRoutes from './routes/taxes.js';
 import termsconditionRoutes from './routes/termscondition.js';
 import uomRoutes from './routes/uom.js';
@@ -60,6 +61,7 @@ import vendorRoutes from './routes/vendor.js';
 import warehousesRoutes from "./routes/warehouses.js";
 import mobileAuthRoutes from "./routes/mobileAuth.js";
 import mobileQcRoutes from "./routes/mobileQc.js";
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 
@@ -173,12 +175,16 @@ const userStorage = multer.diskStorage({
   },
 });
 
+// Memory storage for user photo (used when GCS may store the file)
+const userPhotoMemoryStorage = multer.memoryStorage();
+
 
 
 const upload = multer({ storage: productStorage });
 const uploadv = multer({ storage: vendorStorage });
 const uploadc = multer({ storage: companyStorage });
 const uploadUserPhoto = multer({ storage: userStorage });
+const uploadUserPhotoMemory = multer({ storage: userPhotoMemoryStorage });
 
 const uploadCompany = uploadc.fields([
   { name: 'logo', maxCount: 1 },
@@ -261,6 +267,7 @@ app.use('/api/roles', roleRoutes);
 app.use('/api/quality-check', qualityCheckRoutes);
 app.use('/api/system-settings', systemSettingsRoutes);
 
+
 // AP/AR/Inventory routes (CommonJS modules)
 app.use('/api/ap', apRoutes);
 app.use('/api/ar', arRoutes);
@@ -280,7 +287,6 @@ app.get('/api/me', requireAuth, async (req, res) => {
   const sessionUser = req.session?.user || null;
   if (!sessionUser) return res.status(401).json({ user: null });
 
-  // Enrich user with full details and roles
   const userRows = await q(`
     SELECT
         u.id,
@@ -302,6 +308,7 @@ app.get('/api/me', requireAuth, async (req, res) => {
   if (userWithDetails && userWithDetails.roles) {
     userWithDetails.roles = userWithDetails.roles.split(',');
   }
+
 
   res.json({ user: userWithDetails });
 });
@@ -343,8 +350,9 @@ app.get('/api/me/permissions', requireAuth, async (req, res) => {
 
 
 // ✅ GET ALL USERS
-app.get('/api/users', (req, res) => {
-  const query = `
+app.get('/api/users', async (req, res) => {
+  try {
+    const results = await q(`
         SELECT
             u.id AS user_id,
             u.name AS user_name,
@@ -357,20 +365,18 @@ app.get('/api/users', (req, res) => {
             GROUP_CONCAT(DISTINCT ur.role_id) as role_ids,
             GROUP_CONCAT(DISTINCT r.name SEPARATOR ", ") as role_name
         FROM \`user\` u
-                 LEFT JOIN department d ON d.id = u.department_id
-                 LEFT JOIN user_role ur ON ur.user_id = u.id
-                 LEFT JOIN role r ON r.id = ur.role_id
+        LEFT JOIN department d ON d.id = u.department_id
+        LEFT JOIN user_role ur ON ur.user_id = u.id
+        LEFT JOIN role r ON r.id = ur.role_id
         WHERE u.is_inactive = 0
-        GROUP BY
-            u.id, u.name, u.designation, u.email, u.password, u.department_id, d.name, u.photo_path
-    `;
-  db.query(query, (err, results) => {
-    if (err) {
-      console.error('SQL ERROR (GET /api/users):', err);
-      return res.status(500).json({ success: false, error: err.message });
-    }
+        GROUP BY u.id, u.name, u.designation, u.email, u.password, u.department_id, d.name, u.photo_path
+    `);
+
     res.json(results);
-  });
+  } catch (err) {
+    console.error('SQL ERROR (GET /api/users):', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // ✅ GET ALL DEPARTMENTS
@@ -515,12 +521,19 @@ app.post('/api/user/change-password', (req, res) => {
 });
 
 // ✅ CREATE USER
-app.post("/api/user", uploadUserPhoto.single("photo"), (req, res) => {
+app.post("/api/user", uploadUserPhotoMemory.single("photo"), async (req, res) => {
   const { name, designation, department_id, role_ids, email, password } =
     req.body;
-  const photoPath = req.file
-    ? `uploads/users/${req.file.filename}`
-    : null;
+  let photoPath = null;
+  if (req.file) {
+    const ext = path.extname(req.file.originalname || '') || '.jpg';
+    const name = crypto.randomBytes(16).toString('hex') + ext;
+    const relativePath = `uploads/users/${name}`;
+    photoPath = relativePath;
+    const dir = path.join(__dirname, 'uploads', 'users');
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, name), req.file.buffer);
+  }
 
   db.getConnection(async (err, conn) => {
     if (err) return res.status(500).json({ success: false, error: 'DB Connection failed' });
@@ -554,7 +567,7 @@ app.post("/api/user", uploadUserPhoto.single("photo"), (req, res) => {
 });
 
 // === UPDATE USER ===
-app.put("/api/user/:id", uploadUserPhoto.single("photo"), async (req, res) => {
+app.put("/api/user/:id", uploadUserPhotoMemory.single("photo"), async (req, res) => {
   const { id } = req.params;
   const { name, designation, department_id, role_ids, email, password } =
     req.body;
@@ -568,17 +581,22 @@ app.put("/api/user/:id", uploadUserPhoto.single("photo"), async (req, res) => {
     const [rows] = await conn.execute("SELECT password, photo_path FROM `user` WHERE id = ?", [id]);
     if (!rows || rows.length === 0) {
       await conn.rollback();
-      return res.status(404).json({ success: false, error: "User not found" });
+      return res.status(404).json({ error: "User not found" });
     }
 
     const { password: currentPassword, photo_path: currentPhoto } = rows[0];
 
     const nextPassword = password && password.trim() !== "" ? password : currentPassword;
 
-    // Signature logic
     let nextPhotoPath = currentPhoto;
     if (req.file) {
-      nextPhotoPath = `uploads/users/${req.file.filename}`;
+      const ext = path.extname(req.file.originalname || '') || '.jpg';
+      const fname = crypto.randomBytes(16).toString('hex') + ext;
+      const relativePath = `uploads/users/${fname}`;
+      nextPhotoPath = relativePath;
+      const dir = path.join(__dirname, 'uploads', 'users');
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, fname), req.file.buffer);
     }
 
     // Update user table

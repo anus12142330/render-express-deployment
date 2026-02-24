@@ -52,10 +52,13 @@ const MODULES = [
 
 const ACTIONS = [
   { key_name: 'view', display_name: 'View', is_core: 1, sort_order: 10 },
+  { key_name: 'view_all', display_name: 'View All', is_core: 1, sort_order: 15 },
   { key_name: 'create', display_name: 'Create', is_core: 1, sort_order: 20 },
   { key_name: 'edit', display_name: 'Edit', is_core: 1, sort_order: 30 },
   { key_name: 'delete', display_name: 'Delete', is_core: 1, sort_order: 40 },
   { key_name: 'approve', display_name: 'Approve', is_core: 1, sort_order: 50 },
+  { key_name: 'dispatch', display_name: 'Dispatch', is_core: 0, sort_order: 60 },
+  { key_name: 'complete', display_name: 'Complete', is_core: 0, sort_order: 70 },
   // Example of a non-core, specific action
   { key_name: 'more_bank_edit', display_name: 'Edit Vendor Bank Details', is_core: 0, sort_order: 100 }
 ];
