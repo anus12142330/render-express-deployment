@@ -60,8 +60,8 @@ router.delete('/:id/dispatch/:dispatchId', requireAuth, requirePerm(['SalesOrder
 // Complete
 router.post('/:id/complete', requireAuth, requirePerm(['SalesOrders', 'Dispatch', 'DispatchDelivery'], 'complete'), completionUpload.array('attachments', 20), completeSalesOrder);
 
-// Approve
-router.post('/:id/approve', requireAuth, requirePerm('SalesOrders', 'approve'), approveSalesOrder);
+// Approve (allow SalesOrders, Dispatch, or DispatchDelivery approve - for dispatch staff Accept action)
+router.post('/:id/approve', requireAuth, requirePerm(['SalesOrders', 'Dispatch', 'DispatchDelivery'], 'approve'), approveSalesOrder);
 
 // Reject
 router.post('/:id/reject', requireAuth, requirePerm('SalesOrders', 'approve'), rejectSalesOrder);
