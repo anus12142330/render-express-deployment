@@ -46,7 +46,7 @@ export function requirePerm(moduleKeyOrKeys, actionKey = 'view') {
 /** Require any of the given (moduleKey, actionKey) permissions. */
 export function requireAnyPerm(permList) {
   return async (req, res, next) => {
-    const userId = req.session?.user?.id;
+    const userId = req.user?.id || req.session?.user?.id;
     if (!userId) return res.status(401).json({ error: 'Not logged in' });
 
     const [adm] = await db.promise().query(
@@ -67,6 +67,8 @@ export function requireAnyPerm(permList) {
       );
       if (ok.length) return next();
     }
+
+    console.log(`[AUTHZ] Forbidden: User ${userId} lacks any of [${permList.map(p => `${p.moduleKey}:${p.actionKey}`).join(', ')}]`);
     return res.status(403).json({ error: 'Forbidden' });
   };
 }

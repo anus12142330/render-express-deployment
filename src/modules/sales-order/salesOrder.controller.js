@@ -313,7 +313,12 @@ export const getSalesOrderDetail = async (req, res) => {
         const detail = await getOrderDetail({ id, clientId });
         if (!detail) return fail(res, 'Sales order not found', 404);
 
-        const canViewAll = await hasPermission(userId, 'SalesOrders', 'view_all');
+        const canViewAll = await hasPermission(userId, 'SalesOrders', 'view_all')
+            || await hasPermission(userId, 'Dispatch', 'view_all')
+            || await hasPermission(userId, 'DispatchDelivery', 'view_all')
+            || await hasPermission(userId, 'Dispatch', 'view')
+            || await hasPermission(userId, 'DispatchDelivery', 'view');
+
         if (!canViewAll && Number(detail.header?.created_by) !== Number(userId)) {
             return res.status(403).json({ success: false, message: 'You can only view your own sales orders.' });
         }
