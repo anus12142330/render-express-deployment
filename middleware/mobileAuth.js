@@ -29,12 +29,13 @@ export const optionalBearerSession = (req, res, next) => {
   try {
     const decoded = jwt.verify(token, MOBILE_JWT_SECRET);
     if (!req.session) req.session = {};
-    req.session.user = { id: decoded.id, email: decoded.email };
+    // Include all decoded data (like company_id, client_id) in the session user
+    req.session.user = { ...decoded };
     return next();
   } catch (err) {
     return res.status(401).json({ error: "Not logged in" });
   }
 };
 
-export const signMobileToken = (payload, expiresIn = "7d") =>
+export const signMobileToken = (payload, expiresIn = "30d") =>
   jwt.sign(payload, MOBILE_JWT_SECRET, { expiresIn });

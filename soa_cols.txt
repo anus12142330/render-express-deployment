@@ -1,0 +1,1 @@
+id, sales_order_id, dispatch_id, scope, file_original_name, file_name, file_type, file_size, file_path, uploaded_by, created_at

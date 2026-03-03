@@ -117,6 +117,7 @@ const MASTER_CONFIG = {
         id: 'id',
         fields: [
             { name: 'terms', type: 'string', required: true },
+            { name: 'due_days', type: 'number' },
             { name: 'description', type: 'string' },
             { name: 'payment_type', type: 'string' } // "Pre Payment" or "Post Payment"
         ],

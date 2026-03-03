@@ -1,0 +1,5 @@
+vendor_address:
+id, vendor_id, bill_attention, bill_country_id, bill_address_1, bill_address_2, bill_city, bill_state_id, bill_zip_code, bill_phone, bill_fax, available_time_id
+
+vendor_shipping_addresses:
+id, vendor_id, ship_attention, ship_address_1, ship_address_2, ship_city, ship_state_id, ship_zip_code, ship_country_id, ship_phone, ship_fax, ship_latitude, ship_longitude, delivery_window, available_time_id, is_primary, latitude, longitude, place_name, formatted_address, place_id, available_time_ids

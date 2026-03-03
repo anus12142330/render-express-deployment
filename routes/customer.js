@@ -214,7 +214,8 @@ router.post('/', uploadCustomer.array('attachments'), async (req, res) => {
         tax_treatment_id, tax_registration_number, source_supply_id, currency_id, payment_terms_id,
         business_type_other, outlets_count, avg_weekly_purchase, has_cold_storage,
         bill_attention, bill_country_id, bill_address_1, bill_address_2, bill_city, bill_state_id, bill_zip_code, bill_phone, bill_fax, customer_of,
-        customer_type // 'individual' | 'business'
+        customer_type, // 'individual' | 'business'
+        bill_type      // 'monthly' | 'delivery'
     } = req.body;
 
     const uniqid = `cus_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
@@ -271,10 +272,11 @@ router.post('/', uploadCustomer.array('attachments'), async (req, res) => {
         await conn.query(
             `INSERT INTO vendor_other
          (vendor_id, tax_treatment_id, tax_registration_number, source_supply_id, currency_id, payment_terms_id,
-          business_type_other, outlets_count, avg_weekly_purchase, has_cold_storage)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          business_type_other, outlets_count, avg_weekly_purchase, has_cold_storage, bill_type)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [customerId, tax_treatment_id, tax_registration_number, source_supply_id, currency_id, payment_terms_id,
-                business_type_other, outlets_count, avg_weekly_purchase, has_cold_storage
+                business_type_other, outlets_count, avg_weekly_purchase, has_cold_storage,
+                bill_type || 'delivery'
             ]
         );
 
@@ -476,6 +478,7 @@ router.get('/:identifier/full', async (req, res) => {
         vo.tax_registration_number,
         vo.source_supply_id,
         vo.currency_id,
+        vo.bill_type,
         vo.payment_terms_id,
         va.bill_attention,
         va.bill_country_id,
@@ -654,7 +657,8 @@ router.put('/:id', uploadCustomer.array('attachments'), async (req, res) => {
         tax_treatment_id, tax_registration_number, source_supply_id, currency_id, payment_terms_id,
         business_type_other, outlets_count, avg_weekly_purchase, has_cold_storage,
         bill_attention, bill_country_id, bill_address_1, bill_address_2, bill_city, bill_state_id, bill_zip_code, bill_phone, bill_fax, customer_of,
-        customer_type // may be updated
+        customer_type, // may be updated
+        bill_type      // 'monthly' | 'delivery'
     } = req.body;
 
     const files = req.files || [];
@@ -762,15 +766,16 @@ router.put('/:id', uploadCustomer.array('attachments'), async (req, res) => {
                  business_type_other = ?,
                  outlets_count = ?,
                  avg_weekly_purchase = ?,
-                 has_cold_storage = ?
+                 has_cold_storage = ?,
+                 bill_type = ?
                  WHERE vendor_id = ?`,
-                [tax_treatment_id, tax_registration_number, source_supply_id, currency_id, payment_terms_id, business_type_other, outlets_count, avg_weekly_purchase, has_cold_storage, customerId]
+                [tax_treatment_id, tax_registration_number, source_supply_id, currency_id, payment_terms_id, business_type_other, outlets_count, avg_weekly_purchase, has_cold_storage, bill_type || 'delivery', customerId]
             );
         } else {
             await conn.query(
-                `INSERT INTO vendor_other (vendor_id, tax_treatment_id, tax_registration_number, source_supply_id, currency_id, payment_terms_id, business_type_other, outlets_count, avg_weekly_purchase, has_cold_storage)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [customerId, tax_treatment_id, tax_registration_number, source_supply_id, currency_id, payment_terms_id, business_type_other, outlets_count, avg_weekly_purchase, has_cold_storage]
+                `INSERT INTO vendor_other (vendor_id, tax_treatment_id, tax_registration_number, source_supply_id, currency_id, payment_terms_id, business_type_other, outlets_count, avg_weekly_purchase, has_cold_storage, bill_type)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [customerId, tax_treatment_id, tax_registration_number, source_supply_id, currency_id, payment_terms_id, business_type_other, outlets_count, avg_weekly_purchase, has_cold_storage, bill_type || 'delivery']
             );
         }
 

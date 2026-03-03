@@ -1,0 +1,3 @@
+-- Optional: allow client_id to be NULL for dispatch/delivery attachments (no client check).
+-- Run only if you get an error when uploading dispatch/delivery images.
+-- ALTER TABLE sales_order_attachments MODIFY client_id INT NULL;

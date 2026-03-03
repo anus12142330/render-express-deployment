@@ -1,3 +1,4 @@
+import db from '../../../db.js';
 import { hasPermission } from '../../../middleware/authz.js';
 import {
     listOrders,
@@ -18,10 +19,13 @@ import {
     decideEditRequest,
     approveOrder,
     markAsDelivered,
-    deleteDispatch
+    deleteDispatch,
+    listDispatchVehicles,
+    listDispatchDriversByVehicle,
+    getOrderDispatchBatchInfo
 } from './salesOrder.service.js';
 import { requireFields, validateItems, normalizeTaxMode } from './salesOrder.validators.js';
-import { buildStoredPath } from './salesOrder.upload.js';
+import { buildStoredPath, getFilesFromRequest, saveBase64FilesFromBody } from './salesOrder.upload.js';
 
 const parsePage = (value, fallback = 1) => {
     const n = Number(value);
@@ -36,12 +40,29 @@ const parsePageSize = (value, fallback = 20) => {
 const ok = (res, data, pagination) => res.json({ success: true, data, pagination });
 const fail = (res, message, status = 400) => res.status(status).json({ success: false, message });
 
+/** Resolve authenticated user (web session or mobile token). Same pattern as Customer list. */
+const getAuthUser = (req) => req.session?.user || req.mobileUser || req.user;
+
+/** Check if the current user is Super Admin (show all records). Uses DB so it works even when session only has id/email. */
+const isSuperAdmin = async (req) => {
+    const userId = getAuthUser(req)?.id;
+    if (!userId) return false;
+    const user = getAuthUser(req);
+    if (user && (Number(user.role_id) === 1)) return true;
+    if (user?.roles && Array.isArray(user.roles) && user.roles.some(r => String(r).trim() === 'Super Admin')) return true;
+    if (user?.role && String(user.role).trim() === 'Super Admin') return true;
+    const [rows] = await db.promise().query(
+        `SELECT 1 FROM user_role ur JOIN role r ON r.id = ur.role_id
+         WHERE ur.user_id = ? AND r.name = 'Super Admin' LIMIT 1`,
+        [userId]
+    );
+    return rows.length > 0;
+};
+
 export const listSalesOrders = async (req, res) => {
     try {
-        const clientId = await getClientContext(req);
-        if (!clientId) return fail(res, 'Missing tenant context', 400);
-
-        const userId = req.user?.id;
+        const superAdmin = await isSuperAdmin(req);
+        const userId = getAuthUser(req)?.id;
 
         // Handle both offset/limit (mobile) and page/pageSize (web)
         let page = parsePage(req.query.page);
@@ -51,7 +72,9 @@ export const listSalesOrders = async (req, res) => {
             page = Math.floor(Number(req.query.offset) / pageSize) + 1;
         }
 
-        const canViewAll = await hasPermission(userId, 'SalesOrders', 'view_all')
+        // Super Admin sees all. Otherwise: "Record All" = view_all sees all; else only own (created_by OR sales_person_id = userId).
+        const canViewAll = superAdmin
+            || await hasPermission(userId, 'SalesOrders', 'view_all')
             || await hasPermission(userId, 'Dispatch', 'view_all')
             || await hasPermission(userId, 'DispatchDelivery', 'view_all');
         const canViewDispatch = await hasPermission(userId, 'Dispatch', 'view') || await hasPermission(userId, 'DispatchDelivery', 'view');
@@ -63,24 +86,31 @@ export const listSalesOrders = async (req, res) => {
             return ids.length > 0 && ids.every(id => dispatchStatusIds.includes(id));
         })();
 
-        // For dispatch pipeline (status 8,1,11,9,12): always show all records; no created_by filter
+        // Skip filter (show all) when Super Admin, Record All / view_all, or dispatch view, or dispatch pipeline request
         const skipCreatedByFilter = canViewAll || canViewDispatch || isDispatchPipelineRequest;
-        const filterByCreatedBy = skipCreatedByFilter ? null : userId;
 
+        // If we skip filter, we can still respect a specific user_id/created_by from the query if provided.
+        // If wbe DON'T skip: restrict to own records (created_by OR sales_person_id = logged-in user).
+        // No filter by company_id or client_id for list - for both Super Admin and others (own orders when !canViewAll).
         const query = {
-            clientId,
+            clientId: null,
             page,
             pageSize,
             search: req.query.search || '',
             status_id: statusParam,
-            company_id: req.query.company_id || null,
-            customer_id: req.query.customer_id || null,
+            company_id: null,
+            customer_id: null,
             date_from: req.query.date_from || null,
             date_to: req.query.date_to || null,
             edit_request_status: req.query.edit_request_status || null,
             exclude_with_ar_invoice: req.query.exclude_with_ar_invoice === '1' || req.query.exclude_with_ar_invoice === true,
-            ...(filterByCreatedBy != null && { created_by: filterByCreatedBy }),
         };
+        if (skipCreatedByFilter) {
+            const optionalUserId = req.query.user_id || req.query.created_by || null;
+            if (optionalUserId != null && optionalUserId !== '') query.created_by = optionalUserId;
+        } else if (userId != null) {
+            query.filter_own_user_id = userId;
+        }
 
         const { rows, total } = await listOrders(query);
         const pagination = { page, pageSize, total, hasMore: (page * pageSize) < total };
@@ -96,7 +126,7 @@ export const createSalesOrderDraft = async (req, res) => {
         const clientId = await getClientContext(req);
         if (!clientId) return fail(res, 'Missing tenant context', 400);
 
-        const userId = req.user?.id;
+        const userId = getAuthUser(req)?.id;
         const payload = req.body || {};
 
         const missing = requireFields(payload, ['customer_id', 'company_id', 'currency_id', 'tax_mode', 'order_date']);
@@ -113,10 +143,8 @@ export const createSalesOrderDraft = async (req, res) => {
 
 export const updateSalesOrderDraft = async (req, res) => {
     try {
-        const clientId = await getClientContext(req);
-        if (!clientId) return fail(res, 'Missing tenant context', 400);
-
-        const userId = req.user?.id;
+        const clientId = (await getClientContext(req)) || null;
+        const userId = getAuthUser(req)?.id;
         const id = Number(req.params.id);
         const payload = req.body || {};
 
@@ -137,7 +165,7 @@ export const upsertSalesOrderItems = async (req, res) => {
         const clientId = await getClientContext(req);
         if (!clientId) return fail(res, 'Missing tenant context', 400);
 
-        const userId = req.user?.id;
+        const userId = getAuthUser(req)?.id;
         const id = Number(req.params.id);
         const items = req.body?.items || [];
         const taxMode = normalizeTaxMode(req.body?.tax_mode);
@@ -154,10 +182,8 @@ export const upsertSalesOrderItems = async (req, res) => {
 
 export const uploadHeaderAttachments = async (req, res) => {
     try {
-        const clientId = await getClientContext(req);
-        if (!clientId) return fail(res, 'Missing tenant context', 400);
-
-        const userId = req.user?.id;
+        const clientId = (await getClientContext(req)) || null;
+        const userId = getAuthUser(req)?.id;
         const id = Number(req.params.id);
         const files = (req.files || []).map(file => ({
             ...file,
@@ -175,10 +201,8 @@ export const uploadHeaderAttachments = async (req, res) => {
 
 export const deleteHeaderAttachment = async (req, res) => {
     try {
-        const clientId = await getClientContext(req);
-        if (!clientId) return fail(res, 'Missing tenant context', 400);
-
-        const userId = req.user?.id;
+        const clientId = (await getClientContext(req)) || null;
+        const userId = getAuthUser(req)?.id;
         const id = Number(req.params.id);
         const attachmentId = Number(req.params.attachmentId);
 
@@ -187,16 +211,12 @@ export const deleteHeaderAttachment = async (req, res) => {
     } catch (err) {
         return fail(res, err.message || 'Failed to delete attachment', 500);
     }
-
-
 };
 
 export const submitSalesOrder = async (req, res) => {
     try {
-        const clientId = await getClientContext(req);
-        if (!clientId) return fail(res, 'Missing tenant context', 400);
-
-        const userId = req.user?.id;
+        const clientId = await getClientContext(req) || null;
+        const userId = getAuthUser(req)?.id;
         const id = Number(req.params.id);
 
         const result = await submitForApproval({ clientId, userId, id });
@@ -230,47 +250,125 @@ export const listSalesOrderApprovals = async (req, res) => {
 
 export const dispatchSalesOrder = async (req, res) => {
     try {
-        const clientId = await getClientContext(req);
-        if (!clientId) return fail(res, 'Missing tenant context', 400);
-
-        const userId = req.user?.id;
+        const clientId = null; // Bypassed as requested
+        const userId = getAuthUser(req)?.id;
         const id = Number(req.params.id);
 
-        let payload = {};
+        let payload = req.body || {};
         try {
-            payload = typeof req.body.payload === 'string' ? JSON.parse(req.body.payload) : req.body;
+            if (typeof req.body.payload === 'string') {
+                payload = { ...payload, ...JSON.parse(req.body.payload) };
+            }
         } catch (e) {
-            payload = req.body || {};
+            // keep payload as req.body
         }
 
-        const { dispatch_id, vehicle_no, driver_name, comments, items } = payload;
-        console.log('[Dispatch] Payload received:', { dispatch_id, vehicle_no, driver_name, items_count: Array.isArray(items) ? items.length : 'N/A' });
+        let { dispatch_id, vehicle_no, driver_name, comments, items, force_delivery, force_delivery_reason } = payload;
+        if (!dispatch_id && req.params.dispatchId) {
+            dispatch_id = Number(req.params.dispatchId);
+        }
+        // FormData sends items as JSON string; ensure we pass an array to the service
+        if (typeof items === 'string') {
+            try {
+                items = JSON.parse(items);
+            } catch (e) {
+                items = [];
+            }
+        }
+        if (!Array.isArray(items)) items = [];
+        let rawFiles = getFilesFromRequest(req);
+        if (rawFiles.length === 0) {
+            try {
+                const base64Files = await saveBase64FilesFromBody(req, 'dispatch');
+                if (base64Files.length) {
+                    rawFiles = base64Files;
+                    console.log('[Dispatch] Using', base64Files.length, 'image(s) from body base64');
+                }
+            } catch (e) {
+                console.warn('[Dispatch] base64 fallback', e?.message);
+            }
+        }
+        console.log('[Dispatch] Content-Type:', req.headers['content-type'], '| files_count:', rawFiles.length, rawFiles[0] ? `| first file keys: ${Object.keys(rawFiles[0]).join(',')}` : '');
 
         if (!vehicle_no || !driver_name) return fail(res, 'vehicle_no and driver_name are required');
 
-        const files = (req.files || []).map(file => ({
-            ...file,
-            file_path: buildStoredPath('dispatch', file.filename)
-        }));
+        // Normalize force delivery flag
+        const isForceDelivery = force_delivery === '1' || force_delivery === true || force_delivery === 1;
+        if (isForceDelivery && !String(force_delivery_reason || '').trim()) {
+            return fail(res, 'A reason is required when Force Delivery is enabled');
+        }
 
-        await dispatchOrder({ clientId, userId, id, dispatch_id, vehicle_no, driver_name, comments, files, items });
+        const files = rawFiles
+            .filter((file) => file != null)
+            .map((file, idx) => {
+                const name = file.filename || file.originalname || file.originalName || `dispatch_${Date.now()}_${idx}.jpg`;
+                const relPath = file.file_path || buildStoredPath('dispatch', name);
+                return {
+                    ...file,
+                    filename: name,
+                    originalname: file.originalname || file.originalName || name,
+                    file_path: relPath,
+                    path: file.path || relPath,
+                    mimetype: file.mimetype || file.mimeType || 'image/jpeg',
+                    size: file.size != null ? file.size : 0
+                };
+            });
+
+        if (files.length) console.log('[Dispatch] Saving', files.length, 'file(s) to DB and folder');
+        await dispatchOrder({ clientId, userId, id, dispatch_id, vehicle_no, driver_name, comments, files, items, force_delivery: isForceDelivery, force_delivery_reason: String(force_delivery_reason || '').trim() || null });
         return res.json({ success: true, message: 'Dispatched' });
     } catch (err) {
         return fail(res, err.message || 'Failed to dispatch', 500);
     }
 };
 
+/** GET /api/sales-orders/:id/dispatch-batch-info - warehouse, dispatching time, per-item purchase bill (date, batch_no, allocated qty; only qty > 0) */
+export const getDispatchBatchInfo = async (req, res) => {
+    try {
+        const id = Number(req.params.id);
+        if (!id || !Number.isFinite(id)) return fail(res, 'Invalid order id', 400);
+        const info = await getOrderDispatchBatchInfo({ id });
+        if (!info) return fail(res, 'Sales order not found', 404);
+        return res.json({ success: true, data: info });
+    } catch (err) {
+        return fail(res, err.message || 'Failed to load dispatch batch info', 500);
+    }
+};
+
+/** GET /api/sales-orders/dispatch-vehicles - distinct vehicle names from dispatch history (not fleet master) */
+export const getDispatchVehicles = async (req, res) => {
+    try {
+        const clientId = (await getClientContext(req)) || null;
+        if (!clientId) return res.json([]);
+        const list = await listDispatchVehicles({ clientId });
+        return res.json(Array.isArray(list) ? list : []);
+    } catch (err) {
+        return fail(res, err.message || 'Failed to load vehicles', 500);
+    }
+};
+
+/** GET /api/sales-orders/dispatch-drivers?vehicle_name= - distinct driver names for that vehicle (not driver master) */
+export const getDispatchDrivers = async (req, res) => {
+    try {
+        const clientId = (await getClientContext(req)) || null;
+        const vehicleName = req.query.vehicle_name ?? '';
+        if (!clientId) return res.json([]);
+        const list = await listDispatchDriversByVehicle({ clientId, vehicleName });
+        return res.json(Array.isArray(list) ? list : []);
+    } catch (err) {
+        return fail(res, err.message || 'Failed to load drivers', 500);
+    }
+};
+
 export const removeSalesOrderDispatch = async (req, res) => {
     try {
-        const clientId = await getClientContext(req);
-        if (!clientId) return fail(res, 'Missing tenant context', 400);
-
-        const userId = req.user?.id;
+        const clientId = (await getClientContext(req)) || null;
+        const userId = getAuthUser(req)?.id;
         const id = Number(req.params.id);
         const dispatchId = Number(req.params.dispatchId);
 
         // Security check: only role 1 (Super Admin) can delete dispatches
-        if (Number(req.user?.role_id) !== 1) {
+        if (Number(getAuthUser(req)?.role_id) !== 1) {
             return fail(res, 'Only Super Admin can delete dispatches', 403);
         }
 
@@ -283,20 +381,63 @@ export const removeSalesOrderDispatch = async (req, res) => {
 
 export const completeSalesOrder = async (req, res) => {
     try {
-        const clientId = await getClientContext(req);
-        if (!clientId) return fail(res, 'Missing tenant context', 400);
-
-        const userId = req.user?.id;
+        const clientId = null; // Bypassed as requested
+        const userId = getAuthUser(req)?.id;
         const id = Number(req.params.id);
-        const { client_received_by, client_notes, comments } = req.body || {};
+        const { client_received_by, client_notes, comments, payment_term_id, due_date, allocations: rawAllocations } = req.body || {};
         const finalNotes = client_notes || comments;
 
-        const files = (req.files || []).map(file => ({
-            ...file,
-            file_path: buildStoredPath('completion', file.filename)
-        }));
+        let allocations = [];
+        if (rawAllocations) {
+            try {
+                allocations = typeof rawAllocations === 'string' ? JSON.parse(rawAllocations) : rawAllocations;
+            } catch (e) {
+                console.warn('Failed to parse allocations in completion:', e);
+            }
+        }
 
-        await completeOrder({ clientId, userId, id, client_received_by, client_notes: finalNotes, files });
+        let rawFiles = getFilesFromRequest(req);
+        if (rawFiles.length === 0) {
+            try {
+                const base64Files = await saveBase64FilesFromBody(req, 'complete');
+                if (base64Files.length) {
+                    rawFiles = base64Files;
+                    console.log('[Complete] Using', base64Files.length, 'image(s) from body base64');
+                }
+            } catch (e) {
+                console.warn('[Complete] base64 fallback', e?.message);
+            }
+        }
+        console.log('[Complete] Content-Type:', req.headers['content-type'], '| files_count:', rawFiles.length);
+
+        const files = rawFiles
+            .filter((file) => file != null)
+            .map((file, idx) => {
+                const name = file.filename || file.originalname || file.originalName || `completion_${Date.now()}_${idx}.jpg`;
+                const relPath = file.file_path || buildStoredPath('completion', name);
+                return {
+                    ...file,
+                    filename: name,
+                    originalname: file.originalname || file.originalName || name,
+                    file_path: relPath,
+                    path: file.path || relPath,
+                    mimetype: file.mimetype || file.mimeType || 'image/jpeg',
+                    size: file.size != null ? file.size : 0
+                };
+            });
+
+        if (files.length) console.log('[Complete] Saving', files.length, 'file(s) to DB and folder');
+        await completeOrder({
+            clientId,
+            userId,
+            id,
+            client_received_by,
+            client_notes: finalNotes,
+            files,
+            payment_term_id,
+            due_date,
+            allocations
+        });
         return res.json({ success: true, message: 'Completed' });
     } catch (err) {
         return fail(res, err.message || 'Failed to complete', 500);
@@ -305,21 +446,22 @@ export const completeSalesOrder = async (req, res) => {
 
 export const getSalesOrderDetail = async (req, res) => {
     try {
-        const clientId = await getClientContext(req);
-        if (!clientId) return fail(res, 'Missing tenant context', 400);
-
-        const userId = req.user?.id;
+        const userId = getAuthUser(req)?.id;
         const id = Number(req.params.id);
-        const detail = await getOrderDetail({ id, clientId });
+        if (!id || !Number.isFinite(id)) return fail(res, 'Invalid order id', 400);
+
+        const detail = await getOrderDetail({ id, clientId: null });
         if (!detail) return fail(res, 'Sales order not found', 404);
 
-        const canViewAll = await hasPermission(userId, 'SalesOrders', 'view_all')
+        const superAdmin = await isSuperAdmin(req);
+        const canViewAll = superAdmin
+            || await hasPermission(userId, 'SalesOrders', 'view_all')
             || await hasPermission(userId, 'Dispatch', 'view_all')
             || await hasPermission(userId, 'DispatchDelivery', 'view_all')
             || await hasPermission(userId, 'Dispatch', 'view')
             || await hasPermission(userId, 'DispatchDelivery', 'view');
 
-        if (!canViewAll && Number(detail.header?.created_by) !== Number(userId)) {
+        if (!canViewAll && Number(detail.header?.created_by) !== Number(userId) && Number(detail.header?.sales_person_id) !== Number(userId)) {
             return res.status(403).json({ success: false, message: 'You can only view your own sales orders.' });
         }
 
@@ -331,10 +473,8 @@ export const getSalesOrderDetail = async (req, res) => {
 
 export const rejectSalesOrder = async (req, res) => {
     try {
-        const clientId = await getClientContext(req);
-        if (!clientId) return fail(res, 'Missing tenant context', 400);
-
-        const userId = req.user?.id;
+        const clientId = (await getClientContext(req)) || null;
+        const userId = getAuthUser(req)?.id;
         const id = Number(req.params.id);
         const { reason } = req.body || {};
 
@@ -349,10 +489,8 @@ export const rejectSalesOrder = async (req, res) => {
 
 export const requestSalesOrderEdit = async (req, res) => {
     try {
-        const clientId = await getClientContext(req);
-        if (!clientId) return fail(res, 'Missing tenant context', 400);
-
-        const userId = req.user?.id;
+        const clientId = (await getClientContext(req)) || null;
+        const userId = getAuthUser(req)?.id;
         const id = Number(req.params.id);
         const { reason } = req.body || {};
 
@@ -367,10 +505,8 @@ export const requestSalesOrderEdit = async (req, res) => {
 
 export const decideSalesOrderEditRequest = async (req, res) => {
     try {
-        const clientId = await getClientContext(req);
-        if (!clientId) return fail(res, 'Missing tenant context', 400);
-
-        const userId = req.user?.id;
+        const clientId = (await getClientContext(req)) || null;
+        const userId = getAuthUser(req)?.id;
         const id = Number(req.params.id);
         const { decision, reason } = req.body || {};
 
@@ -385,10 +521,8 @@ export const decideSalesOrderEditRequest = async (req, res) => {
 
 export const approveSalesOrder = async (req, res) => {
     try {
-        const clientId = await getClientContext(req);
-        if (!clientId) return fail(res, 'Missing tenant context', 400);
-
-        const userId = req.user?.id;
+        const clientId = null; // Bypassed as requested
+        const userId = getAuthUser(req)?.id;
         const id = Number(req.params.id);
         const { comment } = req.body || {};
 
@@ -401,19 +535,43 @@ export const approveSalesOrder = async (req, res) => {
 
 export const deliveredSalesOrder = async (req, res) => {
     try {
-        const clientId = await getClientContext(req);
-        if (!clientId) return fail(res, 'Missing tenant context', 400);
-
-        const userId = req.user?.id;
+        const clientId = null; // Bypassed as requested
+        const userId = getAuthUser(req)?.id;
         const id = Number(req.params.id);
         const { comment, comments } = req.body || {};
         const finalComment = comment || comments;
 
-        const files = (req.files || []).map(file => ({
-            ...file,
-            file_path: buildStoredPath('delivery', file.filename)
-        }));
+        let rawFiles = getFilesFromRequest(req);
+        if (rawFiles.length === 0) {
+            try {
+                const base64Files = await saveBase64FilesFromBody(req, 'delivery');
+                if (base64Files.length) {
+                    rawFiles = base64Files;
+                    console.log('[Delivered] Using', base64Files.length, 'image(s) from body base64');
+                }
+            } catch (e) {
+                console.warn('[Delivered] base64 fallback', e?.message);
+            }
+        }
+        console.log('[Delivered] Content-Type:', req.headers['content-type'], '| files_count:', rawFiles.length);
 
+        const files = rawFiles
+            .filter((file) => file != null)
+            .map((file, idx) => {
+                const name = file.filename || file.originalname || file.originalName || `delivery_${Date.now()}_${idx}.jpg`;
+                const relPath = file.file_path || buildStoredPath('delivery', name);
+                return {
+                    ...file,
+                    filename: name,
+                    originalname: file.originalname || file.originalName || name,
+                    file_path: relPath,
+                    path: file.path || relPath,
+                    mimetype: file.mimetype || file.mimeType || 'image/jpeg',
+                    size: file.size != null ? file.size : 0
+                };
+            });
+
+        if (files.length) console.log('[Delivered] Saving', files.length, 'file(s) to DB and folder');
         await markAsDelivered({ clientId, userId, id, comment: finalComment, files });
         return res.json({ success: true, message: 'Sales order marked as delivered' });
     } catch (err) {

@@ -18,7 +18,10 @@ import {
   decideSalesOrderEditRequest,
   approveSalesOrder,
   deliveredSalesOrder,
-  removeSalesOrderDispatch
+  removeSalesOrderDispatch,
+  getDispatchVehicles,
+  getDispatchDrivers,
+  getDispatchBatchInfo
 } from './salesOrder.controller.js';
 
 import { headerUpload, dispatchUpload, completionUpload, deliveryUpload } from './salesOrder.upload.js';
@@ -33,6 +36,23 @@ router.get('/', requireAuth, requirePerm(['SalesOrders', 'Dispatch', 'DispatchDe
 
 // Approvals (Must be before :id route to not clash)
 router.get('/approvals', requireAuth, requirePerm('SalesOrders', 'approve'), listSalesOrderApprovals);
+
+// Dispatch vehicle/driver dropdowns (saved history, not fleet/driver masters)
+const dispatchPermsList = [
+  { moduleKey: 'SalesOrders', actionKey: 'dispatch' },
+  { moduleKey: 'Dispatch', actionKey: 'dispatch' },
+  { moduleKey: 'DispatchDelivery', actionKey: 'dispatch' },
+  { moduleKey: 'SalesOrders', actionKey: 'create' },
+  { moduleKey: 'Dispatch', actionKey: 'create' },
+  { moduleKey: 'DispatchDelivery', actionKey: 'create' },
+  { moduleKey: 'Dispatch', actionKey: 'add' },
+  { moduleKey: 'DispatchDelivery', actionKey: 'add' }
+];
+router.get('/dispatch-vehicles', requireAuth, requireAnyPerm(dispatchPermsList), getDispatchVehicles);
+router.get('/dispatch-drivers', requireAuth, requireAnyPerm(dispatchPermsList), getDispatchDrivers);
+
+// Dispatch batch/bill info (warehouse, per-item purchase bill date + batch + allocated qty; only qty > 0)
+router.get('/:id/dispatch-batch-info', requireAuth, requireAnyPerm(dispatchPermsList), getDispatchBatchInfo);
 
 // Retrieve (allow view or dispatch - dispatch staff need to load order for Record Shipment)
 router.get('/:id', requireAuth, requireAnyPerm([
@@ -60,12 +80,13 @@ router.delete('/:id/attachments/:attachmentId', requireAuth, requirePerm('SalesO
 // Submit
 router.post('/:id/submit', requireAuth, requirePerm('SalesOrders', 'view'), submitSalesOrder);
 
-// Dispatch
-router.post('/:id/dispatch', requireAuth, requirePerm(['SalesOrders', 'Dispatch', 'DispatchDelivery'], 'dispatch'), dispatchUpload.array('attachments', 20), dispatchSalesOrder);
-router.delete('/:id/dispatch/:dispatchId', requireAuth, requirePerm(['SalesOrders', 'Dispatch', 'DispatchDelivery'], 'dispatch'), removeSalesOrderDispatch);
+// Dispatch (allow dispatch, create, or add - for Record Shipment)
+router.post('/:id/dispatch', requireAuth, dispatchUpload, dispatchSalesOrder);
+router.put('/:id/dispatch/:dispatchId', requireAuth, dispatchUpload, dispatchSalesOrder);
+router.delete('/:id/dispatch/:dispatchId', requireAuth, requireAnyPerm(dispatchPermsList), removeSalesOrderDispatch);
 
 // Complete
-router.post('/:id/complete', requireAuth, requirePerm(['SalesOrders', 'Dispatch', 'DispatchDelivery'], 'complete'), completionUpload.array('attachments', 20), completeSalesOrder);
+router.post('/:id/complete', requireAuth, completionUpload, completeSalesOrder);
 
 // Approve (allow SalesOrders, Dispatch, or DispatchDelivery approve - for dispatch staff Accept action)
 router.post('/:id/approve', requireAuth, requirePerm(['SalesOrders', 'Dispatch', 'DispatchDelivery'], 'approve'), approveSalesOrder);
@@ -76,8 +97,8 @@ router.post('/:id/reject', requireAuth, requirePerm('SalesOrders', 'approve'), r
 // Edit Request
 router.post('/:id/request-edit', requireAuth, requirePerm('SalesOrders', 'edit'), requestSalesOrderEdit);
 
-// Mark as Delivered
-router.post('/:id/delivered', requireAuth, requirePerm(['SalesOrders', 'Dispatch', 'DispatchDelivery'], 'dispatch'), deliveryUpload.array('attachments', 20), deliveredSalesOrder);
+// Mark as Delivered (same permission set as dispatch)
+router.post('/:id/delivered', requireAuth, deliveryUpload, deliveredSalesOrder);
 
 router.post('/:id/decide-edit-request', requireAuth, requirePerm('SalesOrders', 'approve'), decideSalesOrderEditRequest);
 

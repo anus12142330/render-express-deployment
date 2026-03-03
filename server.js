@@ -116,20 +116,21 @@ app.use(session({
   }
 }));
 
-// Request Logger for debugging session issues
+// Mobile: if Authorization: Bearer <token> is present, set req.session.user so all API routes work
+// (session cookies are not sent from capacitor://localhost to Render). Must run before logger.
+app.use(optionalBearerSession);
+
+// Request Logger (after optionalBearerSession so mobile Bearer auth is reflected)
 app.use((req, res, next) => {
-  console.log(`[${new Date().toLocaleTimeString()}] ${req.method} ${req.url} - SID: ${req.sessionID}`);
-  if (req.session?.user) {
-    console.log(`  User: ${req.session.user.email}`);
+  const user = req.session?.user || req.mobileUser || req.user;
+  const authSource = req.headers?.authorization?.startsWith('Bearer ') ? ' (Bearer)' : '';
+  if (user) {
+    console.log(`[${new Date().toLocaleTimeString()}] ${req.method} ${req.url} - User: ${user.email || user.id || 'ok'}${authSource}`);
   } else {
-    console.log('  No Auth Session');
+    console.log(`[${new Date().toLocaleTimeString()}] ${req.method} ${req.url} - No Auth Session`);
   }
   next();
 });
-
-// Mobile: if Authorization: Bearer <token> is present, set req.session.user so all API routes work
-// (session cookies are not sent from capacitor://localhost to Render)
-app.use(optionalBearerSession);
 
 const vendorStorage = multer.diskStorage({
   destination: (req, file, cb) => {

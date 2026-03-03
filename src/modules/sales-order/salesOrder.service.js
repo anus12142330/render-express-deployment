@@ -1,4 +1,9 @@
 import db from '../../../db.js';
+import crypto from 'crypto';
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+const { generateARInvoiceNumber } = require('../../utils/docNo.cjs');
+
 import {
     fetchCompanyPrefix,
     fetchSalesOrderFormat,
@@ -25,7 +30,11 @@ import {
     listSalesOrders,
     listApprovalQueue,
     getAttachmentById,
-    deleteAttachment
+    deleteAttachment,
+    getDispatchVehicles,
+    getDispatchDriversByVehicle,
+    upsertDispatchVehicleDriver,
+    getDispatchBatchInfo
 } from './salesOrder.repo.js';
 import fs from 'fs';
 import { normalizeTaxMode } from './salesOrder.validators.js';
@@ -191,21 +200,32 @@ export const listApprovals = async (query) => {
     }
 };
 
+/** Get warehouse + per-item purchase bill/batch info for dispatch (bill_date, batch_no, allocated_quantity; only qty > 0). */
+export const getOrderDispatchBatchInfo = async ({ id }) => {
+    const conn = await db.promise().getConnection();
+    try {
+        return await getDispatchBatchInfo(conn, { salesOrderId: id });
+    } finally {
+        conn.release();
+    }
+};
+
 export const getOrderDetail = async ({ id, clientId }) => {
     const conn = await db.promise().getConnection();
     try {
-        const header = await getSalesOrderHeader(conn, { id, clientId });
+        const header = await getSalesOrderHeader(conn, { id, clientId: null });
         if (!header) return null;
+        // Load items, attachments, dispatches by order id only (no client_id filter) so they show on detail in web and mobile
         const [items, attachments, approval, audit, dispatches] = await Promise.all([
-            getSalesOrderItems(conn, { salesOrderId: header.id, clientId }),
-            getSalesOrderAttachments(conn, { salesOrderId: header.id, clientId }),
-            getSalesOrderApproval(conn, { salesOrderId: header.id, clientId }),
-            getSalesOrderAudit(conn, { salesOrderId: header.id, clientId }),
-            getSalesOrderDispatches(conn, { salesOrderId: header.id, clientId })
+            getSalesOrderItems(conn, { salesOrderId: header.id, clientId: null }),
+            getSalesOrderAttachments(conn, { salesOrderId: header.id, clientId: null }),
+            getSalesOrderApproval(conn, { salesOrderId: header.id, clientId: null }),
+            getSalesOrderAudit(conn, { salesOrderId: header.id, clientId: null }),
+            getSalesOrderDispatches(conn, { salesOrderId: header.id, clientId: null })
         ]);
 
         const enrichedDispatches = await Promise.all(dispatches.map(async (d) => {
-            const dItems = await getDispatchItems(conn, { dispatchId: d.id, clientId });
+            const dItems = await getDispatchItems(conn, { dispatchId: d.id });
             return { ...d, items: dItems };
         }));
 
@@ -270,19 +290,19 @@ export const createDraft = async ({ clientId, userId, payload }) =>
 
 export const updateDraftHeader = async ({ clientId, userId, id, payload }) =>
     withTx(async (conn) => {
-        const header = await getSalesOrderHeader(conn, { id, clientId });
+        const header = await getSalesOrderHeader(conn, { id, clientId: null });
         if (!header) throw new Error('Sales order not found');
+        const scopeClientId = clientId ?? header.client_id;
         // If order is not a draft, change it to draft to allow editing
         if (Number(header.status_id) !== 3) {
             const oldStatus = header.status_id;
-            await conn.query(`UPDATE sales_orders SET status_id = ?, updated_by = ?, updated_at = NOW() WHERE id = ? AND client_id = ?`, [
+            await conn.query(`UPDATE sales_orders SET status_id = ?, updated_by = ?, updated_at = NOW() WHERE id = ?`, [
                 3,
                 userId,
-                id,
-                clientId
+                id
             ]);
             await insertAudit(conn, {
-                client_id: clientId,
+                client_id: scopeClientId,
                 sales_order_id: id,
                 action: 'SET_TO_DRAFT_FOR_EDIT',
                 old_status_id: oldStatus,
@@ -291,14 +311,7 @@ export const updateDraftHeader = async ({ clientId, userId, id, payload }) =>
                 action_by: userId
             });
             // Refresh header for subsequent operations
-            // (we don't strictly need all refreshed fields, but keep consistent)
-            // Note: getSalesOrderHeader reads from DB, so re-fetch
-            // to keep `header` values used later in audit/payload accurate.
-            // eslint-disable-next-line no-param-reassign
-            // (reassigning header variable is acceptable here)
-            // eslint-disable-next-line prefer-const
-            // fetch new header
-            const refreshed = await getSalesOrderHeader(conn, { id, clientId });
+            const refreshed = await getSalesOrderHeader(conn, { id, clientId: null });
             if (refreshed) Object.assign(header, refreshed);
         }
 
@@ -306,7 +319,7 @@ export const updateDraftHeader = async ({ clientId, userId, id, payload }) =>
 
         await updateSalesOrderHeader(conn, {
             id,
-            client_id: clientId,
+            client_id: scopeClientId,
             company_id: payload.company_id,
             customer_id: payload.customer_id,
             warehouse_id: payload.warehouse_id,
@@ -325,7 +338,7 @@ export const updateDraftHeader = async ({ clientId, userId, id, payload }) =>
 
         if (changes.length > 0) {
             await insertAudit(conn, {
-                client_id: clientId,
+                client_id: scopeClientId,
                 sales_order_id: id,
                 action: 'UPDATED_HEADER',
                 old_status_id: header.status_id,
@@ -338,16 +351,15 @@ export const updateDraftHeader = async ({ clientId, userId, id, payload }) =>
 
 export const replaceItems = async ({ clientId, userId, id, taxMode, items }) =>
     withTx(async (conn) => {
-        const header = await getSalesOrderHeader(conn, { id, clientId });
+        const header = await getSalesOrderHeader(conn, { id, clientId: null });
         if (!header) throw new Error('Sales order not found');
         // If order is not a draft, change it to draft to allow editing
         if (Number(header.status_id) !== 3) {
             const oldStatus = header.status_id;
-            await conn.query(`UPDATE sales_orders SET status_id = ?, updated_by = ?, updated_at = NOW() WHERE id = ? AND client_id = ?`, [
+            await conn.query(`UPDATE sales_orders SET status_id = ?, updated_by = ?, updated_at = NOW() WHERE id = ?`, [
                 3,
                 userId,
-                id,
-                clientId
+                id
             ]);
             await insertAudit(conn, {
                 client_id: clientId,
@@ -358,7 +370,7 @@ export const replaceItems = async ({ clientId, userId, id, taxMode, items }) =>
                 payload_json: { order_no: header.order_no },
                 action_by: userId
             });
-            const refreshed = await getSalesOrderHeader(conn, { id, clientId });
+            const refreshed = await getSalesOrderHeader(conn, { id, clientId: null });
             if (refreshed) Object.assign(header, refreshed);
         }
 
@@ -405,14 +417,14 @@ export const replaceItems = async ({ clientId, userId, id, taxMode, items }) =>
 
 export const addAttachments = async ({ clientId, userId, id, scope, files }) =>
     withTx(async (conn) => {
-        const header = await getSalesOrderHeader(conn, { id, clientId });
+        const header = await getSalesOrderHeader(conn, { id, clientId: null });
         if (!header) throw new Error('Sales order not found');
+        const scopeClientId = clientId ?? header.client_id;
         // Allow attachments in drafts, submitted, maybe even dispatched?
         // Requirement says "available in Draft and Submitted for Approval".
         // Also Completion creates new attachments.
 
         const rows = files.map((file) => [
-            clientId,
             id,
             null, // dispatch_id (header attachments have no dispatch)
             scope,
@@ -427,7 +439,7 @@ export const addAttachments = async ({ clientId, userId, id, scope, files }) =>
         await insertAttachments(conn, rows);
 
         await insertAudit(conn, {
-            client_id: clientId,
+            client_id: scopeClientId ?? null,
             sales_order_id: id,
             action: 'ATTACHMENTS_ADDED',
             old_status_id: header.status_id,
@@ -439,7 +451,7 @@ export const addAttachments = async ({ clientId, userId, id, scope, files }) =>
 
 export const removeAttachment = async ({ clientId, userId, id, attachmentId }) =>
     withTx(async (conn) => {
-        const header = await getSalesOrderHeader(conn, { id, clientId });
+        const header = await getSalesOrderHeader(conn, { id, clientId: null });
         if (!header) throw new Error('Sales order not found');
 
         const att = await getAttachmentById(conn, { attachmentId, clientId });
@@ -473,34 +485,35 @@ export const removeAttachment = async ({ clientId, userId, id, attachmentId }) =
 
 export const submitForApproval = async ({ clientId, userId, id }) =>
     withTx(async (conn) => {
-        const header = await getSalesOrderHeader(conn, { id, clientId });
+        const header = await getSalesOrderHeader(conn, { id, clientId: null });
         if (!header) throw new Error('Sales order not found');
+        const scopeClientId = clientId ?? header.client_id;
         if (Number(header.status_id) !== 3) throw new Error('Only drafts can be submitted');
 
-        const items = await getSalesOrderItems(conn, { salesOrderId: id, clientId });
+        const items = await getSalesOrderItems(conn, { salesOrderId: id, clientId: null });
         if (!items.length) throw new Error('At least 1 item is required before submit');
 
         let finalOrderNo = header.order_no;
         const needsOrderNo = !header.order_no || String(header.order_no).toUpperCase() === 'XXX';
         if (needsOrderNo) {
             finalOrderNo = await generateOrderNo(conn, {
-                clientId,
+                clientId: scopeClientId,
                 companyId: header.company_id,
                 orderDate: header.order_date
             });
             await conn.query(
-                `UPDATE sales_orders SET order_no = ?, status_id = 8, updated_by = ?, updated_at = NOW() WHERE id = ? AND client_id = ?`,
-                [finalOrderNo, userId, id, clientId]
+                `UPDATE sales_orders SET order_no = ?, status_id = 8, updated_by = ?, updated_at = NOW() WHERE id = ?`,
+                [finalOrderNo, userId, id]
             );
         } else {
             await conn.query(
-                `UPDATE sales_orders SET status_id = 8, updated_by = ?, updated_at = NOW() WHERE id = ? AND client_id = ?`,
-                [userId, id, clientId]
+                `UPDATE sales_orders SET status_id = 8, updated_by = ?, updated_at = NOW() WHERE id = ?`,
+                [userId, id]
             );
         }
 
         await insertAudit(conn, {
-            client_id: clientId,
+            client_id: scopeClientId ?? null,
             sales_order_id: id,
             action: 'SUBMITTED',
             old_status_id: 3,
@@ -514,18 +527,18 @@ export const submitForApproval = async ({ clientId, userId, id }) =>
 
 export const approveOrder = async ({ clientId, userId, id, comment }) =>
     withTx(async (conn) => {
-        const header = await getSalesOrderHeader(conn, { id, clientId });
+        const header = await getSalesOrderHeader(conn, { id, clientId: null });
         if (!header) throw new Error('Sales order not found');
+        const scopeClientId = clientId ?? header.client_id;
         if (Number(header.status_id) !== 8) throw new Error('Only submitted orders can be approved');
 
-        await conn.query(`UPDATE sales_orders SET status_id = 1, updated_by = ?, updated_at = NOW() WHERE id = ? AND client_id = ?`, [
+        await conn.query(`UPDATE sales_orders SET status_id = 1, updated_by = ?, updated_at = NOW() WHERE id = ?`, [
             userId,
-            id,
-            clientId
+            id
         ]);
 
         await insertAudit(conn, {
-            client_id: clientId,
+            client_id: scopeClientId,
             sales_order_id: id,
             action: 'APPROVED',
             old_status_id: 8,
@@ -535,10 +548,13 @@ export const approveOrder = async ({ clientId, userId, id, comment }) =>
         });
     });
 
-export const dispatchOrder = async ({ clientId, userId, id, dispatch_id, vehicle_no, driver_name, comments, files, items: dispatchPayload }) =>
+export const dispatchOrder = async ({ clientId, userId, id, dispatch_id, vehicle_no, driver_name, comments, files, items: dispatchPayload, force_delivery = false, force_delivery_reason = null }) =>
     withTx(async (conn) => {
-        const header = await getSalesOrderHeader(conn, { id, clientId });
+        const header = await getSalesOrderHeader(conn, { id, clientId: null });
         if (!header) throw new Error('Sales order not found');
+        const scopeClientId = clientId ?? header.client_id;
+        // Ignore client_id check for attachments: use 0 when null so INSERT never fails
+        const attachmentClientId = scopeClientId ?? header.client_id ?? 0;
 
         if (![1, 11, 9].includes(Number(header.status_id))) {
             throw new Error(`Dispatch allowed only for approved, partial or dispatched orders. Current status: ${header.status_id}`);
@@ -552,21 +568,19 @@ export const dispatchOrder = async ({ clientId, userId, id, dispatch_id, vehicle
 
         let activeDispatchId = dispatch_id;
         if (activeDispatchId) {
-            // EDIT MODE: Update existing header and reverse old quantities
-            await updateDispatchHeader(conn, { id: activeDispatchId, vehicle_no, driver_name, client_id: clientId, comments });
+            await updateDispatchHeader(conn, { id: activeDispatchId, vehicle_no, driver_name, client_id: scopeClientId, comments });
 
-            const oldItems = await getDispatchItems(conn, { dispatchId: activeDispatchId, clientId });
+            const oldItems = await getDispatchItems(conn, { dispatchId: activeDispatchId, clientId: scopeClientId });
             for (const oi of oldItems) {
                 await conn.query(
-                    `UPDATE sales_order_items SET dispatched_quantity = dispatched_quantity - ? WHERE id = ? AND client_id = ?`,
-                    [Number(oi.quantity), oi.sales_order_item_id, clientId]
+                    `UPDATE sales_order_items SET dispatched_quantity = dispatched_quantity - ? WHERE id = ?`,
+                    [Number(oi.quantity), oi.sales_order_item_id]
                 );
             }
-            await deleteDispatchItems(conn, { dispatchId: activeDispatchId, clientId });
+            await deleteDispatchItems(conn, { dispatchId: activeDispatchId });
         } else {
-            // NEW DISPATCH mode
             activeDispatchId = await insertDispatchHeader(conn, {
-                client_id: clientId,
+                client_id: scopeClientId,
                 sales_order_id: id,
                 vehicle_no,
                 driver_name,
@@ -582,7 +596,7 @@ export const dispatchOrder = async ({ clientId, userId, id, dispatch_id, vehicle
             const qty = Number(p.dispatch_qty || 0);
             if (qty <= 0) continue;
 
-            dispatchHistory.push([clientId, activeDispatchId, p.id, qty]);
+            dispatchHistory.push([activeDispatchId, p.id, p.ap_bill_line_id || null, qty]);
             aggregateQtyByItemId[p.id] = (aggregateQtyByItemId[p.id] || 0) + qty;
         }
 
@@ -590,89 +604,119 @@ export const dispatchOrder = async ({ clientId, userId, id, dispatch_id, vehicle
             await insertDispatchItems(conn, dispatchHistory);
         }
 
-        // Apply new quantities and determine status
-        const existingItems = await getSalesOrderItems(conn, { salesOrderId: id, clientId });
-        let allFullyDispatched = true;
+        const existingItems = await getSalesOrderItems(conn, { salesOrderId: id, clientId: scopeClientId });
 
         for (const item of existingItems) {
             const addedInThisUpdate = Number(aggregateQtyByItemId[item.id] || 0);
-            const currentTotal = Number(item.dispatched_quantity || 0) + (activeDispatchId ? 0 : 0);
-            // NOTE: item.dispatched_quantity from getSalesOrderItems MIGHT NOT be updated yet because we ran update queries individually.
-            // Let's fetch fresh item data or just update and then decide.
-
             await updateItemDispatchedQuantity(conn, {
                 id: item.id,
-                dispatched_quantity: Number(item.dispatched_quantity || 0) + addedInThisUpdate,
-                clientId
+                dispatched_quantity: Number(item.dispatched_quantity || 0) + addedInThisUpdate
             });
+        }
 
+        // Decide status from actual DB state after updates (so partial = 11, full = 9)
+        const itemsAfterUpdate = await getSalesOrderItems(conn, { salesOrderId: id, clientId: scopeClientId });
+        let allFullyDispatched = true;
+        for (const item of itemsAfterUpdate) {
+            const dispatched = Number(item.dispatched_quantity || 0);
             const ordered = Number(item.ordered_quantity || item.quantity || 0);
-            if (Number(item.dispatched_quantity || 0) + addedInThisUpdate < ordered) {
+            if (ordered > 0 && dispatched < ordered) {
                 allFullyDispatched = false;
+                break;
             }
         }
 
-        if (files.length) {
-            const rows = files.map((file) => [
-                clientId,
-                id,
-                activeDispatchId,
-                'DISPATCH',
-                file.originalname,
-                file.filename,
-                file.mimetype,
-                file.size,
-                file.file_path,
-                userId,
-                new Date()
-            ]);
+        const filesList = Array.isArray(files) ? files : [];
+        if (filesList.length) {
+            const rows = filesList.map((file) => {
+                const originalName = file.originalname || file.originalName || file.filename || 'dispatch_photo';
+                const fileName = file.filename || file.originalname || file.originalName || `dispatch_${Date.now()}.jpg`;
+                const filePath = file.file_path || file.path || `uploads/sales_orders/dispatch/${fileName}`;
+                return [
+                    id,
+                    activeDispatchId,
+                    'DISPATCH',
+                    originalName,
+                    fileName,
+                    file.mimetype || file.mimeType || 'image/jpeg',
+                    file.size != null ? Number(file.size) : 0,
+                    filePath,
+                    userId,
+                    new Date()
+                ];
+            });
             await insertAttachments(conn, rows);
         }
 
-        const newStatus = allFullyDispatched ? 9 : 11;
+        // Force delivery overrides the partial check — close the order as fully dispatched
+        const effectivelyFullyDispatched = force_delivery ? true : allFullyDispatched;
+
+        const newStatus = effectivelyFullyDispatched ? 9 : 11;
         await conn.query(
-            `UPDATE sales_orders SET status_id = ?, updated_by = ?, updated_at = NOW() WHERE id = ? AND client_id = ?`,
-            [newStatus, userId, id, clientId]
+            `UPDATE sales_orders SET status_id = ?, updated_by = ?, updated_at = NOW() WHERE id = ?`,
+            [newStatus, userId, id]
         );
 
+        const auditAction = dispatch_id
+            ? 'DISPATCH_UPDATED'
+            : (force_delivery ? 'FORCE_DELIVERED' : (effectivelyFullyDispatched ? 'DISPATCHED' : 'PARTIALLY_DISPATCHED'));
+
         await insertAudit(conn, {
-            client_id: clientId,
+            client_id: scopeClientId,
             sales_order_id: id,
-            action: dispatch_id ? 'DISPATCH_UPDATED' : (allFullyDispatched ? 'DISPATCHED' : 'PARTIALLY_DISPATCHED'),
+            action: auditAction,
             old_status_id: header.status_id,
             new_status_id: newStatus,
             payload_json: {
                 dispatch_id: activeDispatchId,
                 vehicle_no,
                 driver_name,
-                is_edit: !!dispatch_id
+                is_edit: !!dispatch_id,
+                ...(force_delivery ? { force_delivery: true, force_delivery_reason } : {})
             },
             action_by: userId
         });
+
+        // Save vehicle+driver pair for next time (dropdown history, separate from fleet/driver masters)
+        try {
+            await upsertDispatchVehicleDriver(conn, {
+                clientId: scopeClientId,
+                vehicleName: vehicle_no,
+                driverName: driver_name
+            });
+        } catch (err) {
+            console.warn('[dispatchOrder] upsertDispatchVehicleDriver', err?.message || err);
+        }
     });
 
-export const markAsDelivered = async ({ clientId, userId, id, comment, files = [] }) =>
+export const markAsDelivered = async ({ clientId, userId, id, comment, files }) =>
     withTx(async (conn) => {
-        const header = await getSalesOrderHeader(conn, { id, clientId });
+        const header = await getSalesOrderHeader(conn, { id, clientId: null });
         if (!header) throw new Error('Sales order not found');
+        const scopeClientId = clientId ?? header.client_id;
         if (![9, 11].includes(Number(header.status_id))) {
             throw new Error('Only dispatched orders can be marked delivered');
         }
 
-        if (files.length) {
-            const rows = files.map((file) => [
-                clientId,
-                id,
-                null, // dispatch_id
-                'DELIVERY',
-                file.originalname,
-                file.filename,
-                file.mimetype,
-                file.size,
-                file.file_path,
-                userId,
-                new Date()
-            ]);
+        const filesList = Array.isArray(files) ? files : [];
+        if (filesList.length) {
+            const rows = filesList.map((file) => {
+                const originalName = file.originalname || file.originalName || file.filename || 'delivery_photo';
+                const fileName = file.filename || file.originalname || file.originalName || `delivery_${Date.now()}.jpg`;
+                const filePath = file.file_path || file.path || `uploads/sales_orders/delivery/${fileName}`;
+                return [
+                    id,
+                    null, // dispatch_id
+                    'DELIVERY',
+                    originalName,
+                    fileName,
+                    file.mimetype || file.mimeType || 'image/jpeg',
+                    file.size != null ? Number(file.size) : 0,
+                    filePath,
+                    userId,
+                    new Date()
+                ];
+            });
             await insertAttachments(conn, rows);
         }
 
@@ -684,44 +728,42 @@ export const markAsDelivered = async ({ clientId, userId, id, comment, files = [
                  delivered_at = NOW(), 
                  updated_by = ?, 
                  updated_at = NOW() 
-             WHERE id = ? AND client_id = ?`,
-            [comment || null, userId, userId, id, clientId]
+             WHERE id = ?`,
+            [comment || null, userId, userId, id]
         );
 
         await insertAudit(conn, {
-            client_id: clientId,
+            client_id: scopeClientId,
             sales_order_id: id,
             action: 'MARKED_DELIVERED',
             old_status_id: header.status_id,
             new_status_id: 12,
-            payload_json: { comment, attachments: files.length },
+            payload_json: { comment, attachments: filesList.length },
             action_by: userId
         });
     });
 
 export const deleteDispatch = async ({ clientId, userId, id, dispatchId }) =>
     withTx(async (conn) => {
-        const header = await getSalesOrderHeader(conn, { id, clientId });
+        const header = await getSalesOrderHeader(conn, { id, clientId: null });
         if (!header) throw new Error('Sales order not found');
+        const scopeClientId = clientId ?? header.client_id;
 
-        const dispatch = await getDispatchById(conn, { id: dispatchId, clientId });
+        const dispatch = await getDispatchById(conn, { id: dispatchId });
         if (!dispatch) throw new Error('Dispatch record not found');
         if (Number(dispatch.sales_order_id) !== Number(id)) throw new Error('Dispatch record mismatch');
 
-        // 1. Reverse quantities
-        const items = await getDispatchItems(conn, { dispatchId, clientId });
+        const items = await getDispatchItems(conn, { dispatchId, clientId: scopeClientId });
         for (const it of items) {
             await conn.query(
-                `UPDATE sales_order_items SET dispatched_quantity = dispatched_quantity - ? WHERE id = ? AND client_id = ?`,
-                [Number(it.quantity), it.sales_order_item_id, clientId]
+                `UPDATE sales_order_items SET dispatched_quantity = dispatched_quantity - ? WHERE id = ?`,
+                [Number(it.quantity), it.sales_order_item_id]
             );
         }
 
-        // 2. Delete dispatch (cascades to items)
-        await deleteDispatchHeader(conn, { id: dispatchId, clientId });
+        await deleteDispatchHeader(conn, { id: dispatchId });
 
-        // 3. Re-calculate order status
-        const allItems = await getSalesOrderItems(conn, { salesOrderId: id, clientId });
+        const allItems = await getSalesOrderItems(conn, { salesOrderId: id, clientId: scopeClientId });
         let hasAnyDispatch = false;
         let allFullyDispatched = true;
 
@@ -737,16 +779,15 @@ export const deleteDispatch = async ({ clientId, userId, id, dispatchId }) =>
         else if (hasAnyDispatch) newStatus = 11;
 
         if (header.status_id !== newStatus) {
-            await conn.query(`UPDATE sales_orders SET status_id = ?, updated_by = ?, updated_at = NOW() WHERE id = ? AND client_id = ?`, [
+            await conn.query(`UPDATE sales_orders SET status_id = ?, updated_by = ?, updated_at = NOW() WHERE id = ?`, [
                 newStatus,
                 userId,
-                id,
-                clientId
+                id
             ]);
         }
 
         await insertAudit(conn, {
-            client_id: clientId,
+            client_id: scopeClientId,
             sales_order_id: id,
             action: 'DISPATCH_DELETED',
             old_status_id: header.status_id,
@@ -756,32 +797,67 @@ export const deleteDispatch = async ({ clientId, userId, id, dispatchId }) =>
         });
     });
 
-export const completeOrder = async ({ clientId, userId, id, client_received_by, client_notes, files }) =>
+export const completeOrder = async ({ clientId, userId, id, client_received_by, client_notes, files, payment_term_id, due_date, allocations }) =>
     withTx(async (conn) => {
-        const header = await getSalesOrderHeader(conn, { id, clientId });
+        const header = await getSalesOrderHeader(conn, { id, clientId: null });
         if (!header) throw new Error('Sales order not found');
+        const scopeClientId = clientId ?? header.client_id;
         if (![9, 12].includes(Number(header.status_id))) {
             throw new Error('Completion allowed only for dispatched or delivered orders');
         }
 
-        if (files.length) {
-            const rows = files.map((file) => [
-                clientId,
-                id,
-                null, // dispatch_id (completion attachments have no dispatch)
-                'COMPLETION',
-                file.originalname,
-                file.filename,
-                file.mimetype,
-                file.size,
-                file.file_path,
-                userId,
-                new Date()
-            ]);
+        const filesList = Array.isArray(files) ? files : [];
+
+        // 1. Update allocations if provided (User requested: "allocated quantity can able to edit also")
+        if (Array.isArray(allocations) && allocations.length > 0) {
+            for (const alloc of allocations) {
+                if (alloc.id && alloc.allocated_qty !== undefined) {
+                    await conn.query(
+                        `UPDATE sales_order_items SET dispatched_quantity = ? WHERE id = ? AND sales_order_id = ?`,
+                        [Number(alloc.allocated_qty), alloc.id, id]
+                    );
+                }
+            }
+        }
+
+        if (filesList.length) {
+            const rows = filesList.map((file) => {
+                const originalName = file.originalname || file.originalName || file.filename || 'completion_photo';
+                const fileName = file.filename || file.originalname || file.originalName || `completion_${Date.now()}.jpg`;
+                const filePath = file.file_path || file.path || `uploads/sales_orders/completion/${fileName}`;
+                return [
+                    id,
+                    null, // dispatch_id (completion attachments have no dispatch)
+                    'COMPLETION',
+                    originalName,
+                    fileName,
+                    file.mimetype || file.mimeType || 'image/jpeg',
+                    file.size != null ? Number(file.size) : 0,
+                    filePath,
+                    userId,
+                    new Date()
+                ];
+            });
             await insertAttachments(conn, rows);
         }
 
-        // Updated status AND completion info in header
+        // 1.5 Determine warehouse_id from dispatch items (tied to AP Bill batches)
+        const [dispatchWh] = await conn.query(`
+            SELECT ab.warehouse_id 
+            FROM sales_order_dispatch_items di
+            JOIN ap_bill_lines abl ON di.ap_bill_line_id = abl.id
+            JOIN ap_bills ab ON abl.bill_id = ab.id
+            JOIN sales_order_dispatches d ON di.dispatch_id = d.id
+            WHERE d.sales_order_id = ? LIMIT 1
+        `, [id]);
+        let finalWarehouseId = dispatchWh[0]?.warehouse_id || header.warehouse_id;
+
+        if (!finalWarehouseId) {
+            const [fallBackWh] = await conn.query('SELECT id FROM warehouses LIMIT 1');
+            finalWarehouseId = fallBackWh[0]?.id || 1;
+        }
+
+        // 2. Updated status AND completion info in header (including payment terms, due date, warehouse)
         await conn.query(
             `UPDATE sales_orders 
              SET status_id = 10, 
@@ -789,31 +865,197 @@ export const completeOrder = async ({ clientId, userId, id, client_received_by, 
                  client_notes = ?, 
                  completed_by = ?, 
                  completed_at = NOW(),
+                 payment_term_id = ?,
+                 due_date = ?,
+                 warehouse_id = ?,
                  updated_by = ?, 
                  updated_at = NOW() 
-             WHERE id = ? AND client_id = ?`,
-            [client_received_by || null, client_notes, userId, userId, id, clientId]
+             WHERE id = ?`,
+            [client_received_by || null, client_notes, userId, payment_term_id || null, due_date || null, finalWarehouseId, userId, id]
         );
 
+        // 3. Auto-generate Customer Invoice (Submitted status 8)
+        const [existingInvoices] = await conn.query('SELECT id FROM ar_invoices WHERE sales_order_id = ?', [id]);
+        if (existingInvoices.length === 0) {
+            // Re-fetch items to get latest dispatched_quantity and prices
+            const items = await getSalesOrderItems(conn, { salesOrderId: id, clientId: scopeClientId });
+
+            let invSubtotal = 0;
+            let invTaxTotal = 0;
+            let invGrandTotal = 0;
+            const invoiceLines = [];
+
+            for (const item of items) {
+                const qty = Number(item.dispatched_quantity || 0);
+                if (qty <= 0) continue;
+
+                const rate = Number(item.unit_price || 0);
+                const lineSubtotal = qty * rate;
+                const taxRate = Number(item.tax_rate || 0);
+                const lineTax = lineSubtotal * (taxRate / 100);
+                const lineTotal = lineSubtotal + lineTax;
+
+                invSubtotal += lineSubtotal;
+                invTaxTotal += lineTax;
+                invGrandTotal += lineTotal;
+
+                invoiceLines.push({
+                    ...item,
+                    qty,
+                    rate,
+                    lineSubtotal,
+                    lineTax,
+                    lineTotal
+                });
+            }
+
+            if (invoiceLines.length > 0) {
+                const year = new Date().getFullYear();
+                const invoiceNumber = await generateARInvoiceNumber(conn, year);
+                const invoiceUniqid = `ari_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+
+                // Full address from customer (vendor): address1, address2, city, state, postcode, country
+                let customerAddress = header.billing_address || null;
+                let deliveryAddress = header.shipping_address || null;
+                try {
+                    const [vendorRows] = await conn.query(
+                        `SELECT 
+                            va.bill_address_1, va.bill_address_2, va.bill_city, va.bill_zip_code,
+                            vsa.ship_address_1, vsa.ship_address_2, vsa.ship_city, vsa.ship_zip_code,
+                            bs.name AS bill_state_name, bc.name AS bill_country_name,
+                            ss.name AS ship_state_name, sc.name AS ship_country_name
+                         FROM vendor v
+                         LEFT JOIN vendor_address va ON va.vendor_id = v.id
+                         LEFT JOIN vendor_shipping_addresses vsa ON vsa.vendor_id = v.id AND vsa.is_primary = 1
+                         LEFT JOIN state bs ON va.bill_state_id = bs.id
+                         LEFT JOIN country bc ON va.bill_country_id = bc.id
+                         LEFT JOIN state ss ON vsa.ship_state_id = ss.id
+                         LEFT JOIN country sc ON vsa.ship_country_id = sc.id
+                         WHERE v.id = ? LIMIT 1`,
+                        [header.customer_id]
+                    );
+                    const v = vendorRows[0];
+                    if (v) {
+                        const billParts = [
+                            v.bill_address_1,
+                            v.bill_address_2,
+                            [v.bill_city, v.bill_state_name, v.bill_zip_code].filter(Boolean).join(', '),
+                            v.bill_country_name
+                        ].filter(Boolean);
+                        if (billParts.length) customerAddress = billParts.join('\n');
+                        const shipParts = [
+                            v.ship_address_1,
+                            v.ship_address_2,
+                            [v.ship_city, v.ship_state_name, v.ship_zip_code].filter(Boolean).join(', '),
+                            v.ship_country_name
+                        ].filter(Boolean);
+                        if (shipParts.length) deliveryAddress = shipParts.join('\n');
+                    }
+                } catch (e) {
+                    // keep header.billing_address / header.shipping_address if vendor fetch fails
+                }
+
+                const [invoiceResult] = await conn.query(`
+                    INSERT INTO ar_invoices 
+                    (invoice_uniqid, invoice_number, invoice_date, due_date, payment_terms_id, 
+                     customer_id, company_id, warehouse_id, currency_id, subtotal, 
+                     discount_type, discount_amount, tax_total, total, notes, 
+                     customer_address, delivery_address,
+                     sales_order_id, sales_order_number, user_id, status_id)
+                    VALUES (?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 8)
+                `, [
+                    invoiceUniqid, invoiceNumber, due_date || null, payment_term_id || null,
+                    header.customer_id, header.company_id, finalWarehouseId, header.currency_id,
+                    invSubtotal, 'fixed', 0, invTaxTotal, invGrandTotal, client_notes || null,
+                    customerAddress, deliveryAddress,
+                    id, header.order_no, userId
+                ]);
+
+                const invoiceId = invoiceResult.insertId;
+
+                for (let i = 0; i < invoiceLines.length; i++) {
+                    const line = invoiceLines[i];
+                    const [lineResult] = await conn.query(`
+                        INSERT INTO ar_invoice_lines 
+                        (invoice_id, line_no, product_id, item_name, description, quantity, uom_id, rate, tax_id, tax_rate, line_total)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    `, [invoiceId, i + 1, line.product_id, line.product_name, line.description, line.qty, line.uom_id, line.rate, line.tax_id, line.tax_rate, line.lineTotal]);
+
+                    const lineId = lineResult.insertId;
+
+                    // Get batch allocations from dispatches (ap_bill_line_batches)
+                    let [dispatchBatches] = await conn.query(`
+                        SELECT di.ap_bill_line_id, di.quantity, ablb.batch_id, abl.rate as unit_cost
+                        FROM sales_order_dispatch_items di
+                        JOIN ap_bill_lines abl ON di.ap_bill_line_id = abl.id
+                        JOIN sales_order_dispatches d ON di.dispatch_id = d.id
+                        LEFT JOIN ap_bill_line_batches ablb ON ablb.bill_line_id = di.ap_bill_line_id
+                        WHERE d.sales_order_id = ? AND di.sales_order_item_id = ?
+                        GROUP BY di.ap_bill_line_id
+                    `, [id, line.id]);
+
+                    // Fallback: if no batches from dispatch (e.g. ap_bill_line_id was null, or product without purchase bills),
+                    // allocate from current inventory stock (FIFO) so approval can proceed
+                    if (!dispatchBatches || dispatchBatches.length === 0) {
+                        const [stockBatches] = await conn.query(`
+                            SELECT isb.batch_id, isb.qty_on_hand, isb.unit_cost
+                            FROM inventory_stock_batches isb
+                            WHERE isb.product_id = ? AND isb.warehouse_id = ? AND isb.qty_on_hand > 0
+                            ORDER BY isb.id ASC
+                        `, [line.product_id, finalWarehouseId]);
+                        let remaining = Number(line.qty || 0);
+                        for (const sb of stockBatches || []) {
+                            if (remaining <= 0) break;
+                            const take = Math.min(remaining, parseFloat(sb.qty_on_hand || 0));
+                            if (take <= 0) continue;
+                            await conn.query(`
+                                INSERT INTO ar_invoice_line_batches 
+                                (invoice_line_id, batch_id, quantity, unit_cost)
+                                VALUES (?, ?, ?, ?)
+                            `, [lineId, sb.batch_id, take, sb.unit_cost || line.rate || 0]);
+                            remaining -= take;
+                        }
+                    } else {
+                        for (const dbat of dispatchBatches) {
+                            const bId = dbat.batch_id || dbat.ap_bill_line_id;
+                            await conn.query(`
+                                INSERT INTO ar_invoice_line_batches 
+                                (invoice_line_id, batch_id, quantity, unit_cost)
+                                VALUES (?, ?, ?, ?)
+                            `, [lineId, bId, dbat.quantity, dbat.unit_cost || 0]);
+                        }
+                    }
+                }
+
+                // Add history for the new invoice
+                await conn.query(
+                    'INSERT INTO history (module, module_id, user_id, action, details, created_at) VALUES (?, ?, ?, ?, ?, NOW())',
+                    ['ar_invoice', invoiceId, userId, 'CREATED', JSON.stringify({
+                        invoice_number: invoiceNumber,
+                        sales_order_id: id,
+                        reason: 'Auto-generated on Sales Order completion'
+                    })]
+                );
+            }
+        }
+
         await insertAudit(conn, {
-            client_id: clientId,
+            client_id: scopeClientId,
             sales_order_id: id,
             action: 'COMPLETED',
             old_status_id: 9,
             new_status_id: 10,
-            payload_json: { client_notes, attachments: files.length },
+            payload_json: { client_notes, attachments: filesList.length },
             action_by: userId
         });
     });
 
 export const requestEditOrder = async ({ clientId, userId, id, reason }) =>
     withTx(async (conn) => {
-        const header = await getSalesOrderHeader(conn, { id, clientId });
+        const header = await getSalesOrderHeader(conn, { id, clientId: null });
         if (!header) throw new Error('Sales order not found');
+        const scopeClientId = clientId ?? header.client_id;
 
-        // Allow request edit if status is 8 (Submitted) or 9 (Dispatched) or 15 (Completed) 
-        // User asked for "once id 9 then instead of edit reedit request option"
-        // But usually it's allowed for any confirmed status.
         if (![8, 9, 12, 15].includes(Number(header.status_id))) {
             throw new Error('Edit request not allowed for this status');
         }
@@ -826,12 +1068,12 @@ export const requestEditOrder = async ({ clientId, userId, id, reason }) =>
                     edit_requested_by = ?,
                     updated_by = ?,
                     updated_at = NOW()
-                WHERE id = ? AND client_id = ?`,
-            [reason, userId, userId, id, clientId]
+                WHERE id = ?`,
+            [reason, userId, userId, id]
         );
 
         await insertAudit(conn, {
-            client_id: clientId,
+            client_id: scopeClientId,
             sales_order_id: id,
             action: 'EDIT_REQUESTED',
             old_status_id: header.status_id,
@@ -843,14 +1085,13 @@ export const requestEditOrder = async ({ clientId, userId, id, reason }) =>
 
 export const decideEditRequest = async ({ clientId, userId, id, decision, reason }) =>
     withTx(async (conn) => {
-        const header = await getSalesOrderHeader(conn, { id, clientId });
+        const header = await getSalesOrderHeader(conn, { id, clientId: null });
         if (!header) throw new Error('Sales order not found');
+        const scopeClientId = clientId ?? header.client_id;
         if (header.edit_request_status !== 'pending') throw new Error('No pending edit request found');
 
         const isApproved = decision === 'approve';
-        const newStatus = isApproved ? 3 : header.status_id; // approved -> Draft (3), rejected -> keep current
-        // When approved, reset edit_request_status to null so it clears from the list
-        // When rejected, set to 'rejected' to keep history
+        const newStatus = isApproved ? 3 : header.status_id;
         const newEditRequestStatus = isApproved ? null : 'rejected';
 
         await conn.query(
@@ -863,12 +1104,12 @@ export const decideEditRequest = async ({ clientId, userId, id, decision, reason
                     status_id = ?,
                     updated_by = ?,
                     updated_at = NOW()
-                WHERE id = ? AND client_id = ?`,
-            [newEditRequestStatus, reason || null, isApproved ? null : header.edit_request_reason, isApproved ? null : header.edit_requested_by, isApproved ? null : header.edit_requested_at, newStatus, userId, id, clientId]
+                WHERE id = ?`,
+            [newEditRequestStatus, reason || null, isApproved ? null : header.edit_request_reason, isApproved ? null : header.edit_requested_by, isApproved ? null : header.edit_requested_at, newStatus, userId, id]
         );
 
         await insertAudit(conn, {
-            client_id: clientId,
+            client_id: scopeClientId,
             sales_order_id: id,
             action: isApproved ? 'EDIT_REQUEST_APPROVED' : 'EDIT_REQUEST_REJECTED',
             old_status_id: header.status_id,
@@ -880,18 +1121,18 @@ export const decideEditRequest = async ({ clientId, userId, id, decision, reason
 
 export const rejectOrder = async ({ clientId, userId, id, reason }) =>
     withTx(async (conn) => {
-        const header = await getSalesOrderHeader(conn, { id, clientId });
+        const header = await getSalesOrderHeader(conn, { id, clientId: null });
         if (!header) throw new Error('Sales order not found');
+        const scopeClientId = clientId ?? header.client_id;
         if (Number(header.status_id) !== 8) throw new Error('Only submitted orders can be rejected');
 
-        await conn.query(`UPDATE sales_orders SET status_id = 2, updated_by = ?, updated_at = NOW() WHERE id = ? AND client_id = ?`, [
+        await conn.query(`UPDATE sales_orders SET status_id = 2, updated_by = ?, updated_at = NOW() WHERE id = ?`, [
             userId,
-            id,
-            clientId
+            id
         ]);
 
         await insertAudit(conn, {
-            client_id: clientId,
+            client_id: scopeClientId,
             sales_order_id: id,
             action: 'REJECTED',
             old_status_id: 8,
@@ -900,6 +1141,33 @@ export const rejectOrder = async ({ clientId, userId, id, reason }) =>
             action_by: userId
         });
     });
+
+/** List distinct vehicle names for dispatch dropdown (from sales_dispatch_vehicle_driver, not fleet) */
+export const listDispatchVehicles = async ({ clientId }) => {
+    const conn = await db.promise().getConnection();
+    try {
+        return await getDispatchVehicles(conn, { clientId });
+    } catch (err) {
+        // Table may not exist yet; return empty so UI does not 500
+        console.warn('[listDispatchVehicles]', err?.message || err);
+        return [];
+    } finally {
+        conn.release();
+    }
+};
+
+/** List distinct driver names for a vehicle (from sales_dispatch_vehicle_driver, not driver master) */
+export const listDispatchDriversByVehicle = async ({ clientId, vehicleName }) => {
+    const conn = await db.promise().getConnection();
+    try {
+        return await getDispatchDriversByVehicle(conn, { clientId, vehicleName: vehicleName || '' });
+    } catch (err) {
+        console.warn('[listDispatchDriversByVehicle]', err?.message || err);
+        return [];
+    } finally {
+        conn.release();
+    }
+};
 
 export const getClientContext = async (req) => {
     const fallbackHeader = req.headers?.['x-client-id'] || req.headers?.['x-tenant-id'];

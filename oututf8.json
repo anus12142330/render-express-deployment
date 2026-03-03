@@ -1,0 +1,89 @@
+{
+  "Invoices": [
+    {
+      "id": 13,
+      "invoice_number": "ARI-2026-0005",
+      "sales_order_id": 19,
+      "created_at": "2026-02-17 15:50:49"
+    },
+    {
+      "id": 10,
+      "invoice_number": "ARI-2026-0004",
+      "sales_order_id": 15,
+      "created_at": "2026-02-16 11:39:07"
+    },
+    {
+      "id": 9,
+      "invoice_number": "ARI-2026-0003",
+      "sales_order_id": 16,
+      "created_at": "2026-02-15 17:29:31"
+    },
+    {
+      "id": 8,
+      "invoice_number": "ARI-2026-0002",
+      "sales_order_id": null,
+      "created_at": "2026-01-11 17:17:48"
+    },
+    {
+      "id": 7,
+      "invoice_number": "ARI-2026-0001",
+      "sales_order_id": null,
+      "created_at": "2026-01-11 17:16:42"
+    }
+  ],
+  "Attachments": [
+    {
+      "id": 60,
+      "sales_order_id": 24,
+      "scope": "DELIVERY",
+      "file_name": "f6471022efb17ec4502ca8f5341bfc97.jpg"
+    },
+    {
+      "id": 59,
+      "sales_order_id": 24,
+      "scope": "DISPATCH",
+      "file_name": "bcea35760b456facace8e2ee643476ff.jpg"
+    },
+    {
+      "id": 58,
+      "sales_order_id": 24,
+      "scope": "DISPATCH",
+      "file_name": "a26f809d5fa6b99f5ab0c3f955a431b6.jpg"
+    },
+    {
+      "id": 57,
+      "sales_order_id": 15,
+      "scope": "DELIVERY",
+      "file_name": "a338c2803f89f0fe247d07ed8a486835.jpg"
+    },
+    {
+      "id": 56,
+      "sales_order_id": 15,
+      "scope": "DISPATCH",
+      "file_name": "bbcf0a2e828f4c3e2b1a0584d28347c2.jpg"
+    }
+  ],
+  "LatestSOs": [
+    {
+      "id": 29,
+      "status_id": 10,
+      "completed_at": "2026-03-01 12:18:38",
+      "payment_term_id": 2,
+      "due_date": "2026-02-26"
+    },
+    {
+      "id": 23,
+      "status_id": 3,
+      "completed_at": null,
+      "payment_term_id": null,
+      "due_date": null
+    },
+    {
+      "id": 24,
+      "status_id": 12,
+      "completed_at": null,
+      "payment_term_id": null,
+      "due_date": null
+    }
+  ]
+}

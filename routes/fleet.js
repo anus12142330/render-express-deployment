@@ -132,10 +132,10 @@ router.get('/', async (req, res, next) => {
     if (req.query.select === '1') {
         try {
             const data = await q(`
-                SELECT id, vehicle_name as name 
-                FROM fleets 
-                WHERE  is_active=1 AND is_deleted = 0 
-                ORDER BY vehicle_name ASC`
+                SELECT id, COALESCE(plate_number, vehicle_name) as plate_number, vehicle_name
+                FROM fleets
+                WHERE is_active = 1 AND is_deleted = 0
+                ORDER BY plate_number ASC, vehicle_name ASC`
             );
             return res.json(data);
         } catch (error) { return next(error); }

@@ -123,19 +123,25 @@ router.get('/lots', requireAuth, async (req, res) => {
       params.push(searchTerm, searchTerm, searchTerm, searchTerm);
     }
 
-    // Get total count
+    // Get total count (same FROM/JOIN/WHERE as main query so ql is in scope)
     const [countRows] = await db.promise().query(`
-      SELECT COUNT(DISTINCT ql.id) as total
-      FROM qc_lots ql
-      LEFT JOIN shipment s ON s.id = ql.shipment_id
-      LEFT JOIN vendor v ON v.id = s.vendor_id
-      LEFT JOIN qc_lot_items qli ON qli.qc_lot_id = ql.id
-      WHERE ${whereClauses.join(' AND ')}
+      SELECT COUNT(*) as total
+      FROM (
+        SELECT ql.id
+        FROM qc_lots ql
+        LEFT JOIN shipment s ON s.id = ql.shipment_id
+        LEFT JOIN purchase_orders po ON po.id = s.po_id
+        LEFT JOIN vendor v ON v.id = po.vendor_id
+        LEFT JOIN qc_lot_items qli ON qli.qc_lot_id = ql.id
+        WHERE ${whereClauses.join(' AND ')}
+        GROUP BY ql.id
+      ) t
     `, params);
 
     const total = countRows[0]?.total || 0;
 
-    // Get paginated rows
+    // Get paginated rows (inspection_status_summary: grouped by status e.g. "2 Approved, 1 Pending")
+    // Use LEFT JOIN to derived table instead of correlated subquery to avoid "Unknown column 'ql.id' in 'where clause'"
     const [rows] = await db.promise().query(`
       SELECT 
         ql.id,
@@ -157,15 +163,27 @@ router.get('/lots', requireAuth, async (req, res) => {
         COUNT(DISTINCT qli.id) as item_count,
         SUM(qli.declared_quantity_units) as total_quantity_units,
         SUM(qli.declared_quantity_net_weight) as total_quantity_net_weight,
-        GROUP_CONCAT(DISTINCT p.product_name ORDER BY p.product_name SEPARATOR ', ') as products
+        GROUP_CONCAT(DISTINCT p.product_name ORDER BY p.product_name SEPARATOR ', ') as products,
+        ins_summary.inspection_status_summary as inspection_status_summary
       FROM qc_lots ql
       LEFT JOIN shipment s ON s.id = ql.shipment_id
       LEFT JOIN purchase_orders po ON po.id = s.po_id
-      LEFT JOIN vendor v ON v.id = s.vendor_id
+      LEFT JOIN vendor v ON v.id = po.vendor_id
       LEFT JOIN qc_lot_items qli ON qli.qc_lot_id = ql.id
       LEFT JOIN products p ON p.id = qli.product_id
+      LEFT JOIN (
+        SELECT ins.qc_lot_id,
+          GROUP_CONCAT(CONCAT(ins.cnt, ' ', COALESCE(ins.status_name, 'Draft')) ORDER BY ins.status_name SEPARATOR ', ') as inspection_status_summary
+        FROM (
+          SELECT qi.qc_lot_id, qi.status_id, COUNT(*) as cnt, MAX(st.name) as status_name
+          FROM qc_inspections qi
+          LEFT JOIN status st ON st.id = qi.status_id
+          GROUP BY qi.qc_lot_id, qi.status_id
+        ) ins
+        GROUP BY ins.qc_lot_id
+      ) ins_summary ON ins_summary.qc_lot_id = ql.id
       WHERE ${whereClauses.join(' AND ')}
-      GROUP BY ql.id
+      GROUP BY ql.id, ins_summary.inspection_status_summary
       ORDER BY ql.created_at DESC
       LIMIT ? OFFSET ?
     `, [...params, pageSizeNum, offset]);
@@ -201,7 +219,7 @@ router.get('/lots/:id', requireAuth, async (req, res) => {
       FROM qc_lots ql
       LEFT JOIN shipment s ON s.id = ql.shipment_id
       LEFT JOIN purchase_orders po ON po.id = s.po_id
-      LEFT JOIN vendor v ON v.id = s.vendor_id
+      LEFT JOIN vendor v ON v.id = po.vendor_id
       LEFT JOIN \`user\` u1 ON u1.id = ql.created_by
       LEFT JOIN \`user\` u2 ON u2.id = ql.updated_by
       WHERE ql.id = ?
@@ -219,7 +237,12 @@ router.get('/lots/:id', requireAuth, async (req, res) => {
          FROM product_details pd
          WHERE pd.product_id = qli.product_id
          ORDER BY pd.id ASC
-         LIMIT 1) as packing_alias
+         LIMIT 1) as packing_alias,
+        (SELECT COALESCE(pi.thumbnail_path, pi.file_path)
+         FROM product_images pi
+         WHERE pi.product_id = qli.product_id
+         ORDER BY pi.is_primary DESC, pi.id ASC
+         LIMIT 1) as product_image_path
       FROM qc_lot_items qli
       LEFT JOIN uom_master um ON um.id = qli.uom_id
       WHERE qli.qc_lot_id = ?
@@ -735,6 +758,7 @@ router.get('/inspections', requireAuth, async (req, res) => {
         u2.name as created_by_name,
         ql.lot_number,
         ql.container_number,
+        po.mode_shipment_id,
         qli.id as qc_lot_item_id,
         qli.product_name as lot_item_product_name,
         qli.product_id as lot_item_product_id,
@@ -751,6 +775,8 @@ router.get('/inspections', requireAuth, async (req, res) => {
         rc.status as reject_case_status
       FROM qc_inspections qi
       LEFT JOIN qc_lots ql ON ql.id = qi.qc_lot_id
+      LEFT JOIN shipment sh ON sh.id = ql.shipment_id
+      LEFT JOIN purchase_orders po ON po.id = sh.po_id
       LEFT JOIN \`user\` u1 ON u1.id = qi.inspected_by
       LEFT JOIN \`user\` u2 ON u2.id = qi.created_by
       LEFT JOIN qc_lot_items qli ON qli.id = qi.qc_lot_item_id
@@ -791,7 +817,9 @@ router.get('/inspections/:id', requireAuth, async (req, res) => {
         u1.name as inspected_by_name,
         u2.name as created_by_name,
         ql.lot_number,
+        ql.po_number,
         ql.container_number,
+        po.mode_shipment_id,
         qli.id as qc_lot_item_id,
         qli.container_id as lot_item_container_id,
         qli.container_no as lot_item_container_no,
@@ -812,6 +840,8 @@ router.get('/inspections/:id', requireAuth, async (req, res) => {
         s.name as status_name
       FROM qc_inspections qi
       LEFT JOIN qc_lots ql ON ql.id = qi.qc_lot_id
+      LEFT JOIN shipment sh ON sh.id = ql.shipment_id
+      LEFT JOIN purchase_orders po ON po.id = sh.po_id
       LEFT JOIN \`user\` u1 ON u1.id = qi.inspected_by
       LEFT JOIN \`user\` u2 ON u2.id = qi.created_by
       LEFT JOIN qc_lot_items qli ON qli.id = qi.qc_lot_item_id
@@ -823,28 +853,32 @@ router.get('/inspections/:id', requireAuth, async (req, res) => {
       return res.status(404).json(errPayload('Inspection not found', 'NOT_FOUND'));
     }
 
-    // Fetch media grouped by defect_type_id (null for common media)
-    // Check if defect_type_id column exists (for backward compatibility)
+    // Fetch media grouped by defect_type_id and weight detail (null for common media)
     let media;
     let mediaByDefect = { common: [], defects: {} };
+    let weightDetails = [];
 
     try {
-      // Try to fetch with defect_type_id column (new structure)
       const [mediaResult] = await db.promise().query(`
         SELECT 
           id, qc_lot_id, qc_inspection_id, defect_type_id,
+          qc_inspection_weight_detail_id,
           qc_regrading_job_id, qc_regrading_daily_log_id, qc_reject_case_id,
           media_type, file_name, file_path, thumbnail_path, mime_type, size_bytes,
           created_at, created_by
         FROM qc_media 
         WHERE qc_inspection_id = ? 
-        ORDER BY defect_type_id IS NULL DESC, defect_type_id, created_at
+        ORDER BY defect_type_id IS NULL DESC, defect_type_id, qc_inspection_weight_detail_id, created_at
       `, [id]);
       media = mediaResult;
 
-      // Group media by defect_type_id for easier frontend consumption
       if (media && Array.isArray(media)) {
         media.forEach(m => {
+          const wdId = m.qc_inspection_weight_detail_id;
+          if (wdId != null) {
+            // Weight-detail media: grouped into weight_details below, not in common
+            return;
+          }
           if (m.defect_type_id === null || m.defect_type_id === undefined) {
             mediaByDefect.common.push(m);
           } else {
@@ -856,9 +890,7 @@ router.get('/inspections/:id', requireAuth, async (req, res) => {
         });
       }
     } catch (columnError) {
-      // Fallback: defect_type_id column doesn't exist yet (migration not run)
-      // Fetch all media as common media
-      console.warn('defect_type_id column not found, using fallback query:', columnError.message);
+      console.warn('qc_media columns (defect_type_id or qc_inspection_weight_detail_id) not found:', columnError.message);
       try {
         const [mediaResult] = await db.promise().query(`
           SELECT 
@@ -871,8 +903,6 @@ router.get('/inspections/:id', requireAuth, async (req, res) => {
           ORDER BY created_at
         `, [id]);
         media = mediaResult;
-
-        // All media is treated as common media (defect_type_id = null)
         mediaByDefect.common = media || [];
       } catch (fallbackError) {
         console.error('Error in fallback query:', fallbackError);
@@ -881,10 +911,49 @@ router.get('/inspections/:id', requireAuth, async (req, res) => {
       }
     }
 
+    // Fetch weight details and attach their media
+    try {
+      const [wdRows] = await db.promise().query(`
+        SELECT id, qc_inspection_id, weight_type, weight, uom, sort_order, created_at
+        FROM qc_inspection_weight_details
+        WHERE qc_inspection_id = ?
+        ORDER BY sort_order, id
+      `, [id]);
+      if (wdRows && wdRows.length > 0 && media && Array.isArray(media)) {
+        const mediaByWd = {};
+        media.forEach(m => {
+          if (m.qc_inspection_weight_detail_id != null) {
+            if (!mediaByWd[m.qc_inspection_weight_detail_id]) mediaByWd[m.qc_inspection_weight_detail_id] = [];
+            mediaByWd[m.qc_inspection_weight_detail_id].push(m);
+          }
+        });
+        weightDetails = wdRows.map(row => ({
+          id: row.id,
+          weight_type: row.weight_type,
+          weight: row.weight != null ? parseFloat(row.weight) : null,
+          uom: row.uom,
+          sort_order: row.sort_order,
+          media: mediaByWd[row.id] || []
+        }));
+      } else if (wdRows && wdRows.length > 0) {
+        weightDetails = wdRows.map(row => ({
+          id: row.id,
+          weight_type: row.weight_type,
+          weight: row.weight != null ? parseFloat(row.weight) : null,
+          uom: row.uom,
+          sort_order: row.sort_order,
+          media: []
+        }));
+      }
+    } catch (wdError) {
+      console.warn('qc_inspection_weight_details table not found:', wdError.message);
+    }
+
     res.json({
       ...inspections[0],
-      media: media, // Keep flat array for backward compatibility
-      mediaByDefect: mediaByDefect // New grouped structure
+      media: media || [],
+      mediaByDefect: mediaByDefect,
+      weight_details: weightDetails
     });
   } catch (e) {
     console.error('Error fetching inspection:', e);
@@ -1012,7 +1081,8 @@ router.post('/inspections', requireAuth, requirePerm('QualityCheck', 'create'), 
       checklist_odor,
       checklist_foreign_matter,
       checklist_moisture,
-      defects
+      defects,
+      weight_details
     } = req.body;
 
     // Convert qc_lot_item_id to integer if provided
@@ -1031,32 +1101,33 @@ router.post('/inspections', requireAuth, requirePerm('QualityCheck', 'create'), 
     const finalStatusId = status_id ? parseInt(status_id) : 3;
 
     // Parse files from req.files array (using upload.any())
-    // Separate common media from defect-specific media
+    // Separate common media, defect-specific media, and weight-detail media
     const photos = [];
     const videos = [];
     const defectMedia = {}; // { defectTypeId: { photos: [], videos: [] } }
+    const weightDetailMedia = {}; // { index: { photos: [], videos: [] } }
     if (req.files && Array.isArray(req.files)) {
       req.files.forEach(file => {
-        // Check if this is defect-specific media
+        const weightDetailMatch = file.fieldname.match(/^weight_detail_(\d+)_(photos|videos)$/);
+        if (weightDetailMatch) {
+          const idx = parseInt(weightDetailMatch[1], 10);
+          const mediaType = weightDetailMatch[2];
+          if (!weightDetailMedia[idx]) weightDetailMedia[idx] = { photos: [], videos: [] };
+          if (mediaType === 'photos') weightDetailMedia[idx].photos.push(file);
+          else weightDetailMedia[idx].videos.push(file);
+          return;
+        }
         const defectMatch = file.fieldname.match(/^defect_(photos|videos)_(\d+)$/);
         if (defectMatch) {
-          const mediaType = defectMatch[1]; // 'photos' or 'videos'
+          const mediaType = defectMatch[1];
           const defectTypeId = parseInt(defectMatch[2]);
-
-          if (!defectMedia[defectTypeId]) {
-            defectMedia[defectTypeId] = { photos: [], videos: [] };
-          }
-
-          if (mediaType === 'photos') {
-            defectMedia[defectTypeId].photos.push(file);
-          } else {
-            defectMedia[defectTypeId].videos.push(file);
-          }
-        } else if (file.fieldname === 'photos') {
-          photos.push(file);
-        } else if (file.fieldname === 'videos') {
-          videos.push(file);
+          if (!defectMedia[defectTypeId]) defectMedia[defectTypeId] = { photos: [], videos: [] };
+          if (mediaType === 'photos') defectMedia[defectTypeId].photos.push(file);
+          else defectMedia[defectTypeId].videos.push(file);
+          return;
         }
+        if (file.fieldname === 'photos') photos.push(file);
+        else if (file.fieldname === 'videos') videos.push(file);
       });
     }
 
@@ -1118,6 +1189,17 @@ router.post('/inspections', requireAuth, requirePerm('QualityCheck', 'create'), 
       }
     }
 
+    // Parse weight_details JSON if provided (step 3: Empty box / Fruit weight / Full box + weight + uom)
+    let weightDetailsList = [];
+    if (weight_details) {
+      try {
+        const wd = typeof weight_details === 'string' ? JSON.parse(weight_details) : weight_details;
+        weightDetailsList = Array.isArray(wd) ? wd : [];
+      } catch (e) {
+        console.error('Error parsing weight_details JSON:', e);
+      }
+    }
+
     // Insert inspection - now linked to QC lot item
     const [inspectionResult] = await conn.query(`
       INSERT INTO qc_inspections (
@@ -1161,6 +1243,25 @@ router.post('/inspections', requireAuth, requirePerm('QualityCheck', 'create'), 
 
     const inspectionId = inspectionResult.insertId;
 
+    // Insert weight details and collect IDs for linking media
+    let weightDetailIds = [];
+    if (weightDetailsList.length > 0) {
+      const weightDetailRows = weightDetailsList.map((row, i) => [
+        inspectionId,
+        (row.weight_type === 'empty_box' || row.weight_type === 'fruit_weight' || row.weight_type === 'full_box') ? row.weight_type : 'fruit_weight',
+        row.weight != null && row.weight !== '' ? parseFloat(row.weight) : null,
+        row.uom || null,
+        i
+      ]);
+      await conn.query(`
+        INSERT INTO qc_inspection_weight_details (qc_inspection_id, weight_type, weight, uom, sort_order)
+        VALUES ?
+      `, [weightDetailRows]);
+      const [[lastInsert]] = await conn.query('SELECT LAST_INSERT_ID() as id');
+      const firstId = lastInsert.id;
+      weightDetailIds = weightDetailRows.map((_, i) => firstId + i);
+    }
+
     // Log history for inspection creation
     await addHistory(conn, {
       module: 'qc_inspection',
@@ -1190,35 +1291,32 @@ router.post('/inspections', requireAuth, requirePerm('QualityCheck', 'create'), 
     // Save media files
     const mediaInserts = [];
 
-    // Save common photos (no defect_type_id)
+    // Save common photos (no defect_type_id, no weight_detail_id)
     for (const photo of photos) {
       const relPath = `uploads/quality-check/${photo.filename}`;
       mediaInserts.push([
         qc_lot_id,
         inspectionId,
-        null, // defect_type_id (null for common media)
-        null, // regrading_job_id
-        null, // regrading_daily_log_id
-        null, // reject_case_id
+        null, // defect_type_id
+        null, null, null,
+        null, // qc_inspection_weight_detail_id
         'PHOTO',
         photo.originalname,
         relPath,
-        null, // thumbnail_path
+        null,
         photo.mimetype,
         photo.size
       ]);
     }
 
-    // Save common videos (no defect_type_id)
+    // Save common videos
     for (const video of videos) {
       const relPath = `uploads/quality-check/${video.filename}`;
       mediaInserts.push([
         qc_lot_id,
         inspectionId,
-        null, // defect_type_id (null for common media)
-        null,
-        null,
-        null,
+        null, null, null, null,
+        null, // qc_inspection_weight_detail_id
         'VIDEO',
         video.originalname,
         relPath,
@@ -1228,43 +1326,74 @@ router.post('/inspections', requireAuth, requirePerm('QualityCheck', 'create'), 
       ]);
     }
 
-    // Save defect-specific media (already parsed into defectMedia object above)
+    // Save defect-specific media
     for (const [defectTypeId, media] of Object.entries(defectMedia)) {
       const defectTypeIdInt = parseInt(defectTypeId);
-
-      // Add photos for this defect
       for (const file of media.photos) {
         const relPath = `uploads/quality-check/${file.filename}`;
         mediaInserts.push([
           qc_lot_id,
           inspectionId,
-          defectTypeIdInt, // defect_type_id for defect-specific media
-          null, // regrading_job_id
-          null, // regrading_daily_log_id
-          null, // reject_case_id
+          defectTypeIdInt,
+          null, null, null,
+          null, // qc_inspection_weight_detail_id
           'PHOTO',
           file.originalname,
           relPath,
-          null, // thumbnail_path
+          null,
           file.mimetype,
           file.size
         ]);
       }
-
-      // Add videos for this defect
       for (const file of media.videos) {
         const relPath = `uploads/quality-check/${file.filename}`;
         mediaInserts.push([
           qc_lot_id,
           inspectionId,
-          defectTypeIdInt, // defect_type_id for defect-specific media
-          null, // regrading_job_id
-          null, // regrading_daily_log_id
-          null, // reject_case_id
+          defectTypeIdInt,
+          null, null, null,
+          null,
           'VIDEO',
           file.originalname,
           relPath,
-          null, // thumbnail_path
+          null,
+          file.mimetype,
+          file.size
+        ]);
+      }
+    }
+
+    // Save weight-detail media (linked to qc_inspection_weight_details)
+    for (const [idxStr, media] of Object.entries(weightDetailMedia)) {
+      const idx = parseInt(idxStr, 10);
+      const wdId = weightDetailIds[idx];
+      if (wdId == null) continue;
+      for (const file of media.photos || []) {
+        const relPath = `uploads/quality-check/${file.filename}`;
+        mediaInserts.push([
+          qc_lot_id,
+          inspectionId,
+          null, null, null, null,
+          wdId, // qc_inspection_weight_detail_id
+          'PHOTO',
+          file.originalname,
+          relPath,
+          null,
+          file.mimetype,
+          file.size
+        ]);
+      }
+      for (const file of media.videos || []) {
+        const relPath = `uploads/quality-check/${file.filename}`;
+        mediaInserts.push([
+          qc_lot_id,
+          inspectionId,
+          null, null, null, null,
+          wdId,
+          'VIDEO',
+          file.originalname,
+          relPath,
+          null,
           file.mimetype,
           file.size
         ]);
@@ -1276,6 +1405,7 @@ router.post('/inspections', requireAuth, requirePerm('QualityCheck', 'create'), 
       await conn.query(`
         INSERT INTO qc_media (
           qc_lot_id, qc_inspection_id, defect_type_id, qc_regrading_job_id, qc_regrading_daily_log_id, qc_reject_case_id,
+          qc_inspection_weight_detail_id,
           media_type, file_name, file_path, thumbnail_path, mime_type, size_bytes, created_by
         ) VALUES ?
       `, [mediaValues]);
@@ -1773,8 +1903,21 @@ router.put('/inspections/:id', requireAuth, requirePerm('QualityCheck', 'edit'),
       checklist_foreign_matter,
       checklist_moisture,
       defects,
+      weight_details,
+      deleted_media_ids,
       action_notes
     } = req.body;
+
+    // Parse deleted_media_ids (media user removed via cross icon when editing)
+    let deletedMediaIds = [];
+    if (deleted_media_ids !== undefined && deleted_media_ids !== null) {
+      try {
+        const parsed = typeof deleted_media_ids === 'string' ? JSON.parse(deleted_media_ids) : deleted_media_ids;
+        deletedMediaIds = Array.isArray(parsed) ? parsed.filter(id => id != null) : [];
+      } catch (e) {
+        console.error('Error parsing deleted_media_ids:', e);
+      }
+    }
 
     // Parse status_id if provided (used for Draft / Submitted for Approval)
     const parsedStatusId = status_id !== undefined && status_id !== null && status_id !== ''
@@ -1790,17 +1933,25 @@ router.put('/inspections/:id', requireAuth, requirePerm('QualityCheck', 'edit'),
     }
 
     // Parse defects JSON if provided
-    // Only update defects_json if defects are explicitly provided in the request
-    // Otherwise, preserve the existing defects_json
-    let defectsJson = undefined; // undefined means don't update this field
+    let defectsJson = undefined;
     if (defects !== undefined && defects !== null) {
       try {
         const defectsData = typeof defects === 'string' ? JSON.parse(defects) : defects;
         defectsJson = JSON.stringify(defectsData);
       } catch (e) {
         console.error('Error parsing defects JSON:', e);
-        // If parsing fails, don't update defects_json (keep existing)
         defectsJson = undefined;
+      }
+    }
+
+    // Parse weight_details JSON if provided (replace all weight details for this inspection)
+    let weightDetailsList = [];
+    if (weight_details !== undefined && weight_details !== null) {
+      try {
+        const wd = typeof weight_details === 'string' ? JSON.parse(weight_details) : weight_details;
+        weightDetailsList = Array.isArray(wd) ? wd : [];
+      } catch (e) {
+        console.error('Error parsing weight_details JSON:', e);
       }
     }
 
@@ -1992,11 +2143,85 @@ router.put('/inspections/:id', requireAuth, requirePerm('QualityCheck', 'edit'),
       WHERE id = ?
     `, updateValues);
 
+    // Replace weight details only when client explicitly sent weight_details (prevents deleting existing weight images when editing other fields)
+    const weightDetailsProvided = weight_details !== undefined;
+    if (weightDetailsProvided) {
+      let weightDetailIds = [];
+      let oldWeightDetailIds = [];
+      try {
+        const [oldRows] = await conn.query(
+          'SELECT id FROM qc_inspection_weight_details WHERE qc_inspection_id = ? ORDER BY sort_order, id',
+          [inspectionId]
+        );
+        oldWeightDetailIds = (oldRows || []).map(r => r.id);
+      } catch (e) {
+        // Table may not exist
+      }
+
+      try {
+        // Delete only weight detail rows (do NOT delete their media yet – we will re-link by position)
+        await conn.query('DELETE FROM qc_inspection_weight_details WHERE qc_inspection_id = ?', [inspectionId]);
+      } catch (e) {
+        // Tables may not exist yet
+      }
+
+      if (weightDetailsList.length > 0) {
+        const weightDetailRows = weightDetailsList.map((row, i) => [
+          inspectionId,
+          (row.weight_type === 'empty_box' || row.weight_type === 'fruit_weight' || row.weight_type === 'full_box') ? row.weight_type : 'fruit_weight',
+          row.weight != null && row.weight !== '' ? parseFloat(row.weight) : null,
+          row.uom || null,
+          i
+        ]);
+        await conn.query(`
+          INSERT INTO qc_inspection_weight_details (qc_inspection_id, weight_type, weight, uom, sort_order)
+          VALUES ?
+        `, [weightDetailRows]);
+        const [[lastInsert]] = await conn.query('SELECT LAST_INSERT_ID() as id');
+        weightDetailIds = weightDetailRows.map((_, i) => lastInsert.id + i);
+
+        // Re-link existing media to new weight detail rows by position (so existing images are preserved)
+        const nNew = weightDetailIds.length;
+        const nOld = oldWeightDetailIds.length;
+        for (let i = 0; i < nNew && i < nOld; i++) {
+          await conn.query(
+            'UPDATE qc_media SET qc_inspection_weight_detail_id = ? WHERE qc_inspection_weight_detail_id = ?',
+            [weightDetailIds[i], oldWeightDetailIds[i]]
+          );
+        }
+        // Remove media that belonged to weight detail rows we no longer have (user removed rows)
+        if (nOld > nNew) {
+          const idsToOrphan = oldWeightDetailIds.slice(nNew);
+          await conn.query(
+            'DELETE FROM qc_media WHERE qc_inspection_id = ? AND qc_inspection_weight_detail_id IN (?)',
+            [inspectionId, idsToOrphan]
+          );
+        }
+      } else {
+        // Client explicitly sent empty weight_details: delete media that was linked to old weight details (user cleared all rows)
+        if (oldWeightDetailIds.length > 0) {
+          await conn.query(
+            'DELETE FROM qc_media WHERE qc_inspection_id = ? AND qc_inspection_weight_detail_id IN (?)',
+            [inspectionId, oldWeightDetailIds]
+          );
+        }
+      }
+    }
+
+    // Delete media that user explicitly removed via cross icon
+    if (deletedMediaIds.length > 0) {
+      await conn.query(
+        'DELETE FROM qc_media WHERE id IN (?) AND qc_inspection_id = ?',
+        [deletedMediaIds, inspectionId]
+      );
+    }
+
     // Calculate if any media is being uploaded
     const hasMedia = req.files && Array.isArray(req.files) && req.files.length > 0;
 
-    // Log history ONLY if there are changes or new media
-    if (changes.length > 0 || hasMedia) {
+    // Log history ONLY if there are changes or new media (skip 0-change updates)
+    const hasMeaningfulUpdate = changes.length > 0 || hasMedia;
+    if (hasMeaningfulUpdate) {
       // If there's a status_id change, fetch the status names
       let updatedChanges = [...changes];
       const statusChange = changes.find(change => change.field === 'status_id');
@@ -2047,8 +2272,8 @@ router.put('/inspections/:id', requireAuth, requirePerm('QualityCheck', 'edit'),
         details: {
           changes: updatedChanges,
           qc_lot_id: existingInspection.qc_lot_id,
-          change_count: changes.length,
-          new_media_count: hasMedia ? req.files.length : 0,
+          ...(changes.length > 0 && { change_count: changes.length }),
+          ...(hasMedia && { new_media_count: req.files.length }),
           approval_comment: action_notes || null,
           reason: action_notes || null
         }
@@ -2214,50 +2439,47 @@ router.put('/inspections/:id', requireAuth, requirePerm('QualityCheck', 'edit'),
     // Handle new media uploads (existing media is not deleted, only new ones are added)
     if (req.files && Array.isArray(req.files)) {
       const mediaValues = [];
-      const defectMedia = {}; // { defectTypeId: { photos: [], videos: [] } }
+      const defectMedia = {};
+      const weightDetailMedia = {};
 
-      // Parse files from req.files array
       req.files.forEach(file => {
-        // Check if this is defect-specific media
+        const weightDetailMatch = file.fieldname.match(/^weight_detail_(\d+)_(photos|videos)$/);
+        if (weightDetailMatch) {
+          const idx = parseInt(weightDetailMatch[1], 10);
+          const mediaType = weightDetailMatch[2];
+          if (!weightDetailMedia[idx]) weightDetailMedia[idx] = { photos: [], videos: [] };
+          if (mediaType === 'photos') weightDetailMedia[idx].photos.push(file);
+          else weightDetailMedia[idx].videos.push(file);
+          return;
+        }
         const defectMatch = file.fieldname.match(/^defect_(photos|videos)_(\d+)$/);
         if (defectMatch) {
-          const mediaType = defectMatch[1]; // 'photos' or 'videos'
+          const mediaType = defectMatch[1];
           const defectTypeId = parseInt(defectMatch[2]);
-
-          if (!defectMedia[defectTypeId]) {
-            defectMedia[defectTypeId] = { photos: [], videos: [] };
-          }
-
-          if (mediaType === 'photos') {
-            defectMedia[defectTypeId].photos.push(file);
-          } else {
-            defectMedia[defectTypeId].videos.push(file);
-          }
-        } else if (file.fieldname === 'photos') {
-          // Common photos (no defect_type_id)
+          if (!defectMedia[defectTypeId]) defectMedia[defectTypeId] = { photos: [], videos: [] };
+          if (mediaType === 'photos') defectMedia[defectTypeId].photos.push(file);
+          else defectMedia[defectTypeId].videos.push(file);
+          return;
+        }
+        if (file.fieldname === 'photos') {
           mediaValues.push([
             existingInspection.qc_lot_id,
             inspectionId,
-            null, // defect_type_id (null for common media)
-            null, // qc_regrading_job_id
-            null, // qc_regrading_daily_log_id
-            null, // qc_reject_case_id
+            null, null, null, null,
+            null, // qc_inspection_weight_detail_id
             'PHOTO',
             file.originalname,
             `uploads/quality-check/${file.filename}`,
-            null, // thumbnail_path
+            null,
             file.mimetype,
             file.size,
             userId
           ]);
         } else if (file.fieldname === 'videos') {
-          // Common videos (no defect_type_id)
           mediaValues.push([
             existingInspection.qc_lot_id,
             inspectionId,
-            null, // defect_type_id (null for common media)
-            null,
-            null,
+            null, null, null, null,
             null,
             'VIDEO',
             file.originalname,
@@ -2270,42 +2492,71 @@ router.put('/inspections/:id', requireAuth, requirePerm('QualityCheck', 'edit'),
         }
       });
 
-      // Handle defect-specific media
       for (const [defectTypeId, media] of Object.entries(defectMedia)) {
         const defectTypeIdInt = parseInt(defectTypeId);
-
-        // Add photos for this defect
         for (const file of media.photos) {
           mediaValues.push([
             existingInspection.qc_lot_id,
             inspectionId,
-            defectTypeIdInt, // defect_type_id for defect-specific media
-            null, // qc_regrading_job_id
-            null, // qc_regrading_daily_log_id
-            null, // qc_reject_case_id
+            defectTypeIdInt,
+            null, null, null,
+            null,
             'PHOTO',
             file.originalname,
             `uploads/quality-check/${file.filename}`,
-            null, // thumbnail_path
+            null,
             file.mimetype,
             file.size,
             userId
           ]);
         }
-
-        // Add videos for this defect
         for (const file of media.videos) {
           mediaValues.push([
             existingInspection.qc_lot_id,
             inspectionId,
-            defectTypeIdInt, // defect_type_id for defect-specific media
-            null, // qc_regrading_job_id
-            null, // qc_regrading_daily_log_id
-            null, // qc_reject_case_id
+            defectTypeIdInt,
+            null, null, null,
+            null,
             'VIDEO',
             file.originalname,
             `uploads/quality-check/${file.filename}`,
-            null, // thumbnail_path
+            null,
+            file.mimetype,
+            file.size,
+            userId
+          ]);
+        }
+      }
+
+      for (const [idxStr, media] of Object.entries(weightDetailMedia)) {
+        const idx = parseInt(idxStr, 10);
+        const wdId = weightDetailIds[idx];
+        if (wdId == null) continue;
+        for (const file of media.photos || []) {
+          mediaValues.push([
+            existingInspection.qc_lot_id,
+            inspectionId,
+            null, null, null, null,
+            wdId,
+            'PHOTO',
+            file.originalname,
+            `uploads/quality-check/${file.filename}`,
+            null,
+            file.mimetype,
+            file.size,
+            userId
+          ]);
+        }
+        for (const file of media.videos || []) {
+          mediaValues.push([
+            existingInspection.qc_lot_id,
+            inspectionId,
+            null, null, null, null,
+            wdId,
+            'VIDEO',
+            file.originalname,
+            `uploads/quality-check/${file.filename}`,
+            null,
             file.mimetype,
             file.size,
             userId
@@ -2317,6 +2568,7 @@ router.put('/inspections/:id', requireAuth, requirePerm('QualityCheck', 'edit'),
         await conn.query(`
           INSERT INTO qc_media (
             qc_lot_id, qc_inspection_id, defect_type_id, qc_regrading_job_id, qc_regrading_daily_log_id, qc_reject_case_id,
+            qc_inspection_weight_detail_id,
             media_type, file_name, file_path, thumbnail_path, mime_type, size_bytes, created_by
           ) VALUES ?
         `, [mediaValues]);
@@ -2582,6 +2834,7 @@ router.get('/regrading', requireAuth, async (req, res) => {
         rj.*,
         ql.lot_number,
         ql.container_number,
+        po.mode_shipment_id,
         ql.status as lot_status,
         u1.name as created_by_name,
         u2.name as updated_by_name,
@@ -2596,6 +2849,8 @@ router.get('/regrading', requireAuth, async (req, res) => {
         qli.product_name as item_name
       FROM qc_regrading_jobs rj
       LEFT JOIN qc_lots ql ON ql.id = rj.qc_lot_id
+      LEFT JOIN shipment sh ON sh.id = ql.shipment_id
+      LEFT JOIN purchase_orders po ON po.id = sh.po_id
       LEFT JOIN qc_inspections qi ON qi.id = rj.qc_inspection_id
       LEFT JOIN qc_lot_items qli ON qli.id = COALESCE(rj.qc_lot_item_id, qi.qc_lot_item_id)
       LEFT JOIN \`user\` u1 ON u1.id = rj.created_by
@@ -2628,6 +2883,7 @@ router.get('/regrading/:id', requireAuth, async (req, res) => {
         rj.*,
         ql.lot_number,
         ql.container_number,
+        po.mode_shipment_id,
         ql.status as lot_status,
         qi.decision as inspection_decision,
         u1.name as created_by_name,
@@ -2635,7 +2891,9 @@ router.get('/regrading/:id', requireAuth, async (req, res) => {
         u3.name as assigned_supervisor_name,
         qli.product_name as item_name
       FROM qc_regrading_jobs rj
-      LEFT JOIN qc_lots ql ON ql.id = rj.qc_lot_id 
+      LEFT JOIN qc_lots ql ON ql.id = rj.qc_lot_id
+      LEFT JOIN shipment sh ON sh.id = ql.shipment_id
+      LEFT JOIN purchase_orders po ON po.id = sh.po_id
       LEFT JOIN qc_inspections qi ON qi.id = rj.qc_inspection_id
       LEFT JOIN qc_lot_items qli ON qli.id = COALESCE(rj.qc_lot_item_id, qi.qc_lot_item_id)
       LEFT JOIN \`user\` u1 ON u1.id = rj.created_by
@@ -3394,6 +3652,7 @@ router.get('/rejects', requireAuth, async (req, res) => {
         rc.*,
         ql.lot_number,
         ql.container_number,
+        po.mode_shipment_id,
         ql.origin_country,
         ql.arrival_date_time,
         qi.inspection_date,
@@ -3403,6 +3662,8 @@ router.get('/rejects', requireAuth, async (req, res) => {
         qli.product_name as item_name
       FROM qc_reject_cases rc
       LEFT JOIN qc_lots ql ON ql.id = rc.qc_lot_id
+      LEFT JOIN shipment sh ON sh.id = ql.shipment_id
+      LEFT JOIN purchase_orders po ON po.id = sh.po_id
       LEFT JOIN qc_lot_items qli ON qli.id = rc.qc_lot_item_id
       LEFT JOIN qc_inspections qi ON qi.id = rc.qc_inspection_id
       LEFT JOIN user u1 ON u1.id = rc.created_by
@@ -3434,6 +3695,7 @@ router.get('/rejects/:id', requireAuth, async (req, res) => {
         rc.*,
         ql.lot_number,
         ql.container_number,
+        po.mode_shipment_id,
         ql.origin_country,
         ql.origin_farm_market,
         ql.arrival_date_time,
@@ -3449,6 +3711,8 @@ router.get('/rejects/:id', requireAuth, async (req, res) => {
         qli.product_name as item_name
       FROM qc_reject_cases rc
       LEFT JOIN qc_lots ql ON ql.id = rc.qc_lot_id
+      LEFT JOIN shipment sh ON sh.id = ql.shipment_id
+      LEFT JOIN purchase_orders po ON po.id = sh.po_id
       LEFT JOIN qc_lot_items qli ON qli.id = rc.qc_lot_item_id
       LEFT JOIN qc_inspections qi ON qi.id = rc.qc_inspection_id
       LEFT JOIN user u1 ON u1.id = rc.created_by
@@ -4068,6 +4332,7 @@ router.get('/reports/recovery', requireAuth, async (req, res) => {
         rj.id as job_id,
         ql.lot_number,
         ql.container_number,
+        po.mode_shipment_id,
         rj.start_date,
         rj.completed_date,
         COALESCE(SUM(rdl.taken_for_regrading_units), 0) as total_taken_units,
@@ -4080,9 +4345,11 @@ router.get('/reports/recovery', requireAuth, async (req, res) => {
         COALESCE(SUM(rdl.discarded_net_weight), 0) as total_discarded_weight
       FROM qc_regrading_jobs rj
       INNER JOIN qc_lots ql ON ql.id = rj.qc_lot_id
+      LEFT JOIN shipment sh ON sh.id = ql.shipment_id
+      LEFT JOIN purchase_orders po ON po.id = sh.po_id
       LEFT JOIN qc_regrading_daily_logs rdl ON rdl.qc_regrading_job_id = rj.id
       ${whereClause}
-      GROUP BY rj.id, ql.lot_number, ql.container_number, rj.start_date, rj.completed_date
+      GROUP BY rj.id, ql.lot_number, ql.container_number, po.mode_shipment_id, rj.start_date, rj.completed_date
       HAVING COALESCE(SUM(rdl.taken_for_regrading_units), 0) > 0 OR COALESCE(SUM(rdl.taken_for_regrading_net_weight), 0) > 0
       ORDER BY COALESCE(rj.completed_date, rj.start_date) DESC
     `;
@@ -4291,13 +4558,16 @@ router.get('/reports/export', requireAuth, async (req, res) => {
           SELECT 
             ql.lot_number,
             ql.container_number,
+            po.mode_shipment_id,
             COALESCE(SUM(rdl.taken_for_regrading_units), 0) as total_taken_units,
             COALESCE(SUM(rdl.sellable_units), 0) as total_sellable_units
           FROM qc_regrading_jobs rj
           INNER JOIN qc_lots ql ON ql.id = rj.qc_lot_id
+          LEFT JOIN shipment sh ON sh.id = ql.shipment_id
+          LEFT JOIN purchase_orders po ON po.id = sh.po_id
           LEFT JOIN qc_regrading_daily_logs rdl ON rdl.qc_regrading_job_id = rj.id
           ${recoveryWhere}
-          GROUP BY rj.id, ql.lot_number, ql.container_number
+          GROUP BY rj.id, ql.lot_number, ql.container_number, po.mode_shipment_id
         `, recoveryParams);
 
         data = recoveryRows.map(row => ({

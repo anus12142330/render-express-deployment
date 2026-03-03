@@ -35,7 +35,14 @@ export const getSalesOrderHeader = async (conn, { id, clientId }) => {
                 udisp.name as dispatched_by_name,
                 udeliv.name as delivered_by_name,
                 ucr.name as created_by_name,
-                uom_sum.summary as total_quantity
+                (SELECT GROUP_CONCAT(CONCAT(ROUND(qty, 2), ' ', acronyms) SEPARATOR ', ')
+                 FROM (
+                     SELECT SUM(soi_inner.quantity) as qty, u_inner.acronyms
+                     FROM sales_order_items soi_inner
+                     JOIN uom_master u_inner ON soi_inner.uom_id = u_inner.id
+                     WHERE soi_inner.sales_order_id = ?
+                     GROUP BY u_inner.id
+                 ) t_sum) as total_quantity
          FROM sales_orders so
          LEFT JOIN vendor v ON so.customer_id = v.id
          LEFT JOIN company_settings comp ON so.company_id = comp.id
@@ -53,18 +60,8 @@ export const getSalesOrderHeader = async (conn, { id, clientId }) => {
             ORDER BY dispatched_at DESC LIMIT 1
          )
          LEFT JOIN \`user\` udisp ON latest_d.dispatched_by = udisp.id
-         LEFT JOIN (
-            SELECT sales_order_id, GROUP_CONCAT(CONCAT(qty, ' ', acronyms) SEPARATOR ', ') as summary
-            FROM (
-                SELECT soi_inner.sales_order_id, (SUM(soi_inner.quantity) + 0) as qty, u_inner.acronyms
-                FROM sales_order_items soi_inner
-                JOIN uom_master u_inner ON soi_inner.uom_id = u_inner.id
-                GROUP BY soi_inner.sales_order_id, u_inner.id
-            ) t1
-            GROUP BY sales_order_id
-         ) uom_sum ON so.id = uom_sum.sales_order_id
-         WHERE so.id = ? AND so.client_id = ?`,
-        [id, clientId]
+         WHERE so.id = ?`,
+        [id, id]
     );
     return rows[0];
 };
@@ -77,16 +74,16 @@ export const getSalesOrderItems = async (conn, { salesOrderId, clientId }) => {
          LEFT JOIN products p ON soi.product_id = p.id
          LEFT JOIN uom_master u ON soi.uom_id = u.id
          LEFT JOIN taxes t ON soi.tax_id = t.id
-         WHERE soi.sales_order_id = ? AND soi.client_id = ?`,
-        [salesOrderId, clientId]
+         WHERE soi.sales_order_id = ?`,
+        [salesOrderId]
     );
     return rows;
 };
 
 export const getSalesOrderAttachments = async (conn, { salesOrderId, clientId }) => {
     const [rows] = await conn.query(
-        `SELECT * FROM sales_order_attachments WHERE sales_order_id = ? AND client_id = ?`,
-        [salesOrderId, clientId]
+        `SELECT * FROM sales_order_attachments WHERE sales_order_id = ?`,
+        [salesOrderId]
     );
     return rows;
 };
@@ -96,30 +93,35 @@ export const getSalesOrderDispatches = async (conn, { salesOrderId, clientId }) 
         `SELECT d.*, u.name as dispatched_by_name 
          FROM sales_order_dispatches d
          LEFT JOIN \`user\` u ON d.dispatched_by = u.id
-         WHERE d.sales_order_id = ? AND d.client_id = ?
+         WHERE d.sales_order_id = ?
          ORDER BY d.dispatched_at DESC`,
-        [salesOrderId, clientId]
+        [salesOrderId]
     );
     return rows;
 };
 
-export const getDispatchById = async (conn, { id, clientId }) => {
+export const getDispatchById = async (conn, { id }) => {
     const [rows] = await conn.query(
-        `SELECT * FROM sales_order_dispatches WHERE id = ? AND client_id = ?`,
-        [id, clientId]
+        `SELECT * FROM sales_order_dispatches WHERE id = ?`,
+        [id]
     );
     return rows[0];
 };
 
-export const getDispatchItems = async (conn, { dispatchId, clientId }) => {
+export const getDispatchItems = async (conn, { dispatchId }) => {
     const [rows] = await conn.query(
-        `SELECT di.*, p.product_name, u.acronyms as uom_name, soi.product_id as product_sku
+        `SELECT di.*, p.product_name, u.acronyms as uom_name, soi.product_id as product_sku,
+                ab.bill_number as bill_no, GROUP_CONCAT(DISTINCT abb.batch_no SEPARATOR ', ') as batch_no
          FROM sales_order_dispatch_items di
          JOIN sales_order_items soi ON di.sales_order_item_id = soi.id
          LEFT JOIN products p ON soi.product_id = p.id
          LEFT JOIN uom_master u ON soi.uom_id = u.id
-         WHERE di.dispatch_id = ? AND di.client_id = ?`,
-        [dispatchId, clientId]
+         LEFT JOIN ap_bill_lines abl ON di.ap_bill_line_id = abl.id
+         LEFT JOIN ap_bills ab ON abl.bill_id = ab.id
+         LEFT JOIN ap_bill_line_batches abb ON abb.bill_line_id = abl.id
+         WHERE di.dispatch_id = ?
+         GROUP BY di.id`,
+        [dispatchId]
     );
     return rows;
 };
@@ -142,15 +144,15 @@ export const getSalesOrderAudit = async (conn, { salesOrderId, clientId }) => {
 
 export const insertSalesOrder = async (conn, data) => {
     const {
-        client_id, company_id, customer_id, warehouse_id, billing_address, shipping_address, currency_id, tax_mode, order_no, order_date, status_id,
+        company_id, customer_id, warehouse_id, billing_address, shipping_address, currency_id, tax_mode, order_no, order_date, status_id,
         subtotal, tax_total, grand_total, created_by, terms_conditions, sales_person_id
     } = data;
 
     const [res] = await conn.query(
         `INSERT INTO sales_orders 
-    (client_id, company_id, customer_id, warehouse_id, billing_address, shipping_address, currency_id, tax_mode, order_no, order_date, status_id, subtotal, tax_total, grand_total, created_by, updated_by, terms_conditions, sales_person_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [client_id, company_id, customer_id, warehouse_id, billing_address, shipping_address, currency_id, tax_mode, order_no, order_date, status_id, subtotal, tax_total, grand_total, created_by, created_by, terms_conditions, sales_person_id]
+    (company_id, customer_id, warehouse_id, billing_address, shipping_address, currency_id, tax_mode, order_no, order_date, status_id, subtotal, tax_total, grand_total, created_by, updated_by, terms_conditions, sales_person_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [company_id, customer_id, warehouse_id, billing_address, shipping_address, currency_id, tax_mode, order_no, order_date, status_id, subtotal, tax_total, grand_total, created_by, created_by, terms_conditions, sales_person_id]
     );
     return res.insertId;
 };
@@ -164,14 +166,14 @@ export const updateSalesOrderHeader = async (conn, data) => {
     await conn.query(
         `UPDATE sales_orders 
      SET company_id=?, customer_id=?, warehouse_id=?, billing_address=?, shipping_address=?, currency_id=?, tax_mode=?, order_date=?, subtotal=?, tax_total=?, grand_total=?, updated_by=?, terms_conditions=?, sales_person_id=?, edit_request_status = NULL, edit_requested_by = NULL 
-     WHERE id=? AND client_id=?`,
-        [company_id, customer_id, warehouse_id, billing_address, shipping_address, currency_id, tax_mode, order_date, subtotal, tax_total, grand_total, updated_by, terms_conditions, sales_person_id, id, client_id]
+     WHERE id=?`,
+        [company_id, customer_id, warehouse_id, billing_address, shipping_address, currency_id, tax_mode, order_date, subtotal, tax_total, grand_total, updated_by, terms_conditions, sales_person_id, id]
     );
 };
 
 export const replaceSalesOrderItems = async (conn, { salesOrderId, clientId, items }) => {
     // Delete existing
-    await conn.query(`DELETE FROM sales_order_items WHERE sales_order_id = ? AND client_id = ?`, [salesOrderId, clientId]);
+    await conn.query(`DELETE FROM sales_order_items WHERE sales_order_id = ?`, [salesOrderId]);
 
     if (items.length === 0) return;
 
@@ -180,7 +182,7 @@ export const replaceSalesOrderItems = async (conn, { salesOrderId, clientId, ite
         const taxId = i.tax_id ?? i.taxId;
         const taxIdVal = (taxId != null && taxId !== '') ? (Number(taxId) || null) : null;
         return [
-            clientId, salesOrderId, i.product_id, i.description,
+            salesOrderId, i.product_id, i.description,
             i.quantity, i.ordered_quantity || i.quantity || 0, i.dispatched_quantity || 0,
             i.uom_id,
             i.unit_price, i.discount_type || 'PERCENTAGE', i.discount_rate || 0, i.discount_amount || 0, i.tax_rate, taxIdVal, i.line_subtotal, i.line_tax, i.line_total
@@ -189,73 +191,84 @@ export const replaceSalesOrderItems = async (conn, { salesOrderId, clientId, ite
 
     await conn.query(
         `INSERT INTO sales_order_items 
-    (client_id, sales_order_id, product_id, description, quantity, ordered_quantity, dispatched_quantity, uom_id, unit_price, discount_type, discount_rate, discount_amount, tax_rate, tax_id, line_subtotal, line_tax, line_total)
+    (sales_order_id, product_id, description, quantity, ordered_quantity, dispatched_quantity, uom_id, unit_price, discount_type, discount_rate, discount_amount, tax_rate, tax_id, line_subtotal, line_tax, line_total)
     VALUES ?`,
         [values]
     );
 };
 
-export const updateItemDispatchedQuantity = async (conn, { id, dispatched_quantity, clientId }) => {
+export const updateItemDispatchedQuantity = async (conn, { id, dispatched_quantity }) => {
     await conn.query(
-        `UPDATE sales_order_items SET dispatched_quantity = ? WHERE id = ? AND client_id = ?`,
-        [dispatched_quantity, id, clientId]
+        `UPDATE sales_order_items SET dispatched_quantity = ? WHERE id = ?`,
+        [dispatched_quantity, id]
     );
 };
 
 export const insertDispatchHeader = async (conn, data) => {
-    const { client_id, sales_order_id, vehicle_no, driver_name, dispatched_by, comments } = data;
+    const { sales_order_id, vehicle_no, driver_name, dispatched_by, comments } = data;
     const [res] = await conn.query(
-        `INSERT INTO sales_order_dispatches (client_id, sales_order_id, vehicle_no, driver_name, dispatched_by, comments, dispatched_at)
-         VALUES (?, ?, ?, ?, ?, ?, NOW())`,
-        [client_id, sales_order_id, vehicle_no, driver_name, dispatched_by, comments || null]
+        `INSERT INTO sales_order_dispatches (sales_order_id, vehicle_no, driver_name, dispatched_by, comments, dispatched_at)
+         VALUES (?, ?, ?, ?, ?, NOW())`,
+        [sales_order_id, vehicle_no, driver_name, dispatched_by, comments || null]
     );
     return res.insertId;
 };
 
 export const updateDispatchHeader = async (conn, data) => {
-    const { id, vehicle_no, driver_name, client_id, comments } = data;
+    const { id, vehicle_no, driver_name, comments } = data;
     await conn.query(
-        `UPDATE sales_order_dispatches SET vehicle_no = ?, driver_name = ?, comments = ? WHERE id = ? AND client_id = ?`,
-        [vehicle_no, driver_name, comments || null, id, client_id]
+        `UPDATE sales_order_dispatches SET vehicle_no = ?, driver_name = ?, comments = ? WHERE id = ?`,
+        [vehicle_no, driver_name, comments || null, id]
     );
 };
 
 export const insertDispatchItems = async (conn, items) => {
-    // items = [[client_id, dispatch_id, sales_order_item_id, quantity], ...]
+    // items = [[dispatch_id, sales_order_item_id, ap_bill_line_id, quantity], ...]
     if (!items.length) return;
     await conn.query(
-        `INSERT INTO sales_order_dispatch_items (client_id, dispatch_id, sales_order_item_id, quantity)
+        `INSERT INTO sales_order_dispatch_items (dispatch_id, sales_order_item_id, ap_bill_line_id, quantity)
          VALUES ?`,
         [items]
     );
 };
 
-export const deleteDispatchItems = async (conn, { dispatchId, clientId }) => {
-    await conn.query(`DELETE FROM sales_order_dispatch_items WHERE dispatch_id = ? AND client_id = ?`, [dispatchId, clientId]);
+export const deleteDispatchItems = async (conn, { dispatchId }) => {
+    await conn.query(`DELETE FROM sales_order_dispatch_items WHERE dispatch_id = ?`, [dispatchId]);
 };
 
-export const deleteDispatchHeader = async (conn, { id, clientId }) => {
-    await conn.query(`DELETE FROM sales_order_dispatches WHERE id = ? AND client_id = ?`, [id, clientId]);
+export const deleteDispatchHeader = async (conn, { id }) => {
+    await conn.query(`DELETE FROM sales_order_dispatches WHERE id = ?`, [id]);
 };
-
 export const insertAttachments = async (conn, filesRowData) => {
-    // filesRowData = [[client_id, sales_order_id, dispatch_id, scope, original_name, name, type, size, path, uploaded_by, created_at], ...]
-    if (!filesRowData.length) return;
+    // filesRowData = [[sales_order_id, dispatch_id, scope, original_name, name, type, size, path, uploaded_by, created_at], ...]
+    if (!filesRowData || !filesRowData.length) return;
+    const rows = filesRowData.map((row) => [
+        row[0],
+        row[1] ?? null,
+        row[2] ?? 'FILE',
+        String(row[3] ?? ''),
+        String(row[4] ?? ''),
+        String(row[5] ?? 'application/octet-stream'),
+        Number(row[6]) || 0,
+        String(row[7] ?? ''),
+        row[8] ?? null,
+        row[9] ?? new Date()
+    ]);
     await conn.query(
         `INSERT INTO sales_order_attachments
-    (client_id, sales_order_id, dispatch_id, scope, file_original_name, file_name, file_type, file_size, file_path, uploaded_by, created_at)
+    (sales_order_id, dispatch_id, scope, file_original_name, file_name, file_type, file_size, file_path, uploaded_by, created_at)
     VALUES ?`,
-        [filesRowData]
+        [rows]
     );
 };
 
-export const getAttachmentById = async (conn, { attachmentId, clientId }) => {
-    const [rows] = await conn.query('SELECT * FROM sales_order_attachments WHERE id = ? AND client_id = ?', [attachmentId, clientId]);
+export const getAttachmentById = async (conn, { attachmentId }) => {
+    const [rows] = await conn.query('SELECT * FROM sales_order_attachments WHERE id = ?', [attachmentId]);
     return rows[0];
 };
 
-export const deleteAttachment = async (conn, { attachmentId, clientId }) => {
-    await conn.query('DELETE FROM sales_order_attachments WHERE id = ? AND client_id = ?', [attachmentId, clientId]);
+export const deleteAttachment = async (conn, { attachmentId }) => {
+    await conn.query('DELETE FROM sales_order_attachments WHERE id = ?', [attachmentId]);
 };
 
 export const insertApproval = async (conn, data) => {
@@ -274,15 +287,19 @@ export const insertAudit = async (conn, data) => {
     );
 };
 
-export const listSalesOrders = async (conn, { clientId, page, pageSize, search, status_id, company_id, customer_id, date_from, date_to, edit_request_status, created_by, exclude_with_ar_invoice }) => {
+export const listSalesOrders = async (conn, { clientId, page, pageSize, search, status_id, company_id, customer_id, date_from, date_to, edit_request_status, created_by, filter_own_user_id, exclude_with_ar_invoice }) => {
     const offset = (page - 1) * pageSize;
-    const conditions = ['so.client_id = ?'];
-    const params = [clientId];
+    const conditions = [];
+    const params = [];
 
     if (exclude_with_ar_invoice) {
         conditions.push('so.id NOT IN (SELECT sales_order_id FROM ar_invoices WHERE sales_order_id IS NOT NULL)');
     }
-    if (created_by != null && created_by !== '') {
+    // Own records: show where logged-in user is creator OR sales person. Super Admin / view_all do not set this.
+    if (filter_own_user_id != null && filter_own_user_id !== '') {
+        conditions.push('(so.created_by = ? OR so.sales_person_id = ?)');
+        params.push(filter_own_user_id, filter_own_user_id);
+    } else if (created_by != null && created_by !== '') {
         conditions.push('so.created_by = ?');
         params.push(created_by);
     }
@@ -324,7 +341,7 @@ export const listSalesOrders = async (conn, { clientId, page, pageSize, search, 
         params.push(edit_request_status);
     }
 
-    const where = conditions.join(' AND ');
+    const where = conditions.length ? conditions.join(' AND ') : '1=1';
 
     // Count first
     const countSql = search
@@ -363,7 +380,7 @@ export const listSalesOrders = async (conn, { clientId, page, pageSize, search, 
             FROM sales_order_items soi3
             JOIN product_images pi ON soi3.product_id = pi.product_id
             WHERE soi3.sales_order_id = so.id) as product_images,
-           uom_sum.summary as total_quantity,
+           uom_agg.total_quantity,
            (SELECT COALESCE(SUM(soi4.dispatched_quantity), 0) FROM sales_order_items soi4 WHERE soi4.sales_order_id = so.id) as total_dispatched_quantity,
            (SELECT COALESCE(SUM(soi5.quantity), 0) FROM sales_order_items soi5 WHERE soi5.sales_order_id = so.id) as total_ordered_quantity
     FROM sales_orders so
@@ -377,15 +394,16 @@ export const listSalesOrders = async (conn, { clientId, page, pageSize, search, 
     LEFT JOIN sales_order_items soi ON so.id = soi.sales_order_id
     LEFT JOIN products p ON soi.product_id = p.id
     LEFT JOIN (
-        SELECT sales_order_id, GROUP_CONCAT(CONCAT(qty, ' ', acronyms) SEPARATOR ', ') as summary
+        SELECT t.sales_order_id,
+               GROUP_CONCAT(CONCAT(ROUND(t.qty, 2), ' ', t.acronyms) SEPARATOR ', ') as total_quantity
         FROM (
-            SELECT soi_inner.sales_order_id, FORMAT(SUM(soi_inner.quantity), 2) as qty, u_inner.acronyms
-            FROM sales_order_items soi_inner
-            JOIN uom_master u_inner ON soi_inner.uom_id = u_inner.id
-            GROUP BY soi_inner.sales_order_id, u_inner.id
-        ) t1
-        GROUP BY sales_order_id
-    ) uom_sum ON so.id = uom_sum.sales_order_id
+            SELECT soi_u.sales_order_id, SUM(soi_u.quantity) as qty, um.acronyms
+            FROM sales_order_items soi_u
+            JOIN uom_master um ON soi_u.uom_id = um.id
+            GROUP BY soi_u.sales_order_id, um.id
+        ) t
+        GROUP BY t.sales_order_id
+    ) uom_agg ON so.id = uom_agg.sales_order_id
     WHERE ${where}
     GROUP BY so.id
     ORDER BY so.created_at DESC
@@ -399,7 +417,7 @@ export const listSalesOrders = async (conn, { clientId, page, pageSize, search, 
 
 export const listApprovalQueue = async (conn, { clientId, page, pageSize, search }) => {
     const offset = (page - 1) * pageSize;
-    const params = [clientId, 8]; // 8 = Submitted
+    const params = [8]; // 8 = Submitted
     let searchClause = '';
 
     if (search) {
@@ -416,7 +434,7 @@ export const listApprovalQueue = async (conn, { clientId, page, pageSize, search
     JOIN status s ON so.status_id = s.id
     LEFT JOIN sales_order_items soi ON so.id = soi.sales_order_id
     LEFT JOIN products p ON soi.product_id = p.id
-    WHERE so.client_id = ? AND so.status_id = ? ${searchClause}
+    WHERE so.status_id = ? ${searchClause}
     GROUP BY so.id
     ORDER BY so.updated_at ASC
     LIMIT ? OFFSET ?
@@ -428,9 +446,127 @@ export const listApprovalQueue = async (conn, { clientId, page, pageSize, search
      SELECT COUNT(*) as total 
      FROM sales_orders so 
      JOIN vendor v ON so.customer_id = v.id
-     WHERE so.client_id = ? AND so.status_id = 8 ${searchClause}
+     WHERE so.status_id = 8 ${searchClause}
   `;
     const [countRows] = await conn.query(countSql, params);
 
     return { rows, total: countRows[0].total };
+};
+
+// ---- Dispatch vehicle/driver (separate from fleet/driver masters) ----
+const DISPATCH_VD_TABLE = 'sales_dispatch_vehicle_driver';
+
+/** Distinct vehicle names ever used for dispatch for this client */
+export const getDispatchVehicles = async (conn, { clientId }) => {
+    if (clientId == null || clientId === '') return [];
+    const [rows] = await conn.query(
+        `SELECT DISTINCT vehicle_name FROM ${DISPATCH_VD_TABLE} WHERE client_id = ? ORDER BY vehicle_name`,
+        [clientId]
+    );
+    return rows.map(r => ({ vehicle_name: r.vehicle_name }));
+};
+
+/** Distinct driver names for a given vehicle (and client) */
+export const getDispatchDriversByVehicle = async (conn, { clientId, vehicleName }) => {
+    if (clientId == null || clientId === '') return [];
+    const [rows] = await conn.query(
+        `SELECT DISTINCT driver_name FROM ${DISPATCH_VD_TABLE} WHERE client_id = ? AND vehicle_name = ? ORDER BY driver_name`,
+        [clientId, vehicleName || '']
+    );
+    return rows.map(r => ({ driver_name: r.driver_name }));
+};
+
+/** Save vehicle+driver pair for next time (ignore if already exists) */
+export const upsertDispatchVehicleDriver = async (conn, { clientId, vehicleName, driverName }) => {
+    if (!clientId || !vehicleName?.trim() || !driverName?.trim()) return;
+    const v = String(vehicleName).trim();
+    const d = String(driverName).trim();
+    await conn.query(
+        `INSERT IGNORE INTO ${DISPATCH_VD_TABLE} (client_id, vehicle_name, driver_name) VALUES (?, ?, ?)`,
+        [clientId, v, d]
+    );
+};
+
+/**
+ * Get dispatch batch/bill info for Record Shipment: warehouse, and per product all purchase bills (bill_date, batch_no, allocated_quantity, remaining_quantity).
+ * Only returns bills with remaining allocation > 0.
+ * Calculation: remaining = ap_bill_line.quantity - SUM(dispatched_quantity from sales_order_dispatch_items).
+ */
+export const getDispatchBatchInfo = async (conn, { salesOrderId }) => {
+    const [[header]] = await conn.query(
+        `SELECT so.warehouse_id, w.warehouse_name
+         FROM sales_orders so
+         LEFT JOIN warehouses w ON w.id = so.warehouse_id
+         WHERE so.id = ?`,
+        [salesOrderId]
+    );
+    if (!header) return null;
+    const warehouse_name = header.warehouse_name || '';
+
+    const [orderItems] = await conn.query(
+        `SELECT soi.id as sales_order_item_id, soi.product_id, soi.quantity as ordered_quantity,
+                p.product_name
+         FROM sales_order_items soi
+         LEFT JOIN products p ON p.id = soi.product_id
+         WHERE soi.sales_order_id = ?`,
+        [salesOrderId]
+    );
+    if (!orderItems?.length) return { warehouse_id: header.warehouse_id, warehouse_name, dispatching_time: new Date(), items: [] };
+
+    const itemsWithBatches = [];
+    for (const row of orderItems) {
+        const productId = row.product_id;
+
+        // Fetch all AP bill lines for this product that still have remaining quantity
+        const sql = `
+            SELECT 
+                abl.id as ap_bill_line_id,
+                ab.bill_date,
+                ab.bill_number,
+                abb.batch_no,
+                ab.warehouse_id,
+                w.warehouse_name,
+                abl.quantity as allocated_quantity,
+                COALESCE((
+                    SELECT SUM(sodi.quantity)
+                    FROM sales_order_dispatch_items sodi
+                    WHERE sodi.ap_bill_line_id = abl.id
+                ), 0) as used_quantity
+            FROM ap_bill_lines abl
+            JOIN ap_bills ab ON ab.id = abl.bill_id
+            LEFT JOIN warehouses w ON w.id = ab.warehouse_id
+            LEFT JOIN ap_bill_line_batches abb ON abb.bill_line_id = abl.id
+            WHERE abl.product_id = ?
+            ORDER BY ab.bill_date DESC
+        `;
+
+        const [batchRows] = await conn.query(sql, [productId]);
+        const batches = (batchRows || [])
+            .map(r => ({
+                ap_bill_line_id: r.ap_bill_line_id,
+                bill_date: r.bill_date,
+                bill_no: r.bill_number || '—',
+                batch_no: r.batch_no || '—',
+                warehouse_id: r.warehouse_id,
+                warehouse_name: r.warehouse_name || '—',
+                allocated_quantity: Number(r.allocated_quantity || 0),
+                remaining_quantity: Number(r.allocated_quantity || 0) - Number(r.used_quantity || 0)
+            }))
+            .filter(b => b.remaining_quantity > 0.0001);
+
+        itemsWithBatches.push({
+            sales_order_item_id: row.sales_order_item_id,
+            product_id: productId,
+            product_name: row.product_name || '',
+            ordered_quantity: Number(row.ordered_quantity || 0),
+            batches
+        });
+    }
+
+    return {
+        warehouse_id: header.warehouse_id,
+        warehouse_name,
+        dispatching_time: new Date(),
+        items: itemsWithBatches
+    };
 };
