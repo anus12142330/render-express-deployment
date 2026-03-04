@@ -80,11 +80,22 @@ const generateOrderNo = async (conn, { clientId, companyId, orderDate }) => {
     const mm = date.getMonth() + 1;
     const yy = Number(String(yyyy).slice(-2));
 
-    // Ensure a row exists for this client, company, year, month (last_seq 0)
+    // Previous month (so sequence continues from last month's last 3 digits, not 001)
+    const prevMm = mm === 1 ? 12 : mm - 1;
+    const prevYy = mm === 1 ? (yy === 0 ? 99 : yy - 1) : yy;
+
+    const [[prevRow]] = await conn.query(
+        `SELECT COALESCE(MAX(last_seq), 0) AS last_seq FROM sales_order_sequences
+         WHERE client_id = ? AND company_id = ? AND yy = ? AND mm = ?`,
+        [clientId, companyId, prevYy, prevMm]
+    );
+    const initialSeq = prevRow && prevRow.last_seq != null ? Number(prevRow.last_seq) : 0;
+
+    // Ensure a row exists for this client, company, year, month (continue from last month's seq)
     await conn.query(
         `INSERT IGNORE INTO sales_order_sequences (client_id, company_id, yy, mm, last_seq)
-         VALUES (?, ?, ?, ?, 0)`,
-        [clientId, companyId, yy, mm]
+         VALUES (?, ?, ?, ?, ?)`,
+        [clientId, companyId, yy, mm, initialSeq]
     );
 
     // Increment and get the new sequence for this month/year
