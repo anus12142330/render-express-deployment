@@ -250,7 +250,9 @@ export const listSalesOrderApprovals = async (req, res) => {
 
 export const dispatchSalesOrder = async (req, res) => {
     try {
-        const clientId = null; // Bypassed as requested
+        // Needed for dispatch vehicle/driver history dropdown persistence.
+        // Falls back to default tenant (1) via getClientContext when missing.
+        const clientId = await getClientContext(req);
         const userId = getAuthUser(req)?.id;
         const id = Number(req.params.id);
 
@@ -264,6 +266,15 @@ export const dispatchSalesOrder = async (req, res) => {
         }
 
         let { dispatch_id, vehicle_no, driver_name, comments, items, force_delivery, force_delivery_reason } = payload;
+        console.log('[Dispatch Controller] Incoming Body Keys:', Object.keys(req.body || {}));
+        console.log('[Dispatch Controller] Payload:', { 
+            id, 
+            vehicle_no, 
+            driver_name, 
+            force_delivery, 
+            force_delivery_type: typeof force_delivery,
+            is_force: force_delivery === '1' || force_delivery === true || force_delivery === 1
+        });
         if (!dispatch_id && req.params.dispatchId) {
             dispatch_id = Number(req.params.dispatchId);
         }
@@ -290,12 +301,20 @@ export const dispatchSalesOrder = async (req, res) => {
         }
         console.log('[Dispatch] Content-Type:', req.headers['content-type'], '| files_count:', rawFiles.length, rawFiles[0] ? `| first file keys: ${Object.keys(rawFiles[0]).join(',')}` : '');
 
-        if (!vehicle_no || !driver_name) return fail(res, 'vehicle_no and driver_name are required');
-
         // Normalize force delivery flag
         const isForceDelivery = force_delivery === '1' || force_delivery === true || force_delivery === 1;
-        if (isForceDelivery && !String(force_delivery_reason || '').trim()) {
-            return fail(res, 'A reason is required when Force Delivery is enabled');
+
+        if (!isForceDelivery && (!vehicle_no || !driver_name)) {
+            return fail(res, 'vehicle_no and driver_name are required');
+        }
+
+        if (isForceDelivery) {
+            if (!String(force_delivery_reason || '').trim()) {
+                return fail(res, 'A reason is required when Force Delivery is enabled');
+            }
+            // Defaults for force delivery if not provided
+            vehicle_no = vehicle_no || 'FORCE_DELIVERY';
+            driver_name = driver_name || 'FORCE_DELIVERY';
         }
 
         const files = rawFiles

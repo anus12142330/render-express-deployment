@@ -61,6 +61,7 @@ import vendorRoutes from './routes/vendor.js';
 import warehousesRoutes from "./routes/warehouses.js";
 import mobileAuthRoutes from "./routes/mobileAuth.js";
 import mobileQcRoutes from "./routes/mobileQc.js";
+import businessTermsRoutes from "./routes/businessTerms.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -261,6 +262,7 @@ app.use("/api/warehouses", warehousesRoutes);
 app.use("/api/mobile", mobileAuthRoutes);
 app.use("/api/mobile", mobileQcRoutes);
 app.use('/api/upload', uploadRoutes);
+app.use('/api/business-terms', businessTermsRoutes);
 app.use('/api/rbac', rbacRoutes);
 app.use('/api/paymentTerms', paymentTermsRoutes);
 app.use('/api/document-template', documentTemplateRoutes);

@@ -267,9 +267,9 @@ router.post("/", upload.array("attachments", 20), async (req, res) => {
            currency_sale, exchange_rate, status_id, user_id,
            payment_terms_id, tenor, payment_description,
            bank_id,
-           documents_provided, terms_conditions, other_terms, need_business_terms,
+           documents_provided, terms_conditions, other_terms, business_terms, business_terms_id, need_business_terms,
            buyer_reference
-         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
                 uniqid,
                 v(header.invoice_type, 'proforma_invoice'),
                 v(header.expo_id), v(header.exporter), v(header.e_phone), v(header.e_fax),
@@ -305,11 +305,13 @@ router.post("/", upload.array("attachments", 20), async (req, res) => {
                 v(header.currency_sale),
                 v(header.exchange_rate),
                 v(header.status_id, 'DRAFT'), // Default to 'DRAFT' if not provided
-                v(header.user_id),
+                v(header.user_id || userId),
 
                 v(payment?.payment_terms_id), v(payment?.tenor), v(payment?.description),
                 v(bank?.bank_id),
                 v(texts?.documents_provided), v(texts?.terms_conditions), v(texts?.other_terms),
+                v(texts?.business_terms),
+                v(header.business_terms_id) ? Number(header.business_terms_id) : null,
                 header.need_business_terms === false || header.need_business_terms === 0 || String(header.need_business_terms).toLowerCase() === 'no' ? 0 : 1,
                 v(header.buyer_reference)
             ];
@@ -466,7 +468,7 @@ router.put("/:id", upload.array("attachments", 20), async (req, res) => {
            currency_sale=?, exchange_rate=?, status_id=?, user_id=?,
            payment_terms_id=?, tenor=?, payment_description=?,
            bank_id=?,
-           documents_provided=?, terms_conditions=?, other_terms=?, need_business_terms=?,
+           documents_provided=?, terms_conditions=?, other_terms=?, business_terms=?, business_terms_id=?, need_business_terms=?,
            terms_of_delivery=?, containerized=?, delivery_schedule=?,
            buyer_reference=?
          WHERE id=?`,
@@ -489,10 +491,12 @@ router.put("/:id", upload.array("attachments", 20), async (req, res) => {
                 v(header.mode_of_transport), v(header.incoterms), v(header.partial_shipment), v(header.transhipment),
                 v(finalPiNo), d(header.date_issue), d(header.date_expiry), n(totals?.sub_total), n(totals?.vat_total), n(totals?.grand_total),
                 v(header.contract_reference, ""), d(header.contract_date),
-                v(header.currency_sale), v(header.exchange_rate), v(header.status_id, 'DRAFT'), v(header.user_id),
+                v(header.currency_sale), v(header.exchange_rate), v(header.status_id, 'DRAFT'), v(header.user_id || userId),
                 v(payment?.payment_terms_id), v(payment?.tenor), v(payment?.description),
                 v(bank?.bank_id),
                 v(texts?.documents_provided), v(texts?.terms_conditions), v(texts?.other_terms),
+                v(texts?.business_terms),
+                header.business_terms_id ? Number(header.business_terms_id) : null,
                 header.need_business_terms === false || header.need_business_terms === 0 || String(header.need_business_terms).toLowerCase() === 'no' ? 0 : 1,
                 v(header.terms_of_delivery),
                 v(header.containerized),

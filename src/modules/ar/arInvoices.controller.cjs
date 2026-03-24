@@ -216,7 +216,7 @@ async function listInvoices(req, res, next) {
         const total = countRows[0].total;
 
         const [rows] = await pool.query(`
-            SELECT ai.*, v.display_name as customer_name, c.name as currency_code,
+            SELECT ai.*, COALESCE(NULLIF(v.company_name, ''), v.display_name) as customer_name, c.name as currency_code,
                 (
                     COALESCE((SELECT SUM(CASE WHEN p.currency_id = ai.currency_id THEN pa.amount_bank ELSE pa.amount_base END) FROM tbl_payment_allocation pa INNER JOIN tbl_payment p ON p.id = pa.payment_id WHERE pa.alloc_type = 'invoice' AND pa.reference_id = ai.id AND (p.is_deleted = 0 OR p.is_deleted IS NULL) AND p.status_id = 1 AND p.direction = 'IN'), 0)
                 ) as received_amount,
@@ -287,7 +287,7 @@ async function getInvoice(req, res, next) {
         }
 
         const [invoices] = await pool.query(`
-            SELECT ai.*, v.display_name as customer_name, 
+            SELECT ai.*, COALESCE(NULLIF(v.company_name, ''), v.display_name) as customer_name, 
                    c.name as currency_code,
                    c.label as currency_label,
                    c.subunit_label,

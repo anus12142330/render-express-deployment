@@ -1,0 +1,89 @@
+[
+  {
+    "key_name": "CargoArrivalSummary"
+  },
+  {
+    "key_name": "CompanySettings"
+  },
+  {
+    "key_name": "Customers"
+  },
+  {
+    "key_name": "CUSTOMER_PAYMENT"
+  },
+  {
+    "key_name": "Dispatch"
+  },
+  {
+    "key_name": "Drivers"
+  },
+  {
+    "key_name": "EmailSettings"
+  },
+  {
+    "key_name": "Fleets"
+  },
+  {
+    "key_name": "HarvestCalendar"
+  },
+  {
+    "key_name": "InternalFundTransfer"
+  },
+  {
+    "key_name": "Invoices"
+  },
+  {
+    "key_name": "Master"
+  },
+  {
+    "key_name": "OpeningBalance"
+  },
+  {
+    "key_name": "OrganisationUsersRoles"
+  },
+  {
+    "key_name": "Products"
+  },
+  {
+    "key_name": "ProformaInvoices"
+  },
+  {
+    "key_name": "PurchaseBills"
+  },
+  {
+    "key_name": "PurchaseOrders"
+  },
+  {
+    "key_name": "QualityCheck"
+  },
+  {
+    "key_name": "Role"
+  },
+  {
+    "key_name": "SalesOrders"
+  },
+  {
+    "key_name": "SalesQuotes"
+  },
+  {
+    "key_name": "ServiceBills"
+  },
+  {
+    "key_name": "ShipmentCalculator"
+  },
+  {
+    "key_name": "SUPPLIER_PAYMENT"
+  },
+  {
+    "key_name": "TemplateSettings"
+  },
+  {
+    "key_name": "UpcomingShipment"
+  },
+  {
+    "key_name": "Vendors"
+  },
+  {
+    "key_name": "Warehouses"
+  }
+]

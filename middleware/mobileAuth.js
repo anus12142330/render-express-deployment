@@ -33,7 +33,9 @@ export const optionalBearerSession = (req, res, next) => {
     req.session.user = { ...decoded };
     return next();
   } catch (err) {
-    return res.status(401).json({ error: "Not logged in" });
+    // If the token is invalid or expired, just ignore it and proceed as unauthenticated
+    // so that public routes like /api/login still work.
+    return next();
   }
 };
 

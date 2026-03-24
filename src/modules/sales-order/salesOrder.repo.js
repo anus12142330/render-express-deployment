@@ -17,7 +17,8 @@ export const fetchSalesOrderFormat = async (conn, companyId) => {
 export const getSalesOrderHeader = async (conn, { id, clientId }) => {
     const [rows] = await conn.query(
         `SELECT so.*, 
-                v.display_name as customer_name, 
+                COALESCE(NULLIF(v.company_name, ''), v.display_name) as customer_name, 
+                (SELECT vo.tax_registration_number FROM vendor_other vo WHERE vo.vendor_id = v.id LIMIT 1) as tax_no,
                 comp.name as company_name, 
                 w.warehouse_name as warehouse_name, 
                 u.name as sales_person_name,
@@ -111,7 +112,7 @@ export const getDispatchById = async (conn, { id }) => {
 export const getDispatchItems = async (conn, { dispatchId }) => {
     const [rows] = await conn.query(
         `SELECT di.*, p.product_name, u.acronyms as uom_name, soi.product_id as product_sku,
-                ab.bill_number as bill_no, GROUP_CONCAT(DISTINCT abb.batch_no SEPARATOR ', ') as batch_no
+                ab.bill_number as bill_no, ab.container_no, GROUP_CONCAT(DISTINCT abb.batch_no SEPARATOR ', ') as batch_no
          FROM sales_order_dispatch_items di
          JOIN sales_order_items soi ON di.sales_order_item_id = soi.id
          LEFT JOIN products p ON soi.product_id = p.id
@@ -367,7 +368,7 @@ export const listSalesOrders = async (conn, { clientId, page, pageSize, search, 
     const total = countRows[0].total;
 
     const sql = `
-    SELECT so.*, v.display_name as customer_name, v.company_name as customer_company,
+    SELECT so.*, COALESCE(NULLIF(v.company_name, ''), v.display_name) as customer_name, v.company_name as customer_company,
            comp.name as company_name,
            s.name as status, s.name as status_name, s.bg_colour as color_code, s.bg_colour as status_bg, s.colour as status_text_color,
            u.name as sales_person_name, u_creator.name as created_by_name,
@@ -426,7 +427,7 @@ export const listApprovalQueue = async (conn, { clientId, page, pageSize, search
     }
 
     const sql = `
-    SELECT so.*, v.display_name as customer_name, comp.name as company_name, s.name as status_name,
+    SELECT so.*, COALESCE(NULLIF(v.company_name, ''), v.display_name) as customer_name, comp.name as company_name, s.name as status_name,
            GROUP_CONCAT(DISTINCT p.product_name SEPARATOR ', ') as product_names
     FROM sales_orders so
     JOIN vendor v ON so.customer_id = v.id
@@ -523,6 +524,7 @@ export const getDispatchBatchInfo = async (conn, { salesOrderId }) => {
                 abl.id as ap_bill_line_id,
                 ab.bill_date,
                 ab.bill_number,
+                ab.container_no,
                 abb.batch_no,
                 ab.warehouse_id,
                 w.warehouse_name,
@@ -546,6 +548,7 @@ export const getDispatchBatchInfo = async (conn, { salesOrderId }) => {
                 ap_bill_line_id: r.ap_bill_line_id,
                 bill_date: r.bill_date,
                 bill_no: r.bill_number || '—',
+                container_no: r.container_no || '—',
                 batch_no: r.batch_no || '—',
                 warehouse_id: r.warehouse_id,
                 warehouse_name: r.warehouse_name || '—',

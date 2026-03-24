@@ -2,9 +2,14 @@ import multer from 'multer';
 import path from 'path';
 import crypto from 'crypto';
 import fs from 'fs';
+import { fileURLToPath } from 'url';
 
 // Build storage path helper
 export const buildStoredPath = (scope, filename) => `uploads/sales_orders/${scope}/${filename}`;
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// Force uploads to server/uploads (not process.cwd dependent)
+const SALES_ORDER_UPLOAD_ROOT = path.resolve(__dirname, '../../../uploads/sales_orders');
 
 const ensureDir = (dir) => {
     if (!fs.existsSync(dir)) {
@@ -19,7 +24,8 @@ const UPLOAD_SCOPES = { dispatch: 'dispatch', complete: 'completion', delivery: 
  * Use when multer doesn't receive files (e.g. JSON body with attachments as base64).
  */
 export async function saveBase64FilesFromBody(req, scope = 'dispatch') {
-    const dir = path.join('uploads', 'sales_orders', scope === 'complete' ? 'completion' : scope);
+    const normalizedScope = scope === 'complete' ? 'completion' : scope;
+    const dir = path.join(SALES_ORDER_UPLOAD_ROOT, normalizedScope);
     ensureDir(dir);
     const files = [];
     let payload = req.body;
@@ -45,7 +51,7 @@ export async function saveBase64FilesFromBody(req, scope = 'dispatch') {
             const buf = Buffer.from(base64, 'base64');
             if (buf.length === 0) continue;
             await fs.promises.writeFile(filePath, buf);
-            const relPath = `uploads/sales_orders/${scope === 'complete' ? 'completion' : scope}/${filename}`;
+            const relPath = `uploads/sales_orders/${normalizedScope}/${filename}`;
             files.push({
                 path: filePath,
                 file_path: relPath,
@@ -69,7 +75,7 @@ const storage = multer.diskStorage({
         else if (url.includes('/complete')) scope = 'completion';
         else if (url.includes('/delivered')) scope = 'delivery';
 
-        const uploadPath = path.join('uploads', 'sales_orders', scope);
+        const uploadPath = path.join(SALES_ORDER_UPLOAD_ROOT, scope);
         ensureDir(uploadPath);
         cb(null, uploadPath);
     },

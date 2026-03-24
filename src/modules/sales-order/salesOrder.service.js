@@ -817,7 +817,14 @@ export const completeOrder = async ({ clientId, userId, id, client_received_by, 
             throw new Error('Completion allowed only for dispatched or delivered orders');
         }
 
+        if (!client_notes || !client_notes.trim()) {
+            throw new Error('Remark (Notes) is mandatory for completion');
+        }
+
         const filesList = Array.isArray(files) ? files : [];
+        if (filesList.length === 0) {
+            throw new Error('Proof of Delivery attachment is mandatory for completion');
+        }
 
         // 1. Update allocations if provided (User requested: "allocated quantity can able to edit also")
         if (Array.isArray(allocations) && allocations.length > 0) {
