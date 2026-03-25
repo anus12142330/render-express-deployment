@@ -190,7 +190,8 @@ const uploadUserPhotoMemory = multer({ storage: userPhotoMemoryStorage });
 
 const uploadCompany = uploadc.fields([
   { name: 'logo', maxCount: 1 },
-  { name: 'company_stamp', maxCount: 1 }
+  { name: 'company_stamp', maxCount: 1 },
+  { name: 'invoice_background_image', maxCount: 1 }
 ]);
 
 
@@ -1042,11 +1043,14 @@ app.post('/api/company-settings', uploadCompany, (req, res) => {
     primary_contact_email, base_currency,
     fiscal_year_id, fiscal_start_day, language_id, timezone_id, date_format_id, company_prefix,
     sales_order_no_format,
+    customer_invoice_no_format,
+    existing_invoice_background_path,
     existing_logo_path // For copying logo
   } = req.body;
 
   const logoFile = req.files?.logo?.[0] || null;
   const stampFile = req.files?.company_stamp?.[0] || null;
+  const invoiceBgFile = req.files?.invoice_background_image?.[0] || null;
 
   let final_base_currency = null;
   const raw_currency = req.body.base_currency;
@@ -1093,6 +1097,7 @@ app.post('/api/company-settings', uploadCompany, (req, res) => {
 
   const logo = logoFile ? `uploads/company/${logoFile.filename}` : (existing_logo_path || null);
   const company_stamp = stampFile ? `uploads/company/${stampFile.filename}` : null;
+  const invoice_background_path = invoiceBgFile ? `uploads/company/${invoiceBgFile.filename}` : (existing_invoice_background_path || null);
 
   const sql = `
     INSERT INTO company_settings
@@ -1111,15 +1116,41 @@ app.post('/api/company-settings', uploadCompany, (req, res) => {
 
   db.query(sql, params, (err, result) => {
     if (err) return res.status(500).json({ error: err?.sqlMessage || 'Database error' });
-    res.json({
+    const companyId = result.insertId;
+    const optionalFields = [];
+    const optionalValues = [];
+    if (customer_invoice_no_format !== undefined) {
+      optionalFields.push('customer_invoice_no_format = ?');
+      optionalValues.push(customer_invoice_no_format || null);
+    }
+    if (invoice_background_path !== undefined) {
+      optionalFields.push('invoice_background_path = ?');
+      optionalValues.push(invoice_background_path || null);
+    }
+
+    const finishResponse = () => res.json({
       success: true,
-      id: result.insertId, // Keep id for frontend logic
+      id: companyId, // Keep id for frontend logic
       name: name, // Return the saved name
       industry: industry, // Return the saved industry
       logo: logo, // Return the new logo path
       message: 'Company settings saved successfully',
-      company_stamp_path: company_stamp // Keep this if used elsewhere
+      company_stamp_path: company_stamp, // Keep this if used elsewhere
+      invoice_background_path
     });
+
+    if (!optionalFields.length) return finishResponse();
+
+    db.query(
+      `UPDATE company_settings SET ${optionalFields.join(', ')} WHERE id = ?`,
+      [...optionalValues, companyId],
+      (extraErr) => {
+        if (extraErr && extraErr.code !== 'ER_BAD_FIELD_ERROR') {
+          return res.status(500).json({ error: extraErr?.sqlMessage || 'Database error' });
+        }
+        finishResponse();
+      }
+    );
   });
 });
 
@@ -1130,7 +1161,9 @@ app.put('/api/company-settings/:id', uploadCompany, (req, res) => {
     name, industry, full_address, telephone, fax, country, is_tax_registered, trn_no,
     primary_contact_email, base_currency,
     fiscal_year_id, fiscal_start_day, language_id, timezone_id, date_format_id, company_prefix,
-    sales_order_no_format
+    sales_order_no_format,
+    customer_invoice_no_format,
+    existing_invoice_background_path
   } = req.body;
   const id = req.params.id;
 
@@ -1194,16 +1227,46 @@ app.put('/api/company-settings/:id', uploadCompany, (req, res) => {
     values.push(stampPath);
   }
 
+  const invoiceBgFile = req.files?.invoice_background_image?.[0] || null;
+  const shouldPersistInvoiceBg = Boolean(invoiceBgFile) || existing_invoice_background_path !== undefined;
+  const invoiceBgPath = invoiceBgFile ? `uploads/company/${invoiceBgFile.filename}` : (existing_invoice_background_path || null);
+
   values.push(id);
   const sql = `UPDATE company_settings SET ${fields.join(', ')} WHERE id = ?`;
 
   db.query(sql, values, (err) => {
     if (err) return res.status(500).json({ error: err?.sqlMessage || 'Database error' });
-    res.json({
+
+    const optionalFields = [];
+    const optionalValues = [];
+    if (customer_invoice_no_format !== undefined) {
+      optionalFields.push('customer_invoice_no_format = ?');
+      optionalValues.push(customer_invoice_no_format || null);
+    }
+    if (shouldPersistInvoiceBg) {
+      optionalFields.push('invoice_background_path = ?');
+      optionalValues.push(invoiceBgPath || null);
+    }
+
+    const finishResponse = () => res.json({
       success: true,
       message: 'Company settings updated successfully',
-      logo: logoFile ? `uploads/company/${logoFile.filename}` : req.body.existing_logo_path || null
+      logo: logoFile ? `uploads/company/${logoFile.filename}` : req.body.existing_logo_path || null,
+      invoice_background_path: invoiceBgPath || null
     });
+
+    if (!optionalFields.length) return finishResponse();
+
+    db.query(
+      `UPDATE company_settings SET ${optionalFields.join(', ')} WHERE id = ?`,
+      [...optionalValues, id],
+      (extraErr) => {
+        if (extraErr && extraErr.code !== 'ER_BAD_FIELD_ERROR') {
+          return res.status(500).json({ error: extraErr?.sqlMessage || 'Database error' });
+        }
+        finishResponse();
+      }
+    );
   });
 });
 

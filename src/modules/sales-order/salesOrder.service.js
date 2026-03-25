@@ -58,18 +58,24 @@ const withTx = async (fn) => {
 
 const pad = (num, size = 3) => String(num).padStart(size, '0');
 
-/** Build order number from master format template or legacy. Placeholders: {prefix}, {YY}, {YYYY}, {MM}, {seq} */
+const getSeqWidthFromFormat = (format, fallback = 3) => {
+    const match = String(format || '').match(/\{seq(?::(\d+)|(\d+))?\}/i);
+    const width = Number(match?.[1] || match?.[2] || fallback);
+    return Number.isFinite(width) && width > 0 ? width : fallback;
+};
+
+/** Build order number from master format template or legacy. Placeholders: {prefix}, {YY}, {YYYY}, {MM}, {seq}/{seq5}/{seq:5} */
 const buildOrderNoFromFormat = (prefix, format, yy, yyyy, mm, nextSeq) => {
     const MM = String(mm).padStart(2, '0');
     const YY = String(yy).padStart(2, '0');
-    const seq = pad(nextSeq, 3);
+    const seq = pad(nextSeq, getSeqWidthFromFormat(format, 3));
     if (format && format.length > 0) {
         return format
             .replace(/\{prefix\}/gi, prefix || 'SO')
             .replace(/\{YYYY\}/g, String(yyyy))
             .replace(/\{YY\}/g, YY)
             .replace(/\{MM\}/g, MM)
-            .replace(/\{seq\}/gi, seq);
+            .replace(/\{seq(?::\d+|\d+)?\}/gi, seq);
     }
     return `${prefix || 'SO'}SO-${YY}-${MM}-${seq}`;
 };
@@ -929,7 +935,11 @@ export const completeOrder = async ({ clientId, userId, id, client_received_by, 
 
             if (invoiceLines.length > 0) {
                 const year = new Date().getFullYear();
-                const invoiceNumber = await generateARInvoiceNumber(conn, year);
+                const invoiceNumber = await generateARInvoiceNumber(conn, {
+                    year,
+                    companyId: header.company_id || null,
+                    date: new Date()
+                });
                 const invoiceUniqid = `ari_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
 
                 // Full address from customer (vendor): address1, address2, city, state, postcode, country

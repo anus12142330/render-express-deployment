@@ -248,7 +248,11 @@ async function getNextInvoiceNumber(req, res, next) {
         const { tx } = require('../../db/tx.cjs');
         const year = new Date().getFullYear();
         const invoiceNumber = await tx(async (conn) => {
-            return await generateARInvoiceNumber(conn, year);
+            return await generateARInvoiceNumber(conn, {
+                year,
+                companyId: req.query?.company_id || null,
+                date: req.query?.invoice_date || new Date()
+            });
         });
         res.json({ invoice_number: invoiceNumber });
     } catch (error) {
@@ -492,7 +496,11 @@ async function createInvoice(req, res, next) {
 
             let finalInvoiceNumber = invoice_number;
             if (!finalInvoiceNumber) {
-                finalInvoiceNumber = await generateARInvoiceNumber(conn, new Date(invoice_date || new Date()).getFullYear());
+                finalInvoiceNumber = await generateARInvoiceNumber(conn, {
+                    year: new Date(invoice_date || new Date()).getFullYear(),
+                    companyId: company_id || null,
+                    date: invoice_date || new Date()
+                });
             }
 
             const [existing] = await conn.query(`SELECT id FROM ar_invoices WHERE invoice_number = ?`, [finalInvoiceNumber]);
