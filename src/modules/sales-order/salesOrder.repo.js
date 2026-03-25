@@ -61,7 +61,8 @@ export const getSalesOrderHeader = async (conn, { id, clientId }) => {
             ORDER BY dispatched_at DESC LIMIT 1
          )
          LEFT JOIN \`user\` udisp ON latest_d.dispatched_by = udisp.id
-         WHERE so.id = ?`,
+         WHERE so.id = ?
+           AND COALESCE(so.is_deleted, 0) = 0`,
         [id, id]
     );
     return rows[0];
@@ -290,7 +291,7 @@ export const insertAudit = async (conn, data) => {
 
 export const listSalesOrders = async (conn, { clientId, page, pageSize, search, status_id, company_id, customer_id, date_from, date_to, edit_request_status, created_by, filter_own_user_id, exclude_with_ar_invoice }) => {
     const offset = (page - 1) * pageSize;
-    const conditions = [];
+    const conditions = ['COALESCE(so.is_deleted, 0) = 0'];
     const params = [];
 
     if (exclude_with_ar_invoice) {
@@ -435,7 +436,7 @@ export const listApprovalQueue = async (conn, { clientId, page, pageSize, search
     JOIN status s ON so.status_id = s.id
     LEFT JOIN sales_order_items soi ON so.id = soi.sales_order_id
     LEFT JOIN products p ON soi.product_id = p.id
-    WHERE so.status_id = ? ${searchClause}
+    WHERE so.status_id = ? AND COALESCE(so.is_deleted, 0) = 0 ${searchClause}
     GROUP BY so.id
     ORDER BY so.updated_at ASC
     LIMIT ? OFFSET ?
@@ -447,7 +448,7 @@ export const listApprovalQueue = async (conn, { clientId, page, pageSize, search
      SELECT COUNT(*) as total 
      FROM sales_orders so 
      JOIN vendor v ON so.customer_id = v.id
-     WHERE so.status_id = 8 ${searchClause}
+     WHERE so.status_id = 8 AND COALESCE(so.is_deleted, 0) = 0 ${searchClause}
   `;
     const [countRows] = await conn.query(countSql, params);
 
@@ -498,7 +499,8 @@ export const getDispatchBatchInfo = async (conn, { salesOrderId }) => {
         `SELECT so.warehouse_id, w.warehouse_name
          FROM sales_orders so
          LEFT JOIN warehouses w ON w.id = so.warehouse_id
-         WHERE so.id = ?`,
+         WHERE so.id = ?
+           AND COALESCE(so.is_deleted, 0) = 0`,
         [salesOrderId]
     );
     if (!header) return null;
