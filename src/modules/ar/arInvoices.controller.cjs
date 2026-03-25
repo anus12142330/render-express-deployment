@@ -299,21 +299,21 @@ async function getInvoice(req, res, next) {
                      SELECT va.bill_address_1
                      FROM vendor_address va
                      WHERE va.vendor_id = v.id
-                     ORDER BY COALESCE(va.is_primary, 0) DESC, va.id ASC
+                     ORDER BY va.id ASC
                      LIMIT 1
                    ) AS bill_address_1,
                    (
                      SELECT va.bill_address_2
                      FROM vendor_address va
                      WHERE va.vendor_id = v.id
-                     ORDER BY COALESCE(va.is_primary, 0) DESC, va.id ASC
+                     ORDER BY va.id ASC
                      LIMIT 1
                    ) AS bill_address_2,
                    (
                      SELECT va.bill_city
                      FROM vendor_address va
                      WHERE va.vendor_id = v.id
-                     ORDER BY COALESCE(va.is_primary, 0) DESC, va.id ASC
+                     ORDER BY va.id ASC
                      LIMIT 1
                    ) AS bill_city,
                    (
@@ -321,7 +321,7 @@ async function getInvoice(req, res, next) {
                      FROM vendor_address va
                      LEFT JOIN state s2 ON s2.id = va.bill_state_id
                      WHERE va.vendor_id = v.id
-                     ORDER BY COALESCE(va.is_primary, 0) DESC, va.id ASC
+                     ORDER BY va.id ASC
                      LIMIT 1
                    ) AS bill_state_name,
                    (
@@ -329,7 +329,7 @@ async function getInvoice(req, res, next) {
                      FROM vendor_address va
                      LEFT JOIN country c2 ON c2.id = va.bill_country_id
                      WHERE va.vendor_id = v.id
-                     ORDER BY COALESCE(va.is_primary, 0) DESC, va.id ASC
+                     ORDER BY va.id ASC
                      LIMIT 1
                    ) AS bill_country_name,
                    vsh.ship_attention, vsh.ship_address_1, vsh.ship_address_2, vsh.ship_city, 
