@@ -295,6 +295,43 @@ async function getInvoice(req, res, next) {
                    c.name as currency_code,
                    c.label as currency_label,
                    c.subunit_label,
+                   (
+                     SELECT va.bill_address_1
+                     FROM vendor_address va
+                     WHERE va.vendor_id = v.id
+                     ORDER BY COALESCE(va.is_primary, 0) DESC, va.id ASC
+                     LIMIT 1
+                   ) AS bill_address_1,
+                   (
+                     SELECT va.bill_address_2
+                     FROM vendor_address va
+                     WHERE va.vendor_id = v.id
+                     ORDER BY COALESCE(va.is_primary, 0) DESC, va.id ASC
+                     LIMIT 1
+                   ) AS bill_address_2,
+                   (
+                     SELECT va.bill_city
+                     FROM vendor_address va
+                     WHERE va.vendor_id = v.id
+                     ORDER BY COALESCE(va.is_primary, 0) DESC, va.id ASC
+                     LIMIT 1
+                   ) AS bill_city,
+                   (
+                     SELECT s2.name
+                     FROM vendor_address va
+                     LEFT JOIN state s2 ON s2.id = va.bill_state_id
+                     WHERE va.vendor_id = v.id
+                     ORDER BY COALESCE(va.is_primary, 0) DESC, va.id ASC
+                     LIMIT 1
+                   ) AS bill_state_name,
+                   (
+                     SELECT c2.name
+                     FROM vendor_address va
+                     LEFT JOIN country c2 ON c2.id = va.bill_country_id
+                     WHERE va.vendor_id = v.id
+                     ORDER BY COALESCE(va.is_primary, 0) DESC, va.id ASC
+                     LIMIT 1
+                   ) AS bill_country_name,
                    vsh.ship_attention, vsh.ship_address_1, vsh.ship_address_2, vsh.ship_city, 
                    vsh.ship_state_id, vsh.ship_zip_code, vsh.ship_country_id, vsh.ship_phone, vsh.ship_fax,
                    ship_state.name as ship_state_name, ship_country.name as ship_country_name,
