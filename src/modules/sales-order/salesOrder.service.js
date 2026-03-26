@@ -945,20 +945,16 @@ export const completeOrder = async ({ clientId, userId, id, client_received_by, 
                 // Full address from customer (vendor): address1, address2, city, state, postcode, country
                 let customerAddress = header.billing_address || null;
                 let deliveryAddress = header.shipping_address || null;
+                let deliveryAddressId = null;
                 try {
                     const [vendorRows] = await conn.query(
                         `SELECT 
                             va.bill_address_1, va.bill_address_2, va.bill_city, va.bill_zip_code,
-                            vsa.ship_address_1, vsa.ship_address_2, vsa.ship_city, vsa.ship_zip_code,
-                            bs.name AS bill_state_name, bc.name AS bill_country_name,
-                            ss.name AS ship_state_name, sc.name AS ship_country_name
+                            bs.name AS bill_state_name, bc.name AS bill_country_name
                          FROM vendor v
                          LEFT JOIN vendor_address va ON va.vendor_id = v.id
-                         LEFT JOIN vendor_shipping_addresses vsa ON vsa.vendor_id = v.id AND vsa.is_primary = 1
                          LEFT JOIN state bs ON va.bill_state_id = bs.id
                          LEFT JOIN country bc ON va.bill_country_id = bc.id
-                         LEFT JOIN state ss ON vsa.ship_state_id = ss.id
-                         LEFT JOIN country sc ON vsa.ship_country_id = sc.id
                          WHERE v.id = ? LIMIT 1`,
                         [header.customer_id]
                     );
@@ -971,11 +967,30 @@ export const completeOrder = async ({ clientId, userId, id, client_received_by, 
                             v.bill_country_name
                         ].filter(Boolean);
                         if (billParts.length) customerAddress = billParts.join('\n');
+                    }
+
+                    // Shipping address lookup is schema-safe (no dependency on is_primary column).
+                    const [shipRows] = await conn.query(
+                        `SELECT
+                            vsa.id,
+                            vsa.ship_address_1, vsa.ship_address_2, vsa.ship_city, vsa.ship_zip_code,
+                            ss.name AS ship_state_name, sc.name AS ship_country_name
+                         FROM vendor_shipping_addresses vsa
+                         LEFT JOIN state ss ON vsa.ship_state_id = ss.id
+                         LEFT JOIN country sc ON vsa.ship_country_id = sc.id
+                         WHERE vsa.vendor_id = ?
+                         ORDER BY vsa.id DESC
+                         LIMIT 1`,
+                        [header.customer_id]
+                    );
+                    const ship = shipRows?.[0];
+                    if (ship) {
+                        deliveryAddressId = ship.id || null;
                         const shipParts = [
-                            v.ship_address_1,
-                            v.ship_address_2,
-                            [v.ship_city, v.ship_state_name, v.ship_zip_code].filter(Boolean).join(', '),
-                            v.ship_country_name
+                            ship.ship_address_1,
+                            ship.ship_address_2,
+                            [ship.ship_city, ship.ship_state_name, ship.ship_zip_code].filter(Boolean).join(', '),
+                            ship.ship_country_name
                         ].filter(Boolean);
                         if (shipParts.length) deliveryAddress = shipParts.join('\n');
                     }
@@ -988,14 +1003,14 @@ export const completeOrder = async ({ clientId, userId, id, client_received_by, 
                     (invoice_uniqid, invoice_number, invoice_date, due_date, payment_terms_id, 
                      customer_id, company_id, warehouse_id, currency_id, subtotal, 
                      discount_type, discount_amount, tax_total, total, notes, 
-                     customer_address, delivery_address,
+                     customer_address, delivery_address, delivery_address_id,
                      sales_order_id, sales_order_number, user_id, status_id)
-                    VALUES (?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 8)
+                    VALUES (?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 8)
                 `, [
                     invoiceUniqid, invoiceNumber, due_date || null, payment_term_id || null,
                     header.customer_id, header.company_id, finalWarehouseId, header.currency_id,
                     invSubtotal, 'fixed', 0, invTaxTotal, invGrandTotal, client_notes || null,
-                    customerAddress, deliveryAddress,
+                    customerAddress, deliveryAddress, deliveryAddressId,
                     id, header.order_no, userId
                 ]);
 
@@ -1013,13 +1028,18 @@ export const completeOrder = async ({ clientId, userId, id, client_received_by, 
 
                     // Get batch allocations from dispatches (ap_bill_line_batches)
                     let [dispatchBatches] = await conn.query(`
-                        SELECT di.ap_bill_line_id, di.quantity, ablb.batch_id, abl.rate as unit_cost
+                        SELECT
+                            di.ap_bill_line_id,
+                            SUM(di.quantity) AS quantity,
+                            ib.id AS batch_id,
+                            abl.rate as unit_cost
                         FROM sales_order_dispatch_items di
                         JOIN ap_bill_lines abl ON di.ap_bill_line_id = abl.id
                         JOIN sales_order_dispatches d ON di.dispatch_id = d.id
                         LEFT JOIN ap_bill_line_batches ablb ON ablb.bill_line_id = di.ap_bill_line_id
+                        LEFT JOIN inventory_batches ib ON ib.id = ablb.batch_id
                         WHERE d.sales_order_id = ? AND di.sales_order_item_id = ?
-                        GROUP BY di.ap_bill_line_id
+                        GROUP BY di.ap_bill_line_id, ib.id, abl.rate
                     `, [id, line.id]);
 
                     // Fallback: if no batches from dispatch (e.g. ap_bill_line_id was null, or product without purchase bills),
@@ -1044,13 +1064,44 @@ export const completeOrder = async ({ clientId, userId, id, client_received_by, 
                             remaining -= take;
                         }
                     } else {
+                        const requestedQty = Number(line.qty || 0);
+                        let allocatedQty = 0;
+
                         for (const dbat of dispatchBatches) {
-                            const bId = dbat.batch_id || dbat.ap_bill_line_id;
+                            const bId = Number(dbat.batch_id);
+                            const qty = Number(dbat.quantity || 0);
+                            if (!Number.isFinite(bId) || bId <= 0 || qty <= 0) continue;
+
                             await conn.query(`
                                 INSERT INTO ar_invoice_line_batches 
                                 (invoice_line_id, batch_id, quantity, unit_cost)
                                 VALUES (?, ?, ?, ?)
-                            `, [lineId, bId, dbat.quantity, dbat.unit_cost || 0]);
+                            `, [lineId, bId, qty, dbat.unit_cost || line.rate || 0]);
+                            allocatedQty += qty;
+                        }
+
+                        // If dispatch mapping could not provide enough valid batch allocations,
+                        // top-up from live stock to avoid FK failures and keep invoice completable.
+                        let remaining = requestedQty - allocatedQty;
+                        if (remaining > 0) {
+                            const [stockBatches] = await conn.query(`
+                                SELECT isb.batch_id, isb.qty_on_hand, isb.unit_cost
+                                FROM inventory_stock_batches isb
+                                WHERE isb.product_id = ? AND isb.warehouse_id = ? AND isb.qty_on_hand > 0
+                                ORDER BY isb.id ASC
+                            `, [line.product_id, finalWarehouseId]);
+
+                            for (const sb of stockBatches || []) {
+                                if (remaining <= 0) break;
+                                const take = Math.min(remaining, parseFloat(sb.qty_on_hand || 0));
+                                if (take <= 0) continue;
+                                await conn.query(`
+                                    INSERT INTO ar_invoice_line_batches
+                                    (invoice_line_id, batch_id, quantity, unit_cost)
+                                    VALUES (?, ?, ?, ?)
+                                `, [lineId, sb.batch_id, take, sb.unit_cost || line.rate || 0]);
+                                remaining -= take;
+                            }
                         }
                     }
                 }
