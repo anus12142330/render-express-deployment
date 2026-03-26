@@ -295,6 +295,9 @@ async function getInvoice(req, res, next) {
                    c.name as currency_code,
                    c.label as currency_label,
                    c.subunit_label,
+                   vo.tax_registration_number AS customer_tax_registration_number,
+                   vo.tax_registration_number AS ship_tax_registration_number,
+                   vo.tax_registration_number AS tax_registration_number,
                    (
                      SELECT va.bill_address_1
                      FROM vendor_address va
@@ -339,6 +342,7 @@ async function getInvoice(req, res, next) {
                    u.name as created_by_name
             FROM ar_invoices ai
             LEFT JOIN vendor v ON v.id = ai.customer_id
+            LEFT JOIN vendor_other vo ON vo.vendor_id = v.id
             LEFT JOIN currency c ON c.id = ai.currency_id
             LEFT JOIN vendor_shipping_addresses vsh ON vsh.id = ai.delivery_address_id
             LEFT JOIN state ship_state ON ship_state.id = vsh.ship_state_id
