@@ -113,7 +113,7 @@ export const getDispatchById = async (conn, { id }) => {
 export const getDispatchItems = async (conn, { dispatchId }) => {
     const [rows] = await conn.query(
         `SELECT di.*, p.product_name, u.acronyms as uom_name, soi.product_id as product_sku,
-                ab.bill_number as bill_no, ab.container_no, GROUP_CONCAT(DISTINCT abb.batch_no SEPARATOR ', ') as batch_no
+                ab.bill_number as bill_no, COALESCE(abb.container_no, ab.container_no) as container_no, GROUP_CONCAT(DISTINCT abb.batch_no SEPARATOR ', ') as batch_no
          FROM sales_order_dispatch_items di
          JOIN sales_order_items soi ON di.sales_order_item_id = soi.id
          LEFT JOIN products p ON soi.product_id = p.id
@@ -526,7 +526,7 @@ export const getDispatchBatchInfo = async (conn, { salesOrderId }) => {
                 abl.id as ap_bill_line_id,
                 ab.bill_date,
                 ab.bill_number,
-                ab.container_no,
+                COALESCE(abb.container_no, ab.container_no) as container_no,
                 abb.batch_no,
                 ab.warehouse_id,
                 w.warehouse_name,
