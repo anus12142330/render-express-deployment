@@ -547,9 +547,21 @@ export const approveOrder = async ({ clientId, userId, id, comment }) =>
         const header = await getSalesOrderHeader(conn, { id, clientId: null });
         if (!header) throw new Error('Sales order not found');
         const scopeClientId = clientId ?? header.client_id;
-        if (Number(header.status_id) !== 8) throw new Error('Only submitted orders can be approved');
+        const currentStatus = Number(header.status_id);
+        let nextStatus = null;
+        let auditAction = 'APPROVED';
+        if (currentStatus === 8) {
+            nextStatus = 1;
+            auditAction = 'APPROVED';
+        } else if (currentStatus === 1) {
+            nextStatus = 13;
+            auditAction = 'ACCEPTED';
+        } else {
+            throw new Error('Only submitted or to-do orders can be accepted');
+        }
 
-        await conn.query(`UPDATE sales_orders SET status_id = 1, updated_by = ?, updated_at = NOW() WHERE id = ?`, [
+        await conn.query(`UPDATE sales_orders SET status_id = ?, updated_by = ?, updated_at = NOW() WHERE id = ?`, [
+            nextStatus,
             userId,
             id
         ]);
@@ -557,9 +569,9 @@ export const approveOrder = async ({ clientId, userId, id, comment }) =>
         await insertAudit(conn, {
             client_id: scopeClientId,
             sales_order_id: id,
-            action: 'APPROVED',
-            old_status_id: 8,
-            new_status_id: 1,
+            action: auditAction,
+            old_status_id: currentStatus,
+            new_status_id: nextStatus,
             payload_json: { comment, order_no: header.order_no },
             action_by: userId
         });
@@ -573,8 +585,8 @@ export const dispatchOrder = async ({ clientId, userId, id, dispatch_id, vehicle
         // Ignore client_id check for attachments: use 0 when null so INSERT never fails
         const attachmentClientId = scopeClientId ?? header.client_id ?? 0;
 
-        if (![1, 11, 9].includes(Number(header.status_id))) {
-            throw new Error(`Dispatch allowed only for approved, partial or dispatched orders. Current status: ${header.status_id}`);
+        if (![13, 11, 9].includes(Number(header.status_id))) {
+            throw new Error(`Dispatch allowed only for accepted, partial or dispatched orders. Current status: ${header.status_id}`);
         }
 
         let normalizedPayload = dispatchPayload;
