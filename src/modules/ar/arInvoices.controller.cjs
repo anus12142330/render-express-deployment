@@ -1345,6 +1345,28 @@ async function approveInvoice(req, res, next) {
                 console.log(`[PDF Save] File saved by multer: ${pdfFile.path}`);
                 console.log(`[PDF Save] Filename: ${pdfFile.filename}`);
                 console.log(`[PDF Save] Relative path for DB: ${pdfPath}`);
+
+                // Also save in invoice attachments list, so UI shows it under "Attachments".
+                const [existingPdfAttachment] = await conn.query(
+                    `SELECT id FROM ar_invoices_attachments WHERE invoice_id = ? AND file_path = ? LIMIT 1`,
+                    [invoice.id, pdfPath]
+                );
+                if (!existingPdfAttachment.length) {
+                    const safeInvoiceNo = String(invoice.invoice_number || 'INVOICE').replace(/[^a-zA-Z0-9_\-]/g, '_');
+                    const displayFileName = `${safeInvoiceNo}_PDF.pdf`;
+                    await conn.query(
+                        `INSERT INTO ar_invoices_attachments
+                         (invoice_id, file_name, file_path, mime_type, size_bytes, created_at)
+                         VALUES (?, ?, ?, ?, ?, NOW())`,
+                        [
+                            invoice.id,
+                            displayFileName,
+                            pdfPath,
+                            pdfFile.mimetype || 'application/pdf',
+                            pdfFile.size || null
+                        ]
+                    );
+                }
             } else {
                 console.warn(`[PDF Save] No PDF file received in request for invoice ${invoice.id}`);
             }
