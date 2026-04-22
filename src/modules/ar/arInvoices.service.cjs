@@ -6,6 +6,93 @@ const glService = require('../gl/gl.service.cjs');
 const inventoryService = require('../inventory/inventory.service.cjs');
 const { isInventoryMovementEnabled } = require('../../utils/inventoryHelper.cjs');
 
+const TXN_SALES_DISPATCH_IN_TRANSIT = 'SALES_DISPATCH_IN_TRANSIT';
+const TXN_SALES_ORDER_IN_TRANSIT = 'SALES_ORDER_IN_TRANSIT';
+
+/**
+ * On SO-linked invoice approval/posting, we should retire the SO "IN TRANSIT" informational rows.
+ * In this codebase those rows use source_type 'SALES_ORDER' (sometimes null/blank historically),
+ * and source_id is the sales_order_id. They are not the same as dispatch IN TRANSIT rows.
+ */
+async function softDeleteSalesOrderInTransitRows(conn, salesOrderId) {
+    const soId = Number(salesOrderId);
+    if (!Number.isFinite(soId) || soId <= 0) return;
+    await conn.query(
+        `UPDATE inventory_transactions
+         SET is_deleted = 1
+         WHERE (is_deleted = 0 OR is_deleted IS NULL)
+           AND txn_type = ?
+           AND (
+                (source_type = 'SALES_ORDER' OR source_type IS NULL OR TRIM(source_type) = '')
+           )
+           AND (
+                source_id = ?
+             OR sales_order_id = ?
+           )`,
+        [TXN_SALES_ORDER_IN_TRANSIT, soId, soId]
+    );
+}
+
+/**
+ * Clear sales-dispatch IN TRANSIT rows (FIFO) when invoice posts physical OUT.
+ */
+async function consumeDispatchInTransitForAllocation(conn, {
+    salesOrderId,
+    warehouseId,
+    productId,
+    batchId,
+    qtyToClear
+}) {
+    let remaining = parseFloat(qtyToClear);
+    if (!salesOrderId || !Number.isFinite(remaining) || remaining <= 0) return { clearedQty: 0, dispatchId: null };
+
+    const [rows] = await conn.query(
+        `SELECT id, qty, unit_cost, exchange_rate, currency_id, uom_id, dispatch_id, source_id
+         FROM inventory_transactions
+         WHERE source_type = 'SALES_DISPATCH'
+           AND txn_type = ?
+           AND sales_order_id = ?
+           AND product_id = ?
+           AND warehouse_id = ?
+           AND batch_id = ?
+           AND (is_deleted = 0 OR is_deleted IS NULL)
+         ORDER BY id ASC`,
+        [TXN_SALES_DISPATCH_IN_TRANSIT, salesOrderId, productId, warehouseId, batchId]
+    );
+
+    let clearedQty = 0;
+    let dispatchId = null;
+    for (const r of rows) {
+        if (remaining <= 0.0001) break;
+        const q = parseFloat(r.qty || 0);
+        const ucost = parseFloat(r.unit_cost || 0);
+        if (!dispatchId) {
+            const d = Number(r.dispatch_id || r.source_id || 0);
+            dispatchId = Number.isFinite(d) && d > 0 ? d : null;
+        }
+        if (q <= remaining + 0.0001) {
+            await conn.query(`UPDATE inventory_transactions SET is_deleted = 1 WHERE id = ?`, [r.id]);
+            remaining -= q;
+            clearedQty += q;
+        } else {
+            const newQ = q - remaining;
+            const amount = newQ * ucost;
+            const ex = r.exchange_rate != null ? parseFloat(r.exchange_rate) : null;
+            const totalAmt = ex != null && ex > 0 ? amount * ex : amount;
+            await conn.query(
+                `UPDATE inventory_transactions
+                 SET qty = ?, amount = ?, foreign_amount = ?, total_amount = ?
+                 WHERE id = ?`,
+                [newQ, amount, amount, totalAmt, r.id]
+            );
+            clearedQty += remaining;
+            remaining = 0;
+        }
+    }
+
+    return { clearedQty, dispatchId };
+}
+
 /**
  * Post AR Invoice - creates inventory transactions and GL journals
  */
@@ -25,6 +112,12 @@ async function postInvoice(conn, invoiceId, userId) {
     }
 
     const invoice = invoices[0];
+
+    // If this invoice is generated from a sales order, the SO "IN TRANSIT" rows should be cleared at invoice posting.
+    // Dispatch IN TRANSIT rows are consumed per batch below; this clears the separate SO-level informational ledger rows.
+    if (invoice.sales_order_id) {
+        await softDeleteSalesOrderInTransitRows(conn, invoice.sales_order_id);
+    }
 
     // Check if invoice was already posted before (has existing GL journals or inventory transactions)
     const [existingJournals] = await conn.query(`
@@ -54,8 +147,9 @@ async function postInvoice(conn, invoiceId, userId) {
 
         // 2. Reverse inventory stock changes (add back quantities)
         for (const oldTxn of oldInventoryTxns) {
-            // Reverse the movement: if it was OUT, add back (isIn = true)
-            const reverseIsIn = oldTxn.movement === 'OUT';
+            // Reverse physical stock only when invoice actually reduced warehouse (not legacy SO-only ledger rows).
+            const reverseIsIn =
+                oldTxn.movement === 'OUT' && String(oldTxn.txn_type || '') !== 'SALES_INVOICE_ISSUE_SO';
             if (reverseIsIn) {
                 await inventoryService.updateInventoryStock(
                     conn,
@@ -240,16 +334,53 @@ async function postInvoice(conn, invoiceId, userId) {
             const salesAmount = qtyOut * salesUnitPrice; // Transaction currency amount
             const salesAedAmount = exchangeRate && exchangeRate > 0 ? salesAmount * exchangeRate : salesAmount; // AED converted amount
 
-            // Only update inventory if movement is enabled
-            if (movementEnabled) {
+            // SO + dispatch-now-IN-TRANSIT: physical OUT happens at invoice. Legacy SO invoices (stock out at old dispatch) skip physical OUT.
+            let skipPhysicalStockOut = false;
+            let dispatchIdForTxn = null;
+            if (invoice.sales_order_id) {
+                const [openQtyRows] = await conn.query(
+                    `SELECT COALESCE(SUM(qty), 0) AS open_qty
+                     FROM inventory_transactions
+                     WHERE source_type = 'SALES_DISPATCH'
+                       AND txn_type = ?
+                       AND sales_order_id = ?
+                       AND product_id = ?
+                       AND warehouse_id = ?
+                       AND batch_id = ?
+                       AND (is_deleted = 0 OR is_deleted IS NULL)`,
+                    [
+                        TXN_SALES_DISPATCH_IN_TRANSIT,
+                        invoice.sales_order_id,
+                        line.product_id,
+                        invoice.warehouse_id,
+                        alloc.batch_id
+                    ]
+                );
+                const openDispatchTransit = parseFloat(openQtyRows[0]?.open_qty || 0);
+                if (openDispatchTransit > 0.0001) {
+                    const consumed = await consumeDispatchInTransitForAllocation(conn, {
+                        salesOrderId: invoice.sales_order_id,
+                        warehouseId: invoice.warehouse_id,
+                        productId: line.product_id,
+                        batchId: alloc.batch_id,
+                        qtyToClear: qtyOut
+                    });
+                    dispatchIdForTxn = consumed?.dispatchId || null;
+                    skipPhysicalStockOut = false;
+                } else {
+                    skipPhysicalStockOut = true;
+                }
+            }
+
+            if (movementEnabled && !skipPhysicalStockOut) {
                 await inventoryService.updateInventoryStock(
                     conn,
                     line.product_id,
                     invoice.warehouse_id,
                     alloc.batch_id,
                     qtyOut,
-                    purchaseUnitCost, // Use purchase cost for inventory stock
-                    false // isIn = false (OUT)
+                    purchaseUnitCost,
+                    false
                 );
 
                 await inventoryService.insertInventoryTransaction(conn, {
@@ -263,12 +394,37 @@ async function postInvoice(conn, invoiceId, userId) {
                     warehouse_id: invoice.warehouse_id,
                     batch_id: alloc.batch_id,
                     qty: qtyOut,
-                    unit_cost: salesUnitPrice, // Save sales unit price in inventory_transactions
+                    unit_cost: salesUnitPrice,
                     currency_id: txnCurrencyId,
                     exchange_rate: exchangeRate,
-                    foreign_amount: salesAmount, // Transaction currency amount
-                    total_amount: salesAedAmount, // AED converted amount
-                    uom_id: txnUomId
+                    foreign_amount: salesAmount,
+                    total_amount: salesAedAmount,
+                    uom_id: txnUomId,
+                    sales_order_id: invoice.sales_order_id || null,
+                    dispatch_id: dispatchIdForTxn,
+                    movement_type_id: 2
+                });
+            } else if (movementEnabled && skipPhysicalStockOut) {
+                await inventoryService.insertInventoryTransaction(conn, {
+                    txn_date: invoice.invoice_date,
+                    movement: 'OUT',
+                    txn_type: 'SALES_INVOICE_ISSUE_SO',
+                    source_type: 'AR_INVOICE',
+                    source_id: invoiceId,
+                    source_line_id: line.id,
+                    product_id: line.product_id,
+                    warehouse_id: invoice.warehouse_id,
+                    batch_id: alloc.batch_id,
+                    qty: qtyOut,
+                    unit_cost: salesUnitPrice,
+                    currency_id: txnCurrencyId,
+                    exchange_rate: exchangeRate,
+                    foreign_amount: salesAmount,
+                    total_amount: salesAedAmount,
+                    uom_id: txnUomId,
+                    sales_order_id: invoice.sales_order_id || null,
+                    dispatch_id: dispatchIdForTxn,
+                    movement_type_id: 2
                 });
             }
 

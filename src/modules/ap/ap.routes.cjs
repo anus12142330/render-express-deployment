@@ -12,6 +12,7 @@ router.get('/bills/:id', apBillsController.getBill);
 router.post('/bills', apBillsController.billUpload, apBillsController.createBill);
 router.put('/bills/:id', apBillsController.billUpload, apBillsController.updateBill);
 router.post('/bills/:id/post', apBillsController.postBill);
+router.post('/bills/:id/post-inventory', apBillsController.postInventoryIfMissing);
 router.post('/bills/:id/cancel', apBillsController.cancelBill);
 router.put('/bills/:id/status', apBillsController.updateStatus);
 router.post('/bills/:id/approve', apBillsController.approveBill);

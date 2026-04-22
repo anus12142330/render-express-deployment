@@ -1,20 +1,24 @@
 // server/src/db/tx.cjs
 // Transaction helper for MySQL
 const mysql = require('mysql2/promise');
+const dotenv = require('dotenv');
+
+// Ensure process.env is populated when this module is loaded directly by services
+dotenv.config();
 
 // Create pool that matches existing db.js config
 const pool = mysql.createPool({
     host: process.env.DB_HOST || 'localhost',
     user: process.env.DB_USER || 'root',
     password: process.env.DB_PASSWORD || '',
-    database: process.env.DB_NAME || 'portal_db',
+    database: process.env.DB_NAME || 'reddiaro_portaldb',
     port: Number(process.env.DB_PORT || 3306),
     waitForConnections: true,
-    connectionLimit: 10, // Increased from 10 to handle more concurrent requests
+    connectionLimit: 20, // Increased from 10 to handle more concurrent requests
     queueLimit: 0,
     dateStrings: true,
     enableKeepAlive: true,
-    keepAliveInitialDelay: 10000,
+    keepAliveInitialDelay: 60000,
     
 });
 

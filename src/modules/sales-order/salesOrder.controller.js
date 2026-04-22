@@ -22,7 +22,8 @@ import {
     deleteDispatch,
     listDispatchVehicles,
     listDispatchDriversByVehicle,
-    getOrderDispatchBatchInfo
+    getOrderDispatchBatchInfo,
+    getDeliveryOrderPdfBuffer
 } from './salesOrder.service.js';
 import { requireFields, validateItems, normalizeTaxMode } from './salesOrder.validators.js';
 import { buildStoredPath, getFilesFromRequest, saveBase64FilesFromBody } from './salesOrder.upload.js';
@@ -104,6 +105,8 @@ export const listSalesOrders = async (req, res) => {
             date_to: req.query.date_to || null,
             edit_request_status: req.query.edit_request_status || null,
             exclude_with_ar_invoice: req.query.exclude_with_ar_invoice === '1' || req.query.exclude_with_ar_invoice === true,
+            exclude_with_cargo_return:
+                req.query.exclude_with_cargo_return === '1' || req.query.exclude_with_cargo_return === true,
         };
         if (skipCreatedByFilter) {
             const optionalUserId = req.query.user_id || req.query.created_by || null;
@@ -135,6 +138,10 @@ export const createSalesOrderDraft = async (req, res) => {
         }
 
         const result = await createDraft({ clientId, userId, payload });
+
+        // Notify dashboard of update
+        notifyDashboardUpdate(req);
+
         return res.status(201).json({ success: true, data: result, message: 'Draft created' });
     } catch (err) {
         return fail(res, err.message || 'Failed to create draft', 500);
@@ -213,6 +220,8 @@ export const deleteHeaderAttachment = async (req, res) => {
     }
 };
 
+import { notifyDashboardUpdate } from '../../../utils/notify.js';
+
 export const submitSalesOrder = async (req, res) => {
     try {
         const clientId = await getClientContext(req) || null;
@@ -220,6 +229,10 @@ export const submitSalesOrder = async (req, res) => {
         const id = Number(req.params.id);
 
         const result = await submitForApproval({ clientId, userId, id });
+        
+        // Notify dashboard of update
+        notifyDashboardUpdate(req);
+
         return res.json({ success: true, message: 'Submitted for approval', order_no: result?.order_no });
     } catch (err) {
         return fail(res, err.message || 'Failed to submit', 500);
@@ -265,7 +278,17 @@ export const dispatchSalesOrder = async (req, res) => {
             // keep payload as req.body
         }
 
-        let { dispatch_id, vehicle_no, driver_name, comments, items, force_delivery, force_delivery_reason } = payload;
+        let {
+            dispatch_id,
+            vehicle_no,
+            driver_name,
+            comments,
+            items,
+            force_delivery,
+            force_delivery_reason,
+            create_draft_purchase_bill,
+            warehouse_id: warehouse_id_from_body
+        } = payload;
         console.log('[Dispatch Controller] Incoming Body Keys:', Object.keys(req.body || {}));
         console.log('[Dispatch Controller] Payload:', { 
             id, 
@@ -334,8 +357,27 @@ export const dispatchSalesOrder = async (req, res) => {
             });
 
         if (files.length) console.log('[Dispatch] Saving', files.length, 'file(s) to DB and folder');
-        await dispatchOrder({ clientId, userId, id, dispatch_id, vehicle_no, driver_name, comments, files, items, force_delivery: isForceDelivery, force_delivery_reason: String(force_delivery_reason || '').trim() || null });
-        return res.json({ success: true, message: 'Dispatched' });
+        const createDraftPb =
+            create_draft_purchase_bill === true ||
+            create_draft_purchase_bill === 1 ||
+            create_draft_purchase_bill === '1' ||
+            String(create_draft_purchase_bill || '').toLowerCase() === 'true';
+        const result = await dispatchOrder({
+            clientId,
+            userId,
+            id,
+            dispatch_id,
+            vehicle_no,
+            driver_name,
+            comments,
+            files,
+            items,
+            force_delivery: isForceDelivery,
+            force_delivery_reason: String(force_delivery_reason || '').trim() || null,
+            create_draft_purchase_bill: createDraftPb,
+            warehouse_id_from_client: warehouse_id_from_body ?? req.body?.warehouse_id ?? null
+        });
+        return res.json({ success: true, message: 'Dispatched', data: result });
     } catch (err) {
         return fail(res, err.message || 'Failed to dispatch', 500);
     }
@@ -351,6 +393,26 @@ export const getDispatchBatchInfo = async (req, res) => {
         return res.json({ success: true, data: info });
     } catch (err) {
         return fail(res, err.message || 'Failed to load dispatch batch info', 500);
+    }
+};
+
+/** GET /api/sales-orders/:id/dispatch/:dispatchId/delivery-order-pdf — A5 Delivery Order PDF */
+export const getDeliveryOrderPdf = async (req, res) => {
+    try {
+        const orderId = Number(req.params.id);
+        const dispatchId = Number(req.params.dispatchId);
+        if (!orderId || !Number.isFinite(orderId) || !dispatchId || !Number.isFinite(dispatchId)) {
+            return fail(res, 'Invalid order or dispatch id', 400);
+        }
+        const buf = await getDeliveryOrderPdfBuffer({ orderId, dispatchId });
+        const filename = `DeliveryOrder_${orderId}_${dispatchId}.pdf`;
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        return res.send(buf);
+    } catch (err) {
+        const msg = err.message || 'Failed to generate PDF';
+        const status = /not found/i.test(msg) ? 404 : 500;
+        return fail(res, msg, status);
     }
 };
 
@@ -546,6 +608,10 @@ export const approveSalesOrder = async (req, res) => {
         const { comment } = req.body || {};
 
         await approveOrder({ clientId, userId, id, comment });
+        
+        // Notify dashboard of update
+        notifyDashboardUpdate(req);
+
         return res.json({ success: true, message: 'Sales order approved' });
     } catch (err) {
         return fail(res, err.message || 'Failed to approve', 500);

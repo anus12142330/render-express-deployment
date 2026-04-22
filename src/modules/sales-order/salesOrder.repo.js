@@ -70,7 +70,9 @@ export const getSalesOrderHeader = async (conn, { id, clientId }) => {
 
 export const getSalesOrderItems = async (conn, { salesOrderId, clientId }) => {
     const [rows] = await conn.query(
-        `SELECT soi.*, p.product_name, u.acronyms as uom_name, t.tax_name,
+        `SELECT soi.*, p.product_name,
+         (SELECT pd.packing_alias FROM product_details pd WHERE pd.product_id = soi.product_id ORDER BY pd.id ASC LIMIT 1) AS product_packing_alias,
+         u.acronyms as uom_name, t.tax_name,
          (SELECT pi.thumbnail_path FROM product_images pi WHERE pi.product_id = soi.product_id ORDER BY pi.is_primary DESC, pi.id ASC LIMIT 1) AS thumbnail_url
          FROM sales_order_items soi
          LEFT JOIN products p ON soi.product_id = p.id
@@ -101,6 +103,90 @@ export const getSalesOrderDispatches = async (conn, { salesOrderId, clientId }) 
     );
     return rows;
 };
+
+/** Inventory rows linked to this sales order (e.g. SALES_ORDER_IN_TRANSIT on approve). */
+export const getSalesOrderInventoryTransactions = async (conn, { salesOrderId }) => {
+    const [rows] = await conn.query(
+        `SELECT
+            it.id,
+            it.txn_date,
+            it.movement,
+            it.txn_type,
+            it.source_type,
+            it.source_id,
+            it.source_line_id,
+            it.sales_order_id,
+            it.product_id,
+            it.warehouse_id,
+            it.batch_id,
+            it.qty,
+            it.unit_cost,
+            it.amount,
+            it.currency_id,
+            it.exchange_rate,
+            it.foreign_amount,
+            it.total_amount,
+            it.uom_id,
+            it.movement_type_id,
+            p.product_name,
+            w.warehouse_name,
+            um.name AS uom_name,
+            um.acronyms AS uom_acronyms,
+            ib.batch_no,
+            cur.name AS currency_code
+         FROM inventory_transactions it
+         JOIN products p ON p.id = it.product_id
+         JOIN warehouses w ON w.id = it.warehouse_id
+         LEFT JOIN uom_master um ON um.id = it.uom_id
+         LEFT JOIN inventory_batches ib ON ib.id = it.batch_id
+         LEFT JOIN currency cur ON cur.id = it.currency_id
+         WHERE (it.is_deleted = 0 OR it.is_deleted IS NULL)
+           AND (
+                it.sales_order_id = ?
+             OR (it.source_type = 'SALES_ORDER' AND it.source_id = ?)
+             OR (
+                  it.source_type = 'SALES_DISPATCH'
+                  AND EXISTS (
+                      SELECT 1 FROM sales_order_dispatches sod
+                      WHERE sod.id = it.source_id AND sod.sales_order_id = ?
+                  )
+                )
+           )
+         ORDER BY it.id ASC`,
+        [salesOrderId, salesOrderId, salesOrderId]
+    );
+    return rows;
+};
+
+export const getSalesOrderReturns = async (conn, { salesOrderId }) => {
+    const [rows] = await conn.query(
+        `SELECT cr.*, s.name as status_name, s.bg_colour as color_code, s.colour as status_text_color,
+                qc_s.name as qc_status_name, qc_s.bg_colour as qc_color_code, qc_s.colour as qc_status_text_color,
+                qcm.name as qc_manager_name
+         FROM cargo_returns cr
+         LEFT JOIN status s ON cr.status_id = s.id
+         LEFT JOIN status qc_s ON cr.qc_status_id = qc_s.id
+         LEFT JOIN \`user\` qcm ON cr.qc_manager_id = qcm.id
+         WHERE cr.sales_order_id = ?
+         ORDER BY cr.id DESC`,
+        [salesOrderId]
+    );
+    return rows;
+};
+
+export const getReturnLines = async (conn, { cargoReturnId }) => {
+    const [rows] = await conn.query(
+        `SELECT crl.*, soi.uom_id, u.acronyms as uom_name
+         FROM cargo_return_lines crl
+         LEFT JOIN sales_order_items soi ON crl.sales_order_item_id = soi.id
+         LEFT JOIN uom_master u ON soi.uom_id = u.id
+         WHERE crl.cargo_return_id = ?
+         ORDER BY crl.id ASC`,
+        [cargoReturnId]
+    );
+    return rows;
+};
+
 
 export const getDispatchById = async (conn, { id }) => {
     const [rows] = await conn.query(
@@ -207,21 +293,26 @@ export const updateItemDispatchedQuantity = async (conn, { id, dispatched_quanti
 };
 
 export const insertDispatchHeader = async (conn, data) => {
-    const { sales_order_id, vehicle_no, driver_name, dispatched_by, comments } = data;
+    const { sales_order_id, vehicle_no, driver_name, dispatched_by, comments, ap_bill_id } = data;
     const [res] = await conn.query(
-        `INSERT INTO sales_order_dispatches (sales_order_id, vehicle_no, driver_name, dispatched_by, comments, dispatched_at)
-         VALUES (?, ?, ?, ?, ?, NOW())`,
-        [sales_order_id, vehicle_no, driver_name, dispatched_by, comments || null]
+        `INSERT INTO sales_order_dispatches (sales_order_id, ap_bill_id, vehicle_no, driver_name, dispatched_by, comments, dispatched_at)
+         VALUES (?, ?, ?, ?, ?, ?, NOW())`,
+        [sales_order_id, ap_bill_id ?? null, vehicle_no, driver_name, dispatched_by, comments || null]
     );
     return res.insertId;
 };
 
 export const updateDispatchHeader = async (conn, data) => {
-    const { id, vehicle_no, driver_name, comments } = data;
-    await conn.query(
-        `UPDATE sales_order_dispatches SET vehicle_no = ?, driver_name = ?, comments = ? WHERE id = ?`,
-        [vehicle_no, driver_name, comments || null, id]
-    );
+    const { id, vehicle_no, driver_name, comments, ap_bill_id } = data;
+    const params = [vehicle_no, driver_name, comments || null];
+    let sql = `UPDATE sales_order_dispatches SET vehicle_no = ?, driver_name = ?, comments = ?`;
+    if (ap_bill_id !== undefined) {
+        sql += `, ap_bill_id = ?`;
+        params.push(ap_bill_id);
+    }
+    sql += ` WHERE id = ?`;
+    params.push(id);
+    await conn.query(sql, params);
 };
 
 export const insertDispatchItems = async (conn, items) => {
@@ -289,13 +380,18 @@ export const insertAudit = async (conn, data) => {
     );
 };
 
-export const listSalesOrders = async (conn, { clientId, page, pageSize, search, status_id, company_id, customer_id, date_from, date_to, edit_request_status, created_by, filter_own_user_id, exclude_with_ar_invoice }) => {
+export const listSalesOrders = async (conn, { clientId, page, pageSize, search, status_id, company_id, customer_id, date_from, date_to, edit_request_status, created_by, filter_own_user_id, exclude_with_ar_invoice, exclude_with_cargo_return }) => {
     const offset = (page - 1) * pageSize;
     const conditions = ['COALESCE(so.is_deleted, 0) = 0'];
     const params = [];
 
     if (exclude_with_ar_invoice) {
         conditions.push('so.id NOT IN (SELECT sales_order_id FROM ar_invoices WHERE sales_order_id IS NOT NULL)');
+    }
+    if (exclude_with_cargo_return) {
+        conditions.push(
+            'NOT EXISTS (SELECT 1 FROM cargo_returns cr WHERE cr.sales_order_id = so.id)'
+        );
     }
     // Own records: show where logged-in user is creator OR sales person. Super Admin / view_all do not set this.
     if (filter_own_user_id != null && filter_own_user_id !== '') {
@@ -535,28 +631,38 @@ export const getDispatchBatchInfo = async (conn, { salesOrderId }) => {
                     SELECT SUM(sodi.quantity)
                     FROM sales_order_dispatch_items sodi
                     WHERE sodi.ap_bill_line_id = abl.id
-                ), 0) as used_quantity
+                ), 0) as used_quantity,
+                isb.qty_on_hand as current_stock_on_hand
             FROM ap_bill_lines abl
             JOIN ap_bills ab ON ab.id = abl.bill_id
             LEFT JOIN warehouses w ON w.id = ab.warehouse_id
             LEFT JOIN ap_bill_line_batches abb ON abb.bill_line_id = abl.id
+            LEFT JOIN inventory_stock_batches isb ON isb.batch_id = abb.batch_id AND isb.warehouse_id = ab.warehouse_id
             WHERE abl.product_id = ?
             ORDER BY ab.bill_date DESC
         `;
 
         const [batchRows] = await conn.query(sql, [productId]);
         const batches = (batchRows || [])
-            .map(r => ({
-                ap_bill_line_id: r.ap_bill_line_id,
-                bill_date: r.bill_date,
-                bill_no: r.bill_number || '—',
-                container_no: r.container_no || '—',
-                batch_no: r.batch_no || '—',
-                warehouse_id: r.warehouse_id,
-                warehouse_name: r.warehouse_name || '—',
-                allocated_quantity: Number(r.allocated_quantity || 0),
-                remaining_quantity: Number(r.allocated_quantity || 0) - Number(r.used_quantity || 0)
-            }))
+            .map(r => {
+                const remainingAlloc = Number(r.allocated_quantity || 0) - Number(r.used_quantity || 0);
+                const currentStock = Number(r.current_stock_on_hand || 0);
+                // The actual dispatchable quantity is the minimum of what was allocated from the PO 
+                // and what is physically present in the warehouse.
+                const finalRemaining = Math.min(remainingAlloc, currentStock);
+
+                return {
+                    ap_bill_line_id: r.ap_bill_line_id,
+                    bill_date: r.bill_date,
+                    bill_no: r.bill_number || '—',
+                    container_no: r.container_no || '—',
+                    batch_no: r.batch_no || '—',
+                    warehouse_id: r.warehouse_id,
+                    warehouse_name: r.warehouse_name || '—',
+                    allocated_quantity: Number(r.allocated_quantity || 0),
+                    remaining_quantity: finalRemaining
+                };
+            })
             .filter(b => b.remaining_quantity > 0.0001);
 
         itemsWithBatches.push({

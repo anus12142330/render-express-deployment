@@ -33,7 +33,10 @@ async function getAllMovementTypes(conn) {
 
 /**
  * Calculate stock on hand considering transit stock
- * Formula: Stock on Hand = Regular Stock + Transit Stock IN - Transit Stock OUT - Regular Stock OUT - Discard
+ * Formula: Stock on Hand = IN - (OUT + DISCARD)
+ * 
+ * Note: 'Regular Stock' in inventory_stock_batches already has OUT and DISCARD subtracted.
+ * DISCARD movement (type 5) reflects waste/rejected items that reduce on-hand balance.
  */
 async function calculateStockOnHand(conn, productId, warehouseId, batchId = null) {
     let whereClause = 'product_id = ? AND warehouse_id = ?';

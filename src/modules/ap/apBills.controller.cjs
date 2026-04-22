@@ -306,10 +306,63 @@ async function getBill(req, res, next) {
 
         bill.attachments = attachments || [];
 
+        // Inventory posted flag (used for Super Admin recovery action)
+        if (bill.id) {
+            const [invTxns] = await pool.query(
+                `SELECT COUNT(*) as count
+                 FROM inventory_transactions
+                 WHERE source_type = 'AP_BILL' AND source_id = ? AND txn_type = 'PURCHASE_BILL_RECEIPT'
+                   AND (is_deleted = 0 OR is_deleted IS NULL)`,
+                [bill.id]
+            );
+            bill.inventory_posted = Number(invTxns?.[0]?.count || 0) > 0;
+        } else {
+            bill.inventory_posted = false;
+        }
+
         res.json(bill);
     } catch (error) {
         next(error);
     }
+}
+
+async function postInventoryIfMissing(req, res, next) {
+    await tx(async (conn) => {
+        const userId = req.session?.user?.id;
+        if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+        // Super Admin only
+        const [adm] = await conn.query(
+            `SELECT 1
+               FROM user_role ur
+               JOIN role r ON r.id = ur.role_id
+              WHERE ur.user_id=? AND r.name='Super Admin'
+              LIMIT 1`,
+            [userId]
+        );
+        if (!adm.length) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+
+        const { id } = req.params;
+        const [rows] = await conn.query(`SELECT id FROM ap_bills WHERE id = ? OR bill_uniqid = ? LIMIT 1`, [id, id]);
+        if (!rows.length) return res.status(404).json({ error: 'Bill not found' });
+
+        const result = await apBillsService.postInventoryIfMissing(conn, rows[0].id, userId);
+
+        // History (best-effort)
+        try {
+            await addHistory(conn, {
+                module: 'ap_bill',
+                moduleId: rows[0].id,
+                userId,
+                action: 'INVENTORY_POSTED_BY_ADMIN',
+                details: result
+            });
+        } catch (_) {}
+
+        res.json({ success: true, ...result });
+    }).catch(next);
 }
 
 async function createBill(req, res, next) {
@@ -1511,6 +1564,7 @@ module.exports = {
     createBill,
     updateBill,
     postBill,
+    postInventoryIfMissing,
     cancelBill,
     updateStatus,
     approveBill,

@@ -7,6 +7,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const arInvoicesController = require('./arInvoices.controller.cjs');
 const arReceiptsController = require('./arReceipts.controller.cjs');
+const arCreditNotesController = require('./arCreditNotes.controller.cjs');
 
 // Setup multer for AR invoice attachments
 const UPLOAD_DIR = path.join(__dirname, '../../..', 'uploads', 'ar_invoices');
@@ -24,6 +25,23 @@ const storage = multer.diskStorage({
 const upload = multer({
     storage,
     limits: { fileSize: 10 * 1024 * 1024, files: 20 }
+});
+
+const CN_UPLOAD_DIR = path.join(__dirname, '../../..', 'uploads', 'ar_credit_notes');
+fs.mkdirSync(CN_UPLOAD_DIR, { recursive: true });
+
+const cnStorage = multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, CN_UPLOAD_DIR),
+    filename: (_req, file, cb) => {
+        const ext = path.extname(file.originalname || '');
+        const base = path.basename(file.originalname || 'file', ext).replace(/[^a-z0-9_\-\.]/gi, '_');
+        cb(null, `${Date.now()}_${crypto.randomBytes(8).toString('hex')}_${base}${ext}`);
+    },
+});
+
+const uploadCreditNoteFiles = multer({
+    storage: cnStorage,
+    limits: { fileSize: 10 * 1024 * 1024, files: 20, fieldSize: 30 * 1024 * 1024 }
 });
 
 // Setup multer for AR invoice PDF files (same pattern as purchase orders)
@@ -46,6 +64,21 @@ const uploadPdf = multer({
     storage: pdfStorage,
     limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
 });
+
+router.get('/credit-notes/next-number', arCreditNotesController.getNextCreditNoteNumber);
+router.get('/credit-notes', arCreditNotesController.listCreditNotes);
+router.post('/credit-notes', uploadCreditNoteFiles.array('attachments', 20), arCreditNotesController.createCreditNote);
+router.put('/credit-notes/:id/status', arCreditNotesController.changeCreditNoteStatus);
+router.post('/credit-notes/:id/approve', arCreditNotesController.approveCreditNote);
+router.post('/credit-notes/:id/reject', arCreditNotesController.rejectCreditNote);
+router.post(
+    '/credit-notes/:id/attachments',
+    uploadCreditNoteFiles.array('attachments', 20),
+    arCreditNotesController.addCreditNoteAttachment
+);
+router.delete('/credit-notes/:id/attachments/:attachmentId', arCreditNotesController.deleteCreditNoteAttachment);
+router.get('/credit-notes/:id', arCreditNotesController.getCreditNote);
+router.put('/credit-notes/:id', uploadCreditNoteFiles.array('attachments', 20), arCreditNotesController.updateCreditNote);
 
 router.get('/invoices', arInvoicesController.listInvoices);
 router.get('/invoices/next-number', arInvoicesController.getNextInvoiceNumber);

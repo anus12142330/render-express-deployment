@@ -92,8 +92,13 @@ const fileFilter = (req, file, cb) => {
     cb(null, true);
 };
 
-// Mobile images can be large; avoid 413 / empty files from body size limits (Nginx/Express)
-const limits = { fileSize: 20 * 1024 * 1024 }; // 20MB
+// Mobile images can be large; avoid 413 / empty files from body size limits (Nginx/Express).
+// Busboy defaults fieldSize to 1MB; completion/dispatch also send base64 in multipart *fields*
+// (e.g. `payload` JSON), which must not be truncated or Multer throws LIMIT_FIELD_VALUE.
+const limits = {
+    fileSize: 20 * 1024 * 1024, // 20MB per file
+    fieldSize: 30 * 1024 * 1024 // 30MB per text field (base64 payload can exceed 1MB easily)
+};
 
 const multerOpts = { storage, fileFilter, limits };
 

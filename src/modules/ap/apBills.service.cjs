@@ -29,6 +29,13 @@ async function postBill(conn, billId, userId) {
     const bill = bills[0];
     const isServiceBill = bill.is_service === 1 || bill.is_service === true;
 
+    /** Bills with a PO stay IN TRANSIT until QC. Bills without a PO post REGULAR_IN to stock on post. */
+    const hasPurchaseOrder =
+        bill.purchase_order_id != null &&
+        bill.purchase_order_id !== '' &&
+        Number(bill.purchase_order_id) > 0;
+    const receiptAsInTransit = hasPurchaseOrder;
+
     // Validate required bill data
     if (!isServiceBill && !bill.warehouse_id) {
         throw new Error('Bill must have a warehouse assigned');
@@ -249,37 +256,63 @@ async function postBill(conn, billId, userId) {
             const aedAmount = exchangeRate && exchangeRate > 0 ? amount * exchangeRate : amount; // AED converted amount
 
             // ============================================================
-            // PURCHASE BILL APPROVAL FLOW:
-            // 1. Create inventory transaction with movement = 'IN TRANSIT' and movement_type_id = 3
-            // 2. DO NOT update inventory_stock_batches - stock stays in transit
-            // 3. After QC check, transactions will be updated to:
-            //    - ACCEPT: movement = 'IN', movement_type_id = 1 (regular stock) + update inventory_stock_batches
-            //    - REJECT: movement = 'DISCARD', movement_type_id = 5 (discard) + update inventory_stock_batches
+            // PURCHASE BILL → INVENTORY:
+            // - With PO: IN TRANSIT (movement_type_id = 3); QC later moves to REGULAR_IN or DISCARD.
+            // - Without PO: REGULAR_IN (movement_type_id = 1) + inventory_stock_batches updated now (sellable).
             // ============================================================
-            
-            // Insert inventory transaction with movement_type_id = 3 (IN TRANSIT)
-            // Stock remains in transit until QC decision moves it to regular stock (IN) or discard
-            // Use movement = 'IN TRANSIT' (enum value) - stock is not yet available for sale
             if (movementEnabled) {
-            await inventoryService.insertInventoryTransaction(conn, {
-                txn_date: bill.bill_date,
-                movement: 'IN TRANSIT', // Enum value - stock is in transit, not yet available
-                txn_type: 'PURCHASE_BILL_RECEIPT',
-                source_type: 'AP_BILL',
-                source_id: billId,
-                source_line_id: line.id,
-                product_id: line.product_id,
-                warehouse_id: bill.warehouse_id,
-                batch_id: batchId,
-                qty: qty,
-                unit_cost: unitCost,
-                currency_id: bill.currency_id || null,
-                exchange_rate: exchangeRate,
-                foreign_amount: amount, // Transaction currency amount
-                total_amount: aedAmount, // AED converted amount
-                uom_id: line.uom_id || null,
-                movement_type_id: 3 // IN_TRANSIT (movement_types.id = 3) - will be moved to regular stock (1) or discard (5) based on QC decision
-            });
+                if (receiptAsInTransit) {
+                    await inventoryService.insertInventoryTransaction(conn, {
+                        txn_date: bill.bill_date,
+                        movement: 'IN TRANSIT',
+                        txn_type: 'PURCHASE_BILL_RECEIPT',
+                        source_type: 'AP_BILL',
+                        source_id: billId,
+                        source_line_id: line.id,
+                        product_id: line.product_id,
+                        warehouse_id: bill.warehouse_id,
+                        batch_id: batchId,
+                        qty: qty,
+                        unit_cost: unitCost,
+                        currency_id: bill.currency_id || null,
+                        exchange_rate: exchangeRate,
+                        foreign_amount: amount,
+                        total_amount: aedAmount,
+                        uom_id: line.uom_id || null,
+                        movement_type_id: 3
+                    });
+                } else {
+                    await inventoryService.insertInventoryTransaction(conn, {
+                        txn_date: bill.bill_date,
+                        movement: 'IN',
+                        txn_type: 'PURCHASE_BILL_RECEIPT',
+                        source_type: 'AP_BILL',
+                        source_id: billId,
+                        source_line_id: line.id,
+                        product_id: line.product_id,
+                        warehouse_id: bill.warehouse_id,
+                        batch_id: batchId,
+                        qty: qty,
+                        unit_cost: unitCost,
+                        currency_id: bill.currency_id || null,
+                        exchange_rate: exchangeRate,
+                        foreign_amount: amount,
+                        total_amount: aedAmount,
+                        uom_id: line.uom_id || null,
+                        movement_type_id: 1
+                    });
+                    await inventoryService.updateInventoryStock(
+                        conn,
+                        line.product_id,
+                        bill.warehouse_id,
+                        batchId,
+                        qty,
+                        unitCost,
+                        true,
+                        bill.currency_id || null,
+                        line.uom_id || null
+                    );
+                }
             }
 
             inventoryValue += qty * unitCost;
@@ -551,17 +584,22 @@ async function reverseBillTransactions(conn, billId, userId) {
 
         // Reverse each transaction
         for (const txn of txns) {
-            // Reverse stock (OUT movement to reduce stock)
-            // Note: For reversals, we don't update currency_id/uom_id as stock already has it
-            await inventoryService.updateInventoryStock(
-                conn,
-                txn.product_id,
-                txn.warehouse_id,
-                txn.batch_id,
-                txn.qty,
-                txn.unit_cost,
-                false // isIn = false (OUT)
-            );
+            const mtId = txn.movement_type_id;
+            const inTransitOnly =
+                txn.movement === 'IN TRANSIT' || mtId === 3;
+
+            // Only reduce on-hand stock if the original receipt posted to stock (REGULAR_IN etc.), not IN TRANSIT
+            if (!inTransitOnly) {
+                await inventoryService.updateInventoryStock(
+                    conn,
+                    txn.product_id,
+                    txn.warehouse_id,
+                    txn.batch_id,
+                    txn.qty,
+                    txn.unit_cost,
+                    false
+                );
+            }
 
             // Calculate reversal amounts
             const amount = parseFloat(txn.qty || 0) * parseFloat(txn.unit_cost || 0); // Transaction currency amount
@@ -618,9 +656,159 @@ async function cancelBill(conn, billId, userId) {
     `, [userId, billId]);
 }
 
+/**
+ * Post ONLY inventory movements for an AP Bill when inventory transactions are missing.
+ * Intended for Super Admin recovery scenarios (idempotent: no-op if already posted).
+ *
+ * - Does NOT create GL journals
+ * - Does NOT change bill status
+ * - Requires inventory movement to be enabled
+ */
+async function postInventoryIfMissing(conn, billId, userId) {
+    const movementEnabled = await isInventoryMovementEnabled();
+    if (!movementEnabled) {
+        throw new Error('Inventory movement is disabled. Enable it before posting inventory.');
+    }
+
+    const [bills] = await conn.query(`SELECT * FROM ap_bills WHERE id = ? LIMIT 1`, [billId]);
+    if (bills.length === 0) throw new Error('Bill not found');
+
+    const bill = bills[0];
+    const isServiceBill = bill.is_service === 1 || bill.is_service === true;
+    if (isServiceBill) throw new Error('Service bills do not post inventory');
+    if (!bill.warehouse_id) throw new Error('Bill must have a warehouse assigned');
+    if (!bill.bill_date) throw new Error('Bill must have a bill date');
+
+    const [existingTxns] = await conn.query(
+        `SELECT id FROM inventory_transactions
+         WHERE source_type = 'AP_BILL' AND source_id = ?
+           AND txn_type = 'PURCHASE_BILL_RECEIPT'
+           AND (is_deleted = 0 OR is_deleted IS NULL)
+         LIMIT 1`,
+        [billId]
+    );
+    if (existingTxns.length > 0) {
+        return { already_posted: true, inserted: 0 };
+    }
+
+    // With PO: keep as IN TRANSIT until QC. Without PO: post REGULAR_IN to on-hand stock.
+    const hasPurchaseOrder =
+        bill.purchase_order_id != null &&
+        bill.purchase_order_id !== '' &&
+        Number(bill.purchase_order_id) > 0;
+    const receiptAsInTransit = hasPurchaseOrder;
+
+    // Exchange rate (for transaction amounts)
+    let exchangeRate = null;
+    if (bill.currency_id) {
+        const [currencyRows] = await conn.query(`SELECT conversion_rate FROM currency WHERE id = ?`, [bill.currency_id]);
+        if (currencyRows.length > 0) exchangeRate = parseFloat(currencyRows[0].conversion_rate) || 1;
+    }
+
+    const [lines] = await conn.query(
+        `SELECT * FROM ap_bill_lines WHERE bill_id = ? ORDER BY line_no ASC, id ASC`,
+        [billId]
+    );
+    if (!lines.length) throw new Error('No bill lines found');
+
+    let inserted = 0;
+    for (const line of lines) {
+        if (!line.product_id) continue;
+        const [batchSplits] = await conn.query(
+            `SELECT * FROM ap_bill_line_batches WHERE bill_line_id = ? ORDER BY id ASC`,
+            [line.id]
+        );
+        if (!batchSplits.length) {
+            throw new Error(`Bill line ${line.id}: No batch splits. Add batch allocations before posting inventory.`);
+        }
+
+        for (const split of batchSplits) {
+            const batchNo = split.batch_no || `BATCH-${crypto.randomBytes(8).toString('hex')}`;
+            const batchId = await inventoryService.upsertBatch(
+                conn,
+                line.product_id,
+                batchNo,
+                split.mfg_date || null,
+                split.exp_date || null,
+                null
+            );
+
+            if (!split.batch_id) {
+                await conn.query(`UPDATE ap_bill_line_batches SET batch_id = ? WHERE id = ?`, [batchId, split.id]);
+            }
+
+            const qty = parseFloat(split.quantity);
+            const unitCost = parseFloat(split.unit_cost);
+            if (isNaN(qty) || qty <= 0) throw new Error(`Invalid quantity for batch ${batchNo} on line ${line.line_no}`);
+            if (isNaN(unitCost) || unitCost < 0) throw new Error(`Invalid unit cost for batch ${batchNo} on line ${line.line_no}`);
+
+            const amount = qty * unitCost;
+            const aedAmount = exchangeRate && exchangeRate > 0 ? amount * exchangeRate : amount;
+
+            if (receiptAsInTransit) {
+                await inventoryService.insertInventoryTransaction(conn, {
+                    txn_date: bill.bill_date,
+                    movement: 'IN TRANSIT',
+                    txn_type: 'PURCHASE_BILL_RECEIPT',
+                    source_type: 'AP_BILL',
+                    source_id: billId,
+                    source_line_id: line.id,
+                    product_id: line.product_id,
+                    warehouse_id: bill.warehouse_id,
+                    batch_id: batchId,
+                    qty,
+                    unit_cost: unitCost,
+                    currency_id: bill.currency_id || null,
+                    exchange_rate: exchangeRate,
+                    foreign_amount: amount,
+                    total_amount: aedAmount,
+                    uom_id: line.uom_id || null,
+                    movement_type_id: 3
+                });
+                inserted += 1;
+            } else {
+                await inventoryService.insertInventoryTransaction(conn, {
+                    txn_date: bill.bill_date,
+                    movement: 'IN',
+                    txn_type: 'PURCHASE_BILL_RECEIPT',
+                    source_type: 'AP_BILL',
+                    source_id: billId,
+                    source_line_id: line.id,
+                    product_id: line.product_id,
+                    warehouse_id: bill.warehouse_id,
+                    batch_id: batchId,
+                    qty,
+                    unit_cost: unitCost,
+                    currency_id: bill.currency_id || null,
+                    exchange_rate: exchangeRate,
+                    foreign_amount: amount,
+                    total_amount: aedAmount,
+                    uom_id: line.uom_id || null,
+                    movement_type_id: 1
+                });
+                await inventoryService.updateInventoryStock(
+                    conn,
+                    line.product_id,
+                    bill.warehouse_id,
+                    batchId,
+                    qty,
+                    unitCost,
+                    true,
+                    bill.currency_id || null,
+                    line.uom_id || null
+                );
+                inserted += 1;
+            }
+        }
+    }
+
+    return { already_posted: false, inserted };
+}
+
 module.exports = {
     postBill,
     cancelBill,
-    reverseBillTransactions
+    reverseBillTransactions,
+    postInventoryIfMissing
 };
 

@@ -5035,11 +5035,12 @@ const updatePurchaseBillInventoryFromQCDecision = async (conn, {
       const sellablePortion = remainingSellableQty > 0 ? Math.min(remainingSellableQty, qtyToReduce) : 0;
       const discardPortion = remainingDiscardQty > 0 ? Math.min(remainingDiscardQty, qtyToReduce - sellablePortion) : 0;
 
-      // --- Sellable portion: IN (Regular Stock), movement_type_id = 1, txn_type = 'QC_REGRADE_SELL'
-      if (sellablePortion > 0) {
-        const sellAmount = sellablePortion * txnUnitCost;
-        const sellForeignAmount = sellAmount;
-        const sellTotalAmount = txnExchangeRate > 0 ? sellAmount * txnExchangeRate : sellAmount;
+      // --- Sellable + Discard portion: First move EVERYTHING to Regular IN stock
+      const totalInPortion = sellablePortion + discardPortion;
+      if (totalInPortion > 0) {
+        const inAmount = totalInPortion * txnUnitCost;
+        const inForeignAmount = inAmount;
+        const inTotalAmount = txnExchangeRate > 0 ? inAmount * txnExchangeRate : inAmount;
 
         await conn.query(`
           INSERT INTO inventory_transactions 
@@ -5047,34 +5048,32 @@ const updatePurchaseBillInventoryFromQCDecision = async (conn, {
            product_id, warehouse_id, batch_id, qty, unit_cost, amount,
            currency_id, exchange_rate, foreign_amount, total_amount, uom_id, movement_type_id,
            qc_lot_id, qc_inspection_id, qc_posting_type, is_posted)
-          VALUES (?, 'IN', 'QC_REGRADE_SELL', 'AP_BILL', ?, ?,
+          VALUES (?, 'IN', 'QC_REGRADE_RECEIPT', 'AP_BILL', ?, ?,
                   ?, ?, ?, ?, ?, ?,
                   ?, ?, ?, ?, ?, ?,
-                  ?, ?, 'REGRADE_SELL', 1)
+                  ?, ?, 'REGRADE_IN', 1)
         `, [
           txnDate, purchaseBillId, txn.source_line_id || null,
-          product_id, warehouse_id || txn.warehouse_id, txn.batch_id, sellablePortion, txnUnitCost, sellAmount,
-          txn.currency_id, txnExchangeRate, sellForeignAmount, sellTotalAmount, lotUomId || txn.uom_id, 1, // REGULAR_IN
+          product_id, warehouse_id || txn.warehouse_id, txn.batch_id, totalInPortion, txnUnitCost, inAmount,
+          txn.currency_id, txnExchangeRate, inForeignAmount, inTotalAmount, lotUomId || txn.uom_id, 1, // REGULAR_IN
           qc_lot_id, qc_inspection_id || null
         ]);
 
-        // Update inventory_stock_batches for sellable quantity (stock on hand)
+        // Update inventory_stock_batches for the total quantity initially
         await inventoryService.updateInventoryStock(
           conn,
           product_id,
           warehouse_id || txn.warehouse_id,
           txn.batch_id,
-          sellablePortion,
+          totalInPortion,
           txnUnitCost,
           true,
           txn.currency_id,
           lotUomId || txn.uom_id
         );
-
-        remainingSellableQty -= sellablePortion;
       }
 
-      // --- Discard portion: DISCARD, movement_type_id = 5, txn_type = 'QC_REGRADE_DISCARD'
+      // --- Discard portion: Subtract from Regular Stock via DISCARD transaction
       if (discardPortion > 0) {
         const discAmount = discardPortion * txnUnitCost;
         const discForeignAmount = discAmount;
@@ -5096,10 +5095,24 @@ const updatePurchaseBillInventoryFromQCDecision = async (conn, {
           txn.currency_id, txnExchangeRate, discForeignAmount, discTotalAmount, lotUomId || txn.uom_id, 5, // DISCARD
           qc_lot_id, qc_inspection_id || null
         ]);
-        // NOTE: DISCARD does NOT change inventory_stock_batches (waste)
+
+        // NOW subtract the discarded portion from inventory_stock_batches
+        await inventoryService.updateInventoryStock(
+          conn,
+          product_id,
+          warehouse_id || txn.warehouse_id,
+          txn.batch_id,
+          discardPortion,
+          txnUnitCost,
+          false, // Subtract
+          txn.currency_id,
+          lotUomId || txn.uom_id
+        );
 
         remainingDiscardQty -= discardPortion;
       }
+
+      remainingSellableQty -= sellablePortion;
 
       // Reduce purchase bill IN TRANSIT quantity
       const newQty = txnQty - qtyToReduce;
@@ -5178,38 +5191,64 @@ const updatePurchaseBillInventoryFromQCDecision = async (conn, {
     if (qtyToProcess <= 0) continue;
 
     // Calculate amounts correctly based on quantity to process
-    const amount = qtyToProcess * txnUnitCost; // qty * unit_cost = amount
-    const foreignAmount = amount; // Foreign amount is same as amount (in transaction currency)
-    const totalAmount = txnExchangeRate > 0 ? amount * txnExchangeRate : amount; // Convert to AED using exchange rate
+    const amount = qtyToProcess * txnUnitCost; 
+    const foreignAmount = amount; 
+    const totalAmount = txnExchangeRate > 0 ? amount * txnExchangeRate : amount; 
 
     const finalWarehouseId = warehouse_id || txn.warehouse_id;
 
-    // Create lot-based inventory transaction (shipment loaded quantity)
-    // source_id and source_line_id reference purchase bill (AP_BILL)
-    // qc_lot_id is kept separately to track which QC lot this transaction belongs to
-    // Ensure txn_type is always set (not NULL)
+    // --- To satisfy IN - (OUT + DISCARD) = Stock, we ALWAYS post 'IN' first
+    // This adds the lot quantity to regular stock on hand.
     await conn.query(`
       INSERT INTO inventory_transactions 
       (txn_date, movement, txn_type, source_type, source_id, source_line_id,
        product_id, warehouse_id, batch_id, qty, unit_cost, amount,
        currency_id, exchange_rate, foreign_amount, total_amount, uom_id, movement_type_id,
        qc_lot_id, qc_inspection_id, qc_posting_type, is_posted)
-      VALUES (?, ?, ?, 'AP_BILL', ?, ?,
+      VALUES (?, 'IN', ?, 'AP_BILL', ?, ?,
               ?, ?, ?, ?, ?, ?,
               ?, ?, ?, ?, ?, ?,
               ?, ?, ?, 1)
     `, [
-      txnDate, movement, txnType, purchaseBillId, txn.source_line_id || null,
+      txnDate, (decision === 'REJECT' ? 'QC_RECEIPT' : txnType), purchaseBillId, txn.source_line_id || null,
       product_id, finalWarehouseId, txn.batch_id, qtyToProcess, txnUnitCost, amount,
-      txn.currency_id, txnExchangeRate, foreignAmount, totalAmount, lotUomId || txn.uom_id, movementTypeId,
-      qc_lot_id, qc_inspection_id || null, decision
+      txn.currency_id, txnExchangeRate, foreignAmount, totalAmount, lotUomId || txn.uom_id, 1, // REGULAR_IN
+      qc_lot_id, qc_inspection_id || null, (decision === 'REJECT' ? 'QC_REJECT_IN' : txnType)
     ]);
 
-    // Update inventory stock only for REGULAR_IN movements (ACCEPT or SELL_RECHECK decisions)
-    // DISCARD (REJECT) should NOT add to regular stock on hand - it's waste/discarded stock
-    // REGRADE stays in IN TRANSIT, so it doesn't affect stock on hand yet
-    if (movementTypeId === 1) {
-      // ACCEPT and SELL_RECHECK (REGULAR_IN) add to inventory_stock_batches
+    // Update inventory_stock_batches (Add to stock)
+    await inventoryService.updateInventoryStock(
+      conn,
+      product_id,
+      finalWarehouseId,
+      txn.batch_id,
+      qtyToProcess,
+      txnUnitCost,
+      true, // isIn = true
+      txn.currency_id,
+      lotUomId || txn.uom_id
+    );
+
+    // --- If decision is REJECT, immediately subtract it via DISCARD transaction
+    if (decision === 'REJECT') {
+      await conn.query(`
+        INSERT INTO inventory_transactions 
+        (txn_date, movement, txn_type, source_type, source_id, source_line_id,
+         product_id, warehouse_id, batch_id, qty, unit_cost, amount,
+         currency_id, exchange_rate, foreign_amount, total_amount, uom_id, movement_type_id,
+         qc_lot_id, qc_inspection_id, qc_posting_type, is_posted)
+        VALUES (?, 'DISCARD', 'QC_REJECT_DISCARD', 'AP_BILL', ?, ?,
+                ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?,
+                ?, ?, 'QC_REJECT', 1)
+      `, [
+        txnDate, purchaseBillId, txn.source_line_id || null,
+        product_id, finalWarehouseId, txn.batch_id, qtyToProcess, txnUnitCost, amount,
+        txn.currency_id, txnExchangeRate, foreignAmount, totalAmount, lotUomId || txn.uom_id, 5, // DISCARD
+        qc_lot_id, qc_inspection_id || null
+      ]);
+
+      // Update inventory_stock_batches (Subtract from stock)
       await inventoryService.updateInventoryStock(
         conn,
         product_id,
@@ -5217,33 +5256,25 @@ const updatePurchaseBillInventoryFromQCDecision = async (conn, {
         txn.batch_id,
         qtyToProcess,
         txnUnitCost,
-        true, // isIn = true (adds to regular stock)
+        false, // isIn = false
         txn.currency_id,
         lotUomId || txn.uom_id
       );
     }
-    // DISCARD (movementTypeId === 5) creates transaction record but does NOT update inventory_stock_batches
-    // The transaction is tracked for reporting but doesn't affect available stock
 
     // Reduce purchase bill transaction quantity by processed quantity
-    // Remaining PO quantity stays in IN TRANSIT (without qc_lot_id)
-    // Also recalculate amounts (amount, foreign_amount, total_amount) based on remaining quantity
     const newQty = txnQty - qtyToProcess;
-
     if (newQty > 0) {
-      // Recalculate amounts based on remaining quantity
-      const newAmount = newQty * txnUnitCost; // qty * unit_cost = amount
-      const newForeignAmount = newAmount; // Foreign amount is same as amount (in transaction currency)
-      const newTotalAmount = txnExchangeRate > 0 ? newAmount * txnExchangeRate : newAmount; // Convert to AED
+      const newAmount = newQty * txnUnitCost; 
+      const newForeignAmount = newAmount; 
+      const newTotalAmount = txnExchangeRate > 0 ? newAmount * txnExchangeRate : newAmount; 
 
-      // Update transaction quantity and amounts (remaining stays IN TRANSIT)
       await conn.query(`
         UPDATE inventory_transactions
         SET qty = ?, amount = ?, foreign_amount = ?, total_amount = ?
         WHERE id = ?
       `, [newQty, newAmount, newForeignAmount, newTotalAmount, txn.id]);
     } else {
-      // Mark transaction as deleted (fully consumed by lot)
       await conn.query(`
         UPDATE inventory_transactions
         SET qty = 0, amount = 0, foreign_amount = 0, total_amount = 0, is_deleted = 1

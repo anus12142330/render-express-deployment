@@ -105,8 +105,9 @@ router.get('/full', async (req, res) => {
 
         const [rows] = await db.promise().query(
             `
-      SELECT v.id, v.display_name AS name, v.uniqid
+      SELECT v.id, v.display_name AS name, v.uniqid, u.name AS sales_person
       FROM vendor v
+      LEFT JOIN \`user\` u ON u.id = v.user_id
       WHERE v.company_type_id = ?
         AND (v.display_name LIKE ? OR v.company_name LIKE ?)
         ${effectiveUserId ? 'AND v.user_id = ?' : ''}
@@ -155,6 +156,7 @@ router.get('/', async (req, res) => {
         v.id,
         v.uniqid,
         v.display_name AS name,
+        u.name AS sales_person,
         v.company_name,
         v.email_address AS email,
         v.phone_work,
@@ -166,6 +168,7 @@ router.get('/', async (req, res) => {
           WHERE va.vendor_id = v.id AND va.expiry_date < CURDATE()
         ) AS expired_attachments_count
       FROM vendor v
+      LEFT JOIN \`user\` u ON u.id = v.user_id
       WHERE v.company_type_id = ?
         AND (
           v.display_name LIKE ? OR

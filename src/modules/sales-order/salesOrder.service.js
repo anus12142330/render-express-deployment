@@ -2,7 +2,290 @@ import db from '../../../db.js';
 import crypto from 'crypto';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
-const { generateARInvoiceNumber } = require('../../utils/docNo.cjs');
+const { generateARInvoiceNumber, generateAPBillNumber } = require('../../utils/docNo.cjs');
+const inventoryService = require('../inventory/inventory.service.cjs');
+
+/** Must match `inventory_transactions.source_type` for rows tied to a sales order (approval IN TRANSIT, etc.). */
+const INV_SOURCE_TYPE_SALES_ORDER = 'SALES_ORDER';
+const INV_TXN_TYPE_SALES_ORDER_IN_TRANSIT = 'SALES_ORDER_IN_TRANSIT';
+
+/**
+ * Soft-delete all inventory rows for this sales order as `source_id` (SO-linked only).
+ * `source_id` on inventory_transactions is the sales order id for approval IN TRANSIT rows.
+ * Does not touch rows with other source_type (e.g. SALES_DISPATCH uses dispatch id as source_id).
+ */
+async function softDeleteSalesOrderInTransitInventory(conn, salesOrderId) {
+    await conn.query(
+        `UPDATE inventory_transactions SET is_deleted = 1
+         WHERE source_id = ?
+           AND (is_deleted = 0 OR is_deleted IS NULL)
+           AND (
+                source_type = ?
+             OR source_type IS NULL
+             OR TRIM(source_type) = ''
+           )`,
+        [salesOrderId, INV_SOURCE_TYPE_SALES_ORDER]
+    );
+}
+
+/**
+ * On dispatch: reduce SALES_ORDER IN TRANSIT informational qty for the line.
+ * On dispatch revert/delete: add it back (reactivate row if it was zeroed).
+ */
+async function adjustSalesOrderInTransitForLine(conn, { salesOrderId, salesOrderItemId, qty, mode, soItem }) {
+    const delta = Number(qty);
+    if (!Number.isFinite(delta) || delta <= 0) return;
+
+    const [rows] = await conn.query(
+        `SELECT id, qty, unit_cost, currency_id, exchange_rate, is_deleted
+         FROM inventory_transactions
+         WHERE source_type = ?
+           AND source_id = ?
+           AND source_line_id = ?
+           AND txn_type = ?
+         ORDER BY id DESC
+         LIMIT 1`,
+        [INV_SOURCE_TYPE_SALES_ORDER, salesOrderId, salesOrderItemId, INV_TXN_TYPE_SALES_ORDER_IN_TRANSIT]
+    );
+    const row = rows[0];
+    if (!row) return;
+
+    const orderedCap = soItem != null ? Number(soItem.ordered_quantity ?? soItem.quantity ?? 0) : null;
+    const curActive = Number(row.is_deleted) === 1 ? 0 : Number(row.qty || 0);
+
+    if (mode === 'consume' && Number(row.is_deleted) === 1) return;
+
+    let newQty;
+    if (mode === 'consume') {
+        newQty = Math.max(0, curActive - delta);
+    } else {
+        const cap = orderedCap != null && Number.isFinite(orderedCap) && orderedCap > 0 ? orderedCap : curActive + delta;
+        newQty = Math.min(cap, curActive + delta);
+    }
+
+    const ucost = Number(row.unit_cost || 0);
+    const amount = newQty * ucost;
+    const ex = row.exchange_rate != null ? Number(row.exchange_rate) : null;
+    const finalForeign = amount;
+    const finalTotal = ex != null && Number.isFinite(ex) && ex > 0 ? amount * ex : amount;
+
+    if (newQty <= 1e-9) {
+        await conn.query(
+            `UPDATE inventory_transactions
+             SET is_deleted = 1, qty = 0, amount = 0, foreign_amount = 0, total_amount = 0
+             WHERE id = ?`,
+            [row.id]
+        );
+    } else {
+        await conn.query(
+            `UPDATE inventory_transactions
+             SET is_deleted = 0,
+                 qty = ?,
+                 amount = ?,
+                 foreign_amount = ?,
+                 total_amount = ?
+             WHERE id = ?`,
+            [newQty, amount, finalForeign, finalTotal, row.id]
+        );
+    }
+}
+
+/** Default supplier (vendor master id) for draft AP bills created from dispatch when user confirms — Bynur Agro Trading Llc */
+const NURAGRO_DISPATCH_SUPPLIER_ID = 121;
+
+/**
+ * Warehouse for dispatch inventory rows: prefer SO header, else AP bill from the dispatch line, else first warehouse.
+ * Prevents NULL warehouse_id when the order header has no warehouse (common on mobile) but batches carry warehouse on the bill.
+ */
+async function resolveWarehouseIdForDispatchLine(conn, headerWarehouseId, apBillLineId) {
+    const hw = headerWarehouseId != null && headerWarehouseId !== '' ? Number(headerWarehouseId) : null;
+    if (Number.isFinite(hw) && hw > 0) return hw;
+
+    if (apBillLineId != null && apBillLineId !== '') {
+        const [rows] = await conn.query(
+            `SELECT ab.warehouse_id AS wid
+             FROM ap_bill_lines abl
+             JOIN ap_bills ab ON abl.bill_id = ab.id
+             WHERE abl.id = ?
+             LIMIT 1`,
+            [apBillLineId]
+        );
+        const wid = rows[0]?.wid;
+        if (wid != null && Number(wid) > 0) return Number(wid);
+    }
+
+    const [fall] = await conn.query('SELECT id FROM warehouses ORDER BY id ASC LIMIT 1');
+    const fallback = fall[0]?.id;
+    if (fallback != null && Number(fallback) > 0) return Number(fallback);
+
+    return null;
+}
+
+/** Comma-separated company ids on vendor.customer_of */
+function parseVendorCustomerOfIds(raw) {
+    return String(raw ?? '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .map((id) => Number(id))
+        .filter((n) => Number.isFinite(n) && n > 0);
+}
+
+/**
+ * Bill company_id: prefer sales order company when valid; if SO has no company, use vendor customer_of;
+ * if SO company is not in vendor list, use first vendor company so the bill still ties to an entity the vendor serves.
+ */
+function resolveApBillCompanyIdFromVendorAndOrder(vendorCustomerOfRaw, salesOrderCompanyId) {
+    const vendorIds = parseVendorCustomerOfIds(vendorCustomerOfRaw);
+    const soCo =
+        salesOrderCompanyId != null && salesOrderCompanyId !== '' && Number.isFinite(Number(salesOrderCompanyId))
+            ? Number(salesOrderCompanyId)
+            : null;
+
+    if (soCo != null) {
+        if (vendorIds.length === 0 || vendorIds.includes(soCo)) {
+            return soCo;
+        }
+        return vendorIds[0] ?? soCo;
+    }
+    return vendorIds[0] ?? null;
+}
+
+/**
+ * Create one draft ap_bills + ap_bill_lines (+ batches) for dispatch lines that need a purchase bill but none was selected.
+ * Mutates nothing; returns new line ids keyed by payload row index.
+ */
+async function createDraftNuragroPurchaseBillForDispatch(conn, {
+    header,
+    normalizedPayload,
+    existingItems,
+    batchInfoForOrder,
+    userId,
+    supplierId = NURAGRO_DISPATCH_SUPPLIER_ID
+}) {
+    const lineRows = [];
+    const batchItems = batchInfoForOrder?.items || [];
+
+    for (let idx = 0; idx < normalizedPayload.length; idx++) {
+        const p = normalizedPayload[idx];
+        const qty = Number(p.dispatch_qty || 0);
+        if (qty <= 0) continue;
+        if (p.ap_bill_line_id) continue;
+        const soItem = existingItems.find((it) => Number(it.id) === Number(p.id));
+        if (!soItem) continue;
+        const prodInfo = batchItems.find((x) => Number(x.product_id) === Number(soItem.product_id));
+        const batches = prodInfo?.batches || [];
+        if (batches.length === 0) continue;
+
+        const rate = Number(soItem.unit_price || 0);
+        const taxRate = Number(soItem.tax_rate || 0);
+        const lineSub = qty * rate;
+        const lineTax = lineSub * (taxRate / 100);
+        const lineTotal = lineSub + lineTax;
+        lineRows.push({ idx, soItem, qty, rate, taxRate, lineSub, lineTax, lineTotal });
+    }
+
+    if (lineRows.length === 0) {
+        return { billId: null, lineIdByPayloadIndex: new Map() };
+    }
+
+    const [[vendorRow]] = await conn.query(`SELECT id, customer_of FROM vendor WHERE id = ? LIMIT 1`, [supplierId]);
+    if (!vendorRow) {
+        throw new Error(`Vendor ${supplierId} not found`);
+    }
+
+    const billNumber = await generateAPBillNumber(conn);
+    const bill_uniqid = `pb_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`;
+    const billDate = new Date().toISOString().slice(0, 10);
+    const warehouseId = header.warehouse_id || null;
+    const currencyId = header.currency_id || null;
+    const companyId = resolveApBillCompanyIdFromVendorAndOrder(vendorRow.customer_of, header.company_id);
+    const salesOrderId = Number(header.id);
+    const orderNo =
+        header.order_no != null && String(header.order_no).trim() !== ''
+            ? String(header.order_no).trim()
+            : String(salesOrderId);
+
+    let subtotal = 0;
+    let taxTotal = 0;
+    lineRows.forEach((r) => {
+        subtotal += r.lineSub;
+        taxTotal += r.lineTax;
+    });
+    const total = subtotal + taxTotal;
+
+    const billNotes = [
+        'Draft: Bynur Agro Trading Llc (Nuragro) — dispatch linkage',
+        `Sales order no: ${orderNo}`,
+        `Purchase bill no: ${billNumber}`
+    ].join('\n');
+
+    const [insBill] = await conn.query(
+        `INSERT INTO ap_bills (is_service, bill_uniqid, bill_number, bill_date, company_id, supplier_id, warehouse_id, currency_id, sales_order_id, subtotal, tax_total, total, open_balance, status_id, user_id, notes)
+         VALUES (0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3, ?, ?)`,
+        [
+            bill_uniqid,
+            billNumber,
+            billDate,
+            companyId,
+            supplierId,
+            warehouseId,
+            currencyId,
+            Number.isFinite(salesOrderId) ? salesOrderId : null,
+            subtotal,
+            taxTotal,
+            total,
+            total,
+            userId,
+            billNotes
+        ]
+    );
+    const billId = insBill.insertId;
+
+    const lineIdByPayloadIndex = new Map();
+    let lineNo = 1;
+
+    for (const row of lineRows) {
+        const { soItem, qty, rate, taxRate, lineTotal, idx } = row;
+        const [[prod]] = await conn.query(`SELECT product_name FROM products WHERE id = ? LIMIT 1`, [soItem.product_id]);
+        const itemName = prod?.product_name || soItem.product_name || 'Product';
+
+        const lineLinkage = `Sales order ${orderNo} · ${itemName}`;
+        const lineDescription =
+            soItem.description != null && String(soItem.description).trim() !== ''
+                ? `${lineLinkage} | ${String(soItem.description).trim()}`
+                : lineLinkage;
+
+        const [insLine] = await conn.query(
+            `INSERT INTO ap_bill_lines (bill_id, line_no, product_id, item_name, description, quantity, uom_id, rate, tax_id, tax_rate, line_total)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+                billId,
+                lineNo,
+                soItem.product_id,
+                itemName,
+                lineDescription,
+                qty,
+                soItem.uom_id || null,
+                rate,
+                soItem.tax_id || null,
+                taxRate,
+                lineTotal
+            ]
+        );
+        const billLineId = insLine.insertId;
+        lineIdByPayloadIndex.set(idx, billLineId);
+        lineNo += 1;
+
+        const batchNo = `DN-${billId}-${billLineId}`;
+        await conn.query(
+            `INSERT INTO ap_bill_line_batches (bill_line_id, batch_no, quantity, unit_cost) VALUES (?, ?, ?, ?)`,
+            [billLineId, batchNo, qty, rate]
+        );
+    }
+
+    return { billId, lineIdByPayloadIndex };
+}
 
 import {
     fetchCompanyPrefix,
@@ -34,10 +317,13 @@ import {
     getDispatchVehicles,
     getDispatchDriversByVehicle,
     upsertDispatchVehicleDriver,
-    getDispatchBatchInfo
+    getDispatchBatchInfo,
+    getSalesOrderInventoryTransactions,
+    getSalesOrderReturns
 } from './salesOrder.repo.js';
 import fs from 'fs';
 import { normalizeTaxMode } from './salesOrder.validators.js';
+import { buildDeliveryOrderHtml, htmlToA5PdfBuffer, escapeHtml } from './deliveryOrderPdf.util.js';
 
 const withTx = async (fn) => {
     const conn = await db.promise().getConnection();
@@ -55,6 +341,16 @@ const withTx = async (fn) => {
         conn.release();
     }
 };
+
+/** Cargo return submitted (8) or QC pending (4) blocks completing the sales order until resolved. */
+function blockCompleteDueToCargoReturnQc(returns) {
+    if (!Array.isArray(returns) || !returns.length) return false;
+    return returns.some((r) => {
+        const st = Number(r.status_id);
+        const qc = Number(r.qc_status_id);
+        return st === 8 || qc === 4;
+    });
+}
 
 const pad = (num, size = 3) => String(num).padStart(size, '0');
 
@@ -227,26 +523,138 @@ export const getOrderDispatchBatchInfo = async ({ id }) => {
     }
 };
 
+/** When sales_orders.shipping_address is empty, resolve from vendor shipping (same pattern as sales order completion → invoice). */
+async function enrichShippingAddressFromVendor(conn, header) {
+    if (!header?.customer_id) return;
+    const raw = header.shipping_address;
+    if (raw != null && String(raw).trim()) return;
+    try {
+        const [shipRows] = await conn.query(
+            `SELECT
+                vsa.ship_address_1, vsa.ship_address_2, vsa.ship_city, vsa.ship_zip_code,
+                ss.name AS ship_state_name, sc.name AS ship_country_name
+             FROM vendor_shipping_addresses vsa
+             LEFT JOIN state ss ON vsa.ship_state_id = ss.id
+             LEFT JOIN country sc ON vsa.ship_country_id = sc.id
+             WHERE vsa.vendor_id = ?
+             ORDER BY vsa.id DESC
+             LIMIT 1`,
+            [header.customer_id]
+        );
+        const ship = shipRows?.[0];
+        if (!ship) return;
+        const shipParts = [
+            ship.ship_address_1,
+            ship.ship_address_2,
+            [ship.ship_city, ship.ship_state_name, ship.ship_zip_code].filter(Boolean).join(', '),
+            ship.ship_country_name
+        ].filter(Boolean);
+        if (shipParts.length) {
+            header.shipping_address = shipParts.join('\n');
+        }
+    } catch {
+        /* keep empty */
+    }
+}
+
 export const getOrderDetail = async ({ id, clientId }) => {
     const conn = await db.promise().getConnection();
     try {
         const header = await getSalesOrderHeader(conn, { id, clientId: null });
         if (!header) return null;
-        // Load items, attachments, dispatches by order id only (no client_id filter) so they show on detail in web and mobile
-        const [items, attachments, approval, audit, dispatches] = await Promise.all([
+        await enrichShippingAddressFromVendor(conn, header);
+        // Load items, attachments, dispatches, and returns by order id only (no client_id filter) so they show on detail in web and mobile
+        const [items, attachments, approval, audit, dispatches, returns, inventoryTransactions] = await Promise.all([
             getSalesOrderItems(conn, { salesOrderId: header.id, clientId: null }),
             getSalesOrderAttachments(conn, { salesOrderId: header.id, clientId: null }),
             getSalesOrderApproval(conn, { salesOrderId: header.id, clientId: null }),
             getSalesOrderAudit(conn, { salesOrderId: header.id, clientId: null }),
-            getSalesOrderDispatches(conn, { salesOrderId: header.id, clientId: null })
+            getSalesOrderDispatches(conn, { salesOrderId: header.id, clientId: null }),
+            getSalesOrderReturns(conn, { salesOrderId: header.id }),
+            getSalesOrderInventoryTransactions(conn, { salesOrderId: header.id })
         ]);
 
-        const enrichedDispatches = await Promise.all(dispatches.map(async (d) => {
-            const dItems = await getDispatchItems(conn, { dispatchId: d.id });
-            return { ...d, items: dItems };
-        }));
+        const blockCompleteDueToCargoReturnQcFlag = blockCompleteDueToCargoReturnQc(returns);
 
-        return { header, items, attachments, approval, audit, dispatches: enrichedDispatches };
+        const [enrichedDispatches, enrichedReturns] = await Promise.all([
+            Promise.all(dispatches.map(async (d) => {
+                const dItems = await getDispatchItems(conn, { dispatchId: d.id });
+                return { ...d, items: dItems };
+            })),
+            Promise.all((returns || []).map(async (r) => {
+                const rLines = await (await import('./salesOrder.repo.js')).getReturnLines(conn, { cargoReturnId: r.id });
+                return { ...r, items: rLines };
+            }))
+        ]);
+
+        return {
+            header,
+            items,
+            attachments,
+            approval,
+            audit,
+            dispatches: enrichedDispatches,
+            returns: enrichedReturns,
+            blockCompleteDueToCargoReturnQc: blockCompleteDueToCargoReturnQcFlag,
+            inventoryTransactions
+        };
+
+    } finally {
+        conn.release();
+    }
+};
+
+/** Build A5 Delivery Order PDF buffer for a single dispatch (Puppeteer HTML → PDF). */
+export const getDeliveryOrderPdfBuffer = async ({ orderId, dispatchId }) => {
+    const conn = await db.promise().getConnection();
+    try {
+        const header = await getSalesOrderHeader(conn, { id: orderId, clientId: null });
+        if (!header) throw new Error('Sales order not found');
+        await enrichShippingAddressFromVendor(conn, header);
+
+        const dispatch = await getDispatchById(conn, { id: dispatchId });
+        if (!dispatch || Number(dispatch.sales_order_id) !== Number(orderId)) {
+            throw new Error('Dispatch not found for this order');
+        }
+
+        const [compRows] = await conn.query(
+            `SELECT name, full_address, logo, base64logo, trn_no FROM company_settings WHERE id = ? LIMIT 1`,
+            [header.company_id]
+        );
+        const company = compRows[0] || {};
+
+        const dispatchItems = await getDispatchItems(conn, { dispatchId });
+        const orderItems = await getSalesOrderItems(conn, { salesOrderId: orderId, clientId: null });
+        const bySoiId = new Map(orderItems.map((o) => [Number(o.id), o]));
+
+        const dispatches = await getSalesOrderDispatches(conn, { salesOrderId: orderId, clientId: null });
+        const idx = dispatches.findIndex((d) => Number(d.id) === Number(dispatchId));
+        const dispatchLabel = idx >= 0 ? String(dispatches.length - idx) : String(dispatchId);
+
+        const lines = [];
+
+        for (const di of dispatchItems) {
+            const soi = bySoiId.get(Number(di.sales_order_item_id));
+            if (!soi) continue;
+            const qty = Number(di.quantity || 0);
+            const packing = String(soi.product_packing_alias || '').trim();
+            const pname = di.product_name || soi.product_name || '';
+            lines.push({
+                titleHtml: escapeHtml(pname).replace(/\n/g, '<br/>'),
+                packingHtml: packing ? escapeHtml(packing).replace(/\n/g, '<br/>') : '',
+                qty,
+                uom: di.uom_name || soi.uom_name || ''
+            });
+        }
+
+        const html = buildDeliveryOrderHtml({
+            company,
+            header,
+            dispatch,
+            lines,
+            dispatchLabel
+        });
+        return await htmlToA5PdfBuffer(html);
     } finally {
         conn.release();
     }
@@ -318,6 +726,11 @@ export const updateDraftHeader = async ({ clientId, userId, id, payload }) =>
                 userId,
                 id
             ]);
+
+            // If this order was previously approved/accepted, remove any existing "IN TRANSIT" inventory rows.
+            // They will be re-created on the next approval based on the updated items.
+            await softDeleteSalesOrderInTransitInventory(conn, id);
+
             await insertAudit(conn, {
                 client_id: scopeClientId,
                 sales_order_id: id,
@@ -378,6 +791,10 @@ export const replaceItems = async ({ clientId, userId, id, taxMode, items }) =>
                 userId,
                 id
             ]);
+
+            // Remove old "IN TRANSIT" inventory rows if they exist from a previous approval.
+            await softDeleteSalesOrderInTransitInventory(conn, id);
+
             await insertAudit(conn, {
                 client_id: clientId,
                 sales_order_id: id,
@@ -510,6 +927,10 @@ export const submitForApproval = async ({ clientId, userId, id }) =>
         const items = await getSalesOrderItems(conn, { salesOrderId: id, clientId: null });
         if (!items.length) throw new Error('At least 1 item is required before submit');
 
+        // Defensive: if this SO was previously approved/accepted and then edited+re-submitted,
+        // remove stale IN TRANSIT rows (scoped by SO line ids so we always match).
+        await softDeleteSalesOrderInTransitInventory(conn, id);
+
         let finalOrderNo = header.order_no;
         const needsOrderNo = !header.order_no || String(header.order_no).toUpperCase() === 'XXX';
         if (needsOrderNo) {
@@ -566,6 +987,72 @@ export const approveOrder = async ({ clientId, userId, id, comment }) =>
             id
         ]);
 
+        // Create IN TRANSIT inventory rows on approval/accept (informational; does NOT affect stock on hand).
+        // These rows are linked to SALES_ORDER so we can trace approved quantities.
+        const [soItems] = await conn.query(
+            `SELECT id, product_id, uom_id, quantity, ordered_quantity, unit_price
+             FROM sales_order_items
+             WHERE sales_order_id = ?`,
+            [id]
+        );
+        if (soItems?.length) {
+            // Remove previous SO in-transit rows to avoid duplicates on re-approval.
+            await softDeleteSalesOrderInTransitInventory(conn, id);
+
+            // Exchange rate (optional) — align with AP bill logic (currency.conversion_rate).
+            let exchangeRate = null;
+            if (header.currency_id) {
+                const [curRows] = await conn.query(`SELECT conversion_rate FROM currency WHERE id = ?`, [
+                    header.currency_id
+                ]);
+                if (curRows?.length) exchangeRate = Number(curRows[0].conversion_rate || 0) || 1;
+            }
+
+            for (const it of soItems) {
+                const qty = Number(it.ordered_quantity ?? it.quantity ?? 0);
+                if (!Number.isFinite(qty) || qty <= 0) continue;
+                if (!it.product_id || !header.warehouse_id) continue;
+                const unitCost = Number(it.unit_price ?? 0);
+                await inventoryService.insertInventoryTransaction(conn, {
+                    txn_date: new Date(),
+                    movement: 'IN TRANSIT',
+                    txn_type: INV_TXN_TYPE_SALES_ORDER_IN_TRANSIT,
+                    source_type: INV_SOURCE_TYPE_SALES_ORDER,
+                    source_id: id,
+                    source_line_id: it.id,
+                    sales_order_id: id,
+                    product_id: it.product_id,
+                    warehouse_id: header.warehouse_id,
+                    batch_id: null,
+                    qty,
+                    // Use SO unit price so amount/foreign/total are meaningful in inventory_transactions.
+                    // This is still informational (IN TRANSIT); it does not touch inventory_stock_batches.
+                    unit_cost: Number.isFinite(unitCost) ? unitCost : 0,
+                    currency_id: header.currency_id || null,
+                    exchange_rate: exchangeRate,
+                    // Let inventoryService compute foreign_amount/total_amount from qty*unit_cost (+ exchange rate).
+                    foreign_amount: null,
+                    total_amount: null,
+                    uom_id: it.uom_id || null,
+                    movement_type_id: 3
+                });
+            }
+
+            // Backfill safety: if any rows were inserted with missing types (e.g. ENUM mismatch), set them.
+            const lineIds = soItems.map((row) => row.id);
+            const ph = lineIds.map(() => '?').join(',');
+            await conn.query(
+                `UPDATE inventory_transactions
+                 SET source_type = ?, txn_type = ?
+                 WHERE source_id = ?
+                   AND source_line_id IN (${ph})
+                   AND (source_type IS NULL OR source_type = '')
+                   AND (txn_type IS NULL OR txn_type = '')
+                   AND (is_deleted = 0 OR is_deleted IS NULL)`,
+                [INV_SOURCE_TYPE_SALES_ORDER, INV_TXN_TYPE_SALES_ORDER_IN_TRANSIT, id, ...lineIds]
+            );
+        }
+
         await insertAudit(conn, {
             client_id: scopeClientId,
             sales_order_id: id,
@@ -577,7 +1064,21 @@ export const approveOrder = async ({ clientId, userId, id, comment }) =>
         });
     });
 
-export const dispatchOrder = async ({ clientId, userId, id, dispatch_id, vehicle_no, driver_name, comments, files, items: dispatchPayload, force_delivery = false, force_delivery_reason = null }) =>
+export const dispatchOrder = async ({
+    clientId,
+    userId,
+    id,
+    dispatch_id,
+    vehicle_no,
+    driver_name,
+    comments,
+    files,
+    items: dispatchPayload,
+    force_delivery = false,
+    force_delivery_reason = null,
+    create_draft_purchase_bill = false,
+    warehouse_id_from_client = null
+}) =>
     withTx(async (conn) => {
         const header = await getSalesOrderHeader(conn, { id, clientId: null });
         if (!header) throw new Error('Sales order not found');
@@ -585,8 +1086,31 @@ export const dispatchOrder = async ({ clientId, userId, id, dispatch_id, vehicle
         // Ignore client_id check for attachments: use 0 when null so INSERT never fails
         const attachmentClientId = scopeClientId ?? header.client_id ?? 0;
 
+        let effectiveWarehouseId = header.warehouse_id;
+        if (warehouse_id_from_client != null && warehouse_id_from_client !== '') {
+            const w = Number(warehouse_id_from_client);
+            if (Number.isFinite(w) && w > 0) effectiveWarehouseId = w;
+        }
+
         if (![13, 11, 9].includes(Number(header.status_id))) {
             throw new Error(`Dispatch allowed only for accepted, partial or dispatched orders. Current status: ${header.status_id}`);
+        }
+
+        const incomingFiles = Array.isArray(files) ? files : [];
+        // Normal dispatch / edit: require proof photos. Force-delivery shortcut (close order) stays attachment-optional.
+        if (incomingFiles.length === 0 && !force_delivery) {
+            const did = dispatch_id ? Number(dispatch_id) : null;
+            if (did && Number.isFinite(did)) {
+                const [cntRows] = await conn.query(
+                    `SELECT COUNT(*) AS c FROM sales_order_attachments WHERE dispatch_id = ?`,
+                    [did]
+                );
+                if (Number(cntRows[0]?.c || 0) === 0) {
+                    throw new Error('At least one dispatch proof attachment is required');
+                }
+            } else {
+                throw new Error('At least one dispatch proof attachment is required');
+            }
         }
 
         let normalizedPayload = dispatchPayload;
@@ -595,12 +1119,97 @@ export const dispatchOrder = async ({ clientId, userId, id, dispatch_id, vehicle
         }
         if (!Array.isArray(normalizedPayload)) normalizedPayload = [];
 
+        const existingItems = await getSalesOrderItems(conn, { salesOrderId: id, clientId: scopeClientId });
+        const batchInfoForOrder = await getDispatchBatchInfo(conn, { salesOrderId: id });
+
+        let draftBillId = null;
+        if (create_draft_purchase_bill) {
+            const draft = await createDraftNuragroPurchaseBillForDispatch(conn, {
+                header,
+                normalizedPayload,
+                existingItems,
+                batchInfoForOrder,
+                userId
+            });
+            draftBillId = draft.billId;
+            draft.lineIdByPayloadIndex.forEach((lineId, idx) => {
+                if (normalizedPayload[idx]) normalizedPayload[idx].ap_bill_line_id = lineId;
+            });
+        }
+
+        for (let i = 0; i < normalizedPayload.length; i++) {
+            const p = normalizedPayload[i];
+            const qty = Number(p.dispatch_qty || 0);
+            if (qty <= 0) continue;
+            const soItem = existingItems.find((it) => Number(it.id) === Number(p.id));
+            if (!soItem) throw new Error('Invalid order line for dispatch');
+            const prodInfo = (batchInfoForOrder.items || []).find((x) => Number(x.product_id) === Number(soItem.product_id));
+            const batches = prodInfo?.batches || [];
+            if (batches.length > 0 && !p.ap_bill_line_id) {
+                throw new Error(
+                    `Purchase bill / batch is required for ${soItem.product_name || 'item'}. Select a purchase bill or confirm saving a draft Bynur Agro (Nuragro) purchase bill.`
+                );
+            }
+        }
+
         let activeDispatchId = dispatch_id;
         if (activeDispatchId) {
-            await updateDispatchHeader(conn, { id: activeDispatchId, vehicle_no, driver_name, client_id: scopeClientId, comments });
+            await updateDispatchHeader(conn, {
+                id: activeDispatchId,
+                vehicle_no,
+                driver_name,
+                comments,
+                ...(draftBillId ? { ap_bill_id: draftBillId } : {})
+            });
 
             const oldItems = await getDispatchItems(conn, { dispatchId: activeDispatchId, clientId: scopeClientId });
             for (const oi of oldItems) {
+                // Restore physical stock if it was previously reduced
+                if (oi.ap_bill_line_id) {
+                    const [batchRows] = await conn.query(
+                        `SELECT batch_id, unit_cost FROM ap_bill_line_batches WHERE bill_line_id = ? LIMIT 1`,
+                        [oi.ap_bill_line_id]
+                    );
+                    if (batchRows.length > 0) {
+                        const { batch_id, unit_cost } = batchRows[0];
+                        const [stRows] = await conn.query(
+                            `SELECT movement FROM inventory_transactions
+                             WHERE source_type = 'SALES_DISPATCH' AND source_id = ? AND product_id = ? AND batch_id = ?
+                               AND (is_deleted = 0 OR is_deleted IS NULL)
+                             ORDER BY id DESC LIMIT 1`,
+                            [activeDispatchId, oi.product_id, batch_id]
+                        );
+                        // Legacy: dispatch used OUT + stock reduction. New: IN TRANSIT only — no stock to restore.
+                        if (stRows[0]?.movement === 'OUT') {
+                            const whRestore = await resolveWarehouseIdForDispatchLine(conn, effectiveWarehouseId, oi.ap_bill_line_id);
+                            if (!whRestore) {
+                                throw new Error('Warehouse is required to adjust stock for this dispatch.');
+                            }
+                            await inventoryService.updateInventoryStock(
+                                conn,
+                                oi.product_id,
+                                whRestore,
+                                batch_id,
+                                oi.quantity,
+                                unit_cost || 0,
+                                true // isIn = true (Add back stock)
+                            );
+                        }
+                        await conn.query(
+                            `UPDATE inventory_transactions SET is_deleted = 1 
+                             WHERE source_type = 'SALES_DISPATCH' AND source_id = ? AND product_id = ? AND batch_id = ?`,
+                            [activeDispatchId, oi.product_id, batch_id]
+                        );
+                    }
+                }
+                const oiSoItem = existingItems.find((it) => Number(it.id) === Number(oi.sales_order_item_id));
+                await adjustSalesOrderInTransitForLine(conn, {
+                    salesOrderId: id,
+                    salesOrderItemId: oi.sales_order_item_id,
+                    qty: Number(oi.quantity),
+                    mode: 'restore',
+                    soItem: oiSoItem
+                });
                 await conn.query(
                     `UPDATE sales_order_items SET dispatched_quantity = dispatched_quantity - ? WHERE id = ?`,
                     [Number(oi.quantity), oi.sales_order_item_id]
@@ -609,13 +1218,17 @@ export const dispatchOrder = async ({ clientId, userId, id, dispatch_id, vehicle
             await deleteDispatchItems(conn, { dispatchId: activeDispatchId });
         } else {
             activeDispatchId = await insertDispatchHeader(conn, {
-                client_id: scopeClientId,
                 sales_order_id: id,
                 vehicle_no,
                 driver_name,
                 dispatched_by: userId,
-                comments
+                comments,
+                ap_bill_id: draftBillId || null
             });
+        }
+
+        if (draftBillId && activeDispatchId) {
+            await conn.query(`UPDATE ap_bills SET dispatch_id = ? WHERE id = ?`, [Number(activeDispatchId), draftBillId]);
         }
 
         const dispatchHistory = [];
@@ -631,9 +1244,73 @@ export const dispatchOrder = async ({ clientId, userId, id, dispatch_id, vehicle
 
         if (dispatchHistory.length > 0) {
             await insertDispatchItems(conn, dispatchHistory);
-        }
 
-        const existingItems = await getSalesOrderItems(conn, { salesOrderId: id, clientId: scopeClientId });
+            // --- Physical stock reduction at dispatch stage ---
+            for (const p of normalizedPayload) {
+                const qty = Number(p.dispatch_qty || 0);
+                if (qty <= 0) continue;
+
+                const soItem = existingItems.find((it) => Number(it.id) === Number(p.id));
+
+                if (p.ap_bill_line_id) {
+                    const [batchRows] = await conn.query(
+                        `SELECT batch_id, unit_cost FROM ap_bill_line_batches WHERE bill_line_id = ? LIMIT 1`,
+                        [p.ap_bill_line_id]
+                    );
+
+                    if (batchRows.length > 0) {
+                        const { batch_id, unit_cost } = batchRows[0];
+                        const productId = p.product_id || soItem?.product_id;
+
+                        // Dispatch = IN TRANSIT until customer invoice posts (physical OUT at AR invoice).
+                        // Does not reduce inventory_stock_batches here.
+                        let exchangeRate = null;
+                        if (header.currency_id) {
+                            const [curRows] = await conn.query(`SELECT conversion_rate FROM currency WHERE id = ?`, [
+                                header.currency_id
+                            ]);
+                            if (curRows?.length) exchangeRate = Number(curRows[0].conversion_rate || 0) || 1;
+                        }
+                        const resolvedWh = await resolveWarehouseIdForDispatchLine(conn, effectiveWarehouseId, p.ap_bill_line_id);
+                        if (!resolvedWh) {
+                            throw new Error(
+                                'Warehouse is required for dispatch. Set warehouse on the sales order or select a purchase bill batch.'
+                            );
+                        }
+                        await inventoryService.insertInventoryTransaction(conn, {
+                            txn_date: new Date(),
+                            movement: 'IN TRANSIT',
+                            txn_type: 'SALES_DISPATCH_IN_TRANSIT',
+                            source_type: 'SALES_DISPATCH',
+                            source_id: activeDispatchId,
+                            source_line_id: p.id,
+                            sales_order_id: id,
+                            dispatch_id: activeDispatchId,
+                            product_id: productId,
+                            warehouse_id: resolvedWh,
+                            batch_id: batch_id,
+                            qty: qty,
+                            unit_cost: unit_cost || 0,
+                            currency_id: header.currency_id || null,
+                            exchange_rate: exchangeRate,
+                            foreign_amount: null,
+                            total_amount: null,
+                            uom_id: soItem?.uom_id || null,
+                            movement_type_id: 3
+                        });
+                    }
+                }
+
+                // Reduce SO "IN TRANSIT" informational qty for every dispatched line (matches dispatched_quantity update)
+                await adjustSalesOrderInTransitForLine(conn, {
+                    salesOrderId: id,
+                    salesOrderItemId: p.id,
+                    qty,
+                    mode: 'consume',
+                    soItem
+                });
+            }
+        }
 
         for (const item of existingItems) {
             const addedInThisUpdate = Number(aggregateQtyByItemId[item.id] || 0);
@@ -701,6 +1378,7 @@ export const dispatchOrder = async ({ clientId, userId, id, dispatch_id, vehicle
                 vehicle_no,
                 driver_name,
                 is_edit: !!dispatch_id,
+                ...(draftBillId ? { ap_bill_id: draftBillId, draft_purchase_bill: true } : {}),
                 ...(force_delivery ? { force_delivery: true, force_delivery_reason } : {})
             },
             action_by: userId
@@ -716,6 +1394,11 @@ export const dispatchOrder = async ({ clientId, userId, id, dispatch_id, vehicle
         } catch (err) {
             console.warn('[dispatchOrder] upsertDispatchVehicleDriver', err?.message || err);
         }
+
+        return {
+            dispatch_id: activeDispatchId,
+            ap_bill_id: draftBillId
+        };
     });
 
 export const markAsDelivered = async ({ clientId, userId, id, comment, files }) =>
@@ -728,26 +1411,27 @@ export const markAsDelivered = async ({ clientId, userId, id, comment, files }) 
         }
 
         const filesList = Array.isArray(files) ? files : [];
-        if (filesList.length) {
-            const rows = filesList.map((file) => {
-                const originalName = file.originalname || file.originalName || file.filename || 'delivery_photo';
-                const fileName = file.filename || file.originalname || file.originalName || `delivery_${Date.now()}.jpg`;
-                const filePath = file.file_path || file.path || `uploads/sales_orders/delivery/${fileName}`;
-                return [
-                    id,
-                    null, // dispatch_id
-                    'DELIVERY',
-                    originalName,
-                    fileName,
-                    file.mimetype || file.mimeType || 'image/jpeg',
-                    file.size != null ? Number(file.size) : 0,
-                    filePath,
-                    userId,
-                    new Date()
-                ];
-            });
-            await insertAttachments(conn, rows);
+        if (filesList.length === 0) {
+            throw new Error('At least one delivery proof attachment is required');
         }
+        const rows = filesList.map((file) => {
+            const originalName = file.originalname || file.originalName || file.filename || 'delivery_photo';
+            const fileName = file.filename || file.originalname || file.originalName || `delivery_${Date.now()}.jpg`;
+            const filePath = file.file_path || file.path || `uploads/sales_orders/delivery/${fileName}`;
+            return [
+                id,
+                null, // dispatch_id
+                'DELIVERY',
+                originalName,
+                fileName,
+                file.mimetype || file.mimeType || 'image/jpeg',
+                file.size != null ? Number(file.size) : 0,
+                filePath,
+                userId,
+                new Date()
+            ];
+        });
+        await insertAttachments(conn, rows);
 
         await conn.query(
             `UPDATE sales_orders 
@@ -783,7 +1467,53 @@ export const deleteDispatch = async ({ clientId, userId, id, dispatchId }) =>
         if (Number(dispatch.sales_order_id) !== Number(id)) throw new Error('Dispatch record mismatch');
 
         const items = await getDispatchItems(conn, { dispatchId, clientId: scopeClientId });
+        const soItemsBeforeDelete = await getSalesOrderItems(conn, { salesOrderId: id, clientId: scopeClientId });
         for (const it of items) {
+            // Restore physical stock
+            if (it.ap_bill_line_id) {
+                const [batchRows] = await conn.query(
+                    `SELECT batch_id, unit_cost FROM ap_bill_line_batches WHERE bill_line_id = ? LIMIT 1`,
+                    [it.ap_bill_line_id]
+                );
+                if (batchRows.length > 0) {
+                    const { batch_id, unit_cost } = batchRows[0];
+                    const [stRowsDel] = await conn.query(
+                        `SELECT movement FROM inventory_transactions
+                         WHERE source_type = 'SALES_DISPATCH' AND source_id = ? AND product_id = ? AND batch_id = ?
+                           AND (is_deleted = 0 OR is_deleted IS NULL)
+                         ORDER BY id DESC LIMIT 1`,
+                        [dispatchId, it.product_id, batch_id]
+                    );
+                    if (stRowsDel[0]?.movement === 'OUT') {
+                        const whDel = await resolveWarehouseIdForDispatchLine(conn, header.warehouse_id, it.ap_bill_line_id);
+                        if (!whDel) {
+                            throw new Error('Warehouse is required to adjust stock when removing this dispatch.');
+                        }
+                        await inventoryService.updateInventoryStock(
+                            conn,
+                            it.product_id,
+                            whDel,
+                            batch_id,
+                            it.quantity,
+                            unit_cost || 0,
+                            true // isIn = true (Add back)
+                        );
+                    }
+                    await conn.query(
+                        `UPDATE inventory_transactions SET is_deleted = 1 
+                         WHERE source_type = 'SALES_DISPATCH' AND source_id = ? AND product_id = ? AND batch_id = ?`,
+                        [dispatchId, it.product_id, batch_id]
+                    );
+                }
+            }
+            const delSoItem = soItemsBeforeDelete.find((row) => Number(row.id) === Number(it.sales_order_item_id));
+            await adjustSalesOrderInTransitForLine(conn, {
+                salesOrderId: id,
+                salesOrderItemId: it.sales_order_item_id,
+                qty: Number(it.quantity),
+                mode: 'restore',
+                soItem: delSoItem
+            });
             await conn.query(
                 `UPDATE sales_order_items SET dispatched_quantity = dispatched_quantity - ? WHERE id = ?`,
                 [Number(it.quantity), it.sales_order_item_id]
@@ -833,6 +1563,13 @@ export const completeOrder = async ({ clientId, userId, id, client_received_by, 
         const scopeClientId = clientId ?? header.client_id;
         if (![9, 12].includes(Number(header.status_id))) {
             throw new Error('Completion allowed only for dispatched or delivered orders');
+        }
+
+        const crReturns = await getSalesOrderReturns(conn, { salesOrderId: id });
+        if (blockCompleteDueToCargoReturnQc(crReturns)) {
+            throw new Error(
+                'Cannot complete this order while a cargo return is submitted or awaiting QC. Approve or reject the return first.'
+            );
         }
 
         if (!client_notes || !client_notes.trim()) {
@@ -1198,6 +1935,11 @@ export const decideEditRequest = async ({ clientId, userId, id, decision, reason
                 WHERE id = ?`,
             [newEditRequestStatus, reason || null, isApproved ? null : header.edit_request_reason, isApproved ? null : header.edit_requested_by, isApproved ? null : header.edit_requested_at, newStatus, userId, id]
         );
+
+        // If edit request is approved (status becomes Draft), remove any prior approval "IN TRANSIT" rows.
+        if (isApproved) {
+            await softDeleteSalesOrderInTransitInventory(conn, id);
+        }
 
         await insertAudit(conn, {
             client_id: scopeClientId,

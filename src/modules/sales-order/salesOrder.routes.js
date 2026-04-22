@@ -21,7 +21,8 @@ import {
   removeSalesOrderDispatch,
   getDispatchVehicles,
   getDispatchDrivers,
-  getDispatchBatchInfo
+  getDispatchBatchInfo,
+  getDeliveryOrderPdf
 } from './salesOrder.controller.js';
 
 import { headerUpload, dispatchUpload, completionUpload, deliveryUpload } from './salesOrder.upload.js';
@@ -53,6 +54,7 @@ router.get('/dispatch-drivers', requireAuth, requireAnyPerm(dispatchPermsList), 
 
 // Dispatch batch/bill info (warehouse, per-item purchase bill date + batch + allocated qty; only qty > 0)
 router.get('/:id/dispatch-batch-info', requireAuth, requireAnyPerm(dispatchPermsList), getDispatchBatchInfo);
+router.get('/:id/dispatch/:dispatchId/delivery-order-pdf', requireAuth, requireAnyPerm(dispatchPermsList), getDeliveryOrderPdf);
 
 // Retrieve (allow view or dispatch - dispatch staff need to load order for Record Shipment)
 router.get('/:id', requireAuth, requireAnyPerm([

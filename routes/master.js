@@ -124,6 +124,17 @@ const MASTER_CONFIG = {
         listOrderBy: 'terms'
     },
 
+    cargo_return_reason: {
+        table: 'cargo_return_reasons',
+        id: 'id',
+        fields: [
+            { name: 'name', type: 'string', required: true },
+            { name: 'is_active', type: 'boolean', default: true },
+            { name: 'sort_order', type: 'number', default: 0 }
+        ],
+        listOrderBy: 'sort_order, name'
+    },
+
     delivery_place: {
         table: 'delivery_place',
         id: 'id',

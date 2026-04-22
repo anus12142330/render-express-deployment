@@ -1,3 +1,5 @@
+import { createServer } from 'http';
+import { Server } from 'socket.io';
 import cors from 'cors';
 import crypto from 'crypto';
 import express from 'express';
@@ -47,11 +49,15 @@ import roleRoutes from './routes/roles.js';
 import routePlannerRoutes from './routes/routePlanner.js';
 import salesQuoteRoutes from './routes/salesQuote.js';
 import salesOrderRoutes from './src/modules/sales-order/salesOrder.routes.js';
+import cargoReturnRoutes from './src/modules/cargo-return/cargoReturn.routes.js';
+import errorLogRoutes from './src/modules/error-log/errorLog.routes.js';
 import shipmentRoutes from './routes/shipment.js';
 import shipmentDocumentsRoutes from './routes/shipmentDocuments.js';
 import shipmentStageRoutes from './routes/shipmentStage.js';
 import statusRoutes from './routes/status.js';
 import systemSettingsRoutes from './routes/systemSettings.js';
+import dashboardWidgetsRoutes from './routes/dashboardWidgets.js';
+import dashboardKpiRoutes from './routes/dashboardKpi.js';
 
 import taxesRoutes from './routes/taxes.js';
 import termsconditionRoutes from './routes/termscondition.js';
@@ -59,6 +65,7 @@ import uomRoutes from './routes/uom.js';
 import uploadRoutes from "./routes/upload.js";
 import vendorRoutes from './routes/vendor.js';
 import warehousesRoutes from "./routes/warehouses.js";
+import inventoryAdjustmentRoutes from "./routes/inventoryAdjustment.js";
 import mobileAuthRoutes from "./routes/mobileAuth.js";
 import mobileQcRoutes from "./routes/mobileQc.js";
 import businessTermsRoutes from "./routes/businessTerms.js";
@@ -76,6 +83,27 @@ const inventoryRoutes = require('./src/modules/inventory/inventory.routes.cjs');
 const operationsRoutes = require('./routes/operations.cjs');
 
 const app = express();
+const httpServer = createServer(app);
+const io = new Server(httpServer, {
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST", "PUT", "DELETE"],
+    credentials: true
+  }
+});
+
+app.use((req, res, next) => {
+  req.io = io;
+  next();
+});
+
+io.on('connection', (socket) => {
+  console.log('✅ Socket connected:', socket.id);
+  socket.on('disconnect', () => {
+    console.log('❌ Socket disconnected:', socket.id);
+  });
+});
+
 const mobileOrigins = [
   "http://localhost",
   "http://127.0.0.1",
@@ -202,7 +230,7 @@ const likeWrap = (s = '') => `%${s || ''}%`;
 //  host: process.env.DB_HOST || "localhost",
 //   user: process.env.DB_USER || "root",
 //   password: process.env.DB_PASSWORD || "",
-//   database: process.env.DB_NAME || "portal_db",
+//   database: process.env.DB_NAME || "reddiaro_portaldb",
 // }); 
 
 //  db.connect(err => {
@@ -220,6 +248,21 @@ const likeWrap = (s = '') => `%${s || ''}%`;
 app.get('/', (req, res) => {
   res.json({ success: true, message: 'API running', timestamp: new Date().toISOString() });
 });
+
+app.get('/api/test-socket', (req, res) => {
+  if (req.io) {
+    req.io.emit('dashboard_update', { message: 'Manual Test' });
+    console.log('[SOCKET] Manual test broadcasted');
+  }
+  res.json({ success: true, message: 'Socket signal manual broadcast' });
+});
+
+app.get('/api/trigger-error', (req, res) => {
+  throw new Error('Manual test error for logging check');
+});
+
+/** Before broad `app.use("/api", …)` so /api/inventory-adjustments is not swallowed */
+app.use('/api/inventory-adjustments', inventoryAdjustmentRoutes);
 
 app.use("/api/purchaseorder", purchaseorderRoutes);
 app.use("/api/po-timeline", poTimelineRoutes);
@@ -240,6 +283,8 @@ app.use("/api/shipment-stages", shipmentStageRoutes);
 app.use("/api/proforma-invoices", proformaRoutes);
 app.use("/api/sales-quotes", salesQuoteRoutes);
 app.use("/api/sales-orders", salesOrderRoutes);
+app.use("/api/cargo-returns", cargoReturnRoutes);
+app.use("/api/error-logs", errorLogRoutes);
 app.use("/api/bank", bankRoutes);
 app.use("/api/bank-accounts", bankAccountRoutes);
 app.use("/api/fund-transfer", fundTransferRoutes);
@@ -270,6 +315,8 @@ app.use('/api/document-template', documentTemplateRoutes);
 app.use('/api/roles', roleRoutes);
 app.use('/api/quality-check', qualityCheckRoutes);
 app.use('/api/system-settings', systemSettingsRoutes);
+app.use('/api/dashboard-widgets', dashboardWidgetsRoutes);
+app.use('/api/dashboard', dashboardKpiRoutes);
 
 
 // AP/AR/Inventory routes (CommonJS modules)
@@ -1559,6 +1606,31 @@ app.use((err, req, res, next) => {
     method: req.method
   });
 
+  // Best-effort DB logging (no bodies stored)
+  (async () => {
+    try {
+      const user = req.session?.user || req.user || req.mobileUser || null;
+      const requestId = req.headers['x-request-id'] || null;
+      await db.promise().query(
+        `INSERT INTO app_error_logs
+         (source, severity, message, stack, context_json, user_id, user_email, request_id, url, api_path, device_type)
+         VALUES ('SERVER', 'ERROR', ?, ?, ?, ?, ?, ?, ?, ?, 'UNKNOWN')`,
+        [
+          String(message || 'Internal Server Error'),
+          err?.stack ? String(err.stack) : null,
+          JSON.stringify({ method: req.method, path: req.originalUrl }),
+          user?.id || null,
+          user?.email || null,
+          requestId ? String(requestId) : null,
+          req.originalUrl ? String(req.originalUrl) : null,
+          req.originalUrl ? String(req.originalUrl) : null
+        ]
+      );
+    } catch (dbErr) {
+      console.error('Failed to insert app_error_log:', dbErr);
+    }
+  })();
+
   res.status(status).json({ error: message });
 });
 
@@ -1569,11 +1641,46 @@ const PORT = process.env.PORT || 5700;
 // Add error handlers to prevent crashes
 process.on('uncaughtException', (err) => {
   console.error('❌ Uncaught Exception:', err);
+  (async () => {
+    try {
+      await db.promise().query(
+        `INSERT INTO app_error_logs
+         (source, severity, message, stack, context_json, device_type)
+         VALUES ('SERVER', 'ERROR', ?, ?, ?, 'UNKNOWN')`,
+        [
+          String(err?.message || 'Uncaught Exception'),
+          err?.stack ? String(err.stack) : null,
+          JSON.stringify({ type: 'uncaughtException' })
+        ]
+      );
+    } catch (_) {
+      // swallow
+    }
+  })();
   // Don't exit in production - let Render handle it
 });
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+  (async () => {
+    try {
+      const msg =
+        typeof reason === 'string'
+          ? reason
+          : reason?.message
+            ? String(reason.message)
+            : 'Unhandled Rejection';
+      const stack = reason?.stack ? String(reason.stack) : null;
+      await db.promise().query(
+        `INSERT INTO app_error_logs
+         (source, severity, message, stack, context_json, device_type)
+         VALUES ('SERVER', 'ERROR', ?, ?, ?, 'UNKNOWN')`,
+        [String(msg), stack, JSON.stringify({ type: 'unhandledRejection' })]
+      );
+    } catch (_) {
+      // swallow
+    }
+  })();
   // Don't exit in production - let Render handle it
 });
 
@@ -1588,8 +1695,8 @@ db.getConnection((err, connection) => {
   }
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`✅ Server started successfully on port ${PORT}`);
+httpServer.listen(PORT, '0.0.0.0', () => {
+  console.log(`✅ Server started successfully with Socket.io on port ${PORT}`);
   console.log(`✅ Health check available at: http://0.0.0.0:${PORT}/`);
   console.log(`✅ API health check at: http://0.0.0.0:${PORT}/api/health`);
 });

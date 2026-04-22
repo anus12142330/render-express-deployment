@@ -4,7 +4,7 @@
 const { pool } = require('../../db/tx.cjs');
 
 /**
- * Get available batches for a product in a warehouse
+ * Get available batches for a product in a warehouse using formula: IN - (OUT + DISCARD)
  */
 async function getAvailableBatches(productId, warehouseId) {
     const [rows] = await pool.query(`
@@ -13,18 +13,33 @@ async function getAvailableBatches(productId, warehouseId) {
             ib.batch_no,
             ib.mfg_date,
             ib.exp_date,
-            isb.qty_on_hand,
-            isb.unit_cost
+            isb.unit_cost,
+            COALESCE(trans.calculated_stock, 0) as qty_on_hand
         FROM inventory_stock_batches isb
         JOIN inventory_batches ib ON ib.id = isb.batch_id
-        WHERE isb.product_id = ? AND isb.warehouse_id = ? AND isb.qty_on_hand > 0
+        LEFT JOIN (
+            SELECT 
+                product_id, warehouse_id, batch_id,
+                SUM(CASE 
+                    WHEN movement = 'IN' THEN qty 
+                    WHEN movement IN ('OUT', 'DISCARD') THEN -qty 
+                    ELSE 0 
+                END) as calculated_stock
+            FROM inventory_transactions 
+            WHERE (is_deleted = 0 OR is_deleted IS NULL)
+            GROUP BY product_id, warehouse_id, batch_id
+        ) trans ON trans.product_id = isb.product_id 
+               AND trans.warehouse_id = isb.warehouse_id 
+               AND trans.batch_id = isb.batch_id
+        WHERE isb.product_id = ? AND isb.warehouse_id = ?
+        HAVING qty_on_hand > 0
         ORDER BY ib.exp_date ASC, ib.mfg_date ASC, ib.id ASC
     `, [productId, warehouseId]);
     return rows;
 }
 
 /**
- * Get batch stock with filters, pagination, and search
+ * Get batch stock with filters using formula: IN - (OUT + DISCARD)
  */
 async function getBatchStock(filters = {}, offset = 0, limit = 100) {
     let sql = `
@@ -39,13 +54,28 @@ async function getBatchStock(filters = {}, offset = 0, limit = 100) {
             c.name as currency_name,
             c.name as currency_code,
             um.name as uom_name,
-            um.acronyms as uom_acronyms
+            um.acronyms as uom_acronyms,
+            COALESCE(trans.calculated_stock, 0) as current_stock
         FROM inventory_stock_batches isb
         JOIN inventory_batches ib ON ib.id = isb.batch_id
         JOIN products p ON p.id = isb.product_id
         JOIN warehouses w ON w.id = isb.warehouse_id
         LEFT JOIN currency c ON c.id = isb.currency_id
         LEFT JOIN uom_master um ON um.id = isb.uom_id
+        LEFT JOIN (
+            SELECT 
+                product_id, warehouse_id, batch_id,
+                SUM(CASE 
+                    WHEN movement = 'IN' THEN qty 
+                    WHEN movement IN ('OUT', 'DISCARD') THEN -qty 
+                    ELSE 0 
+                END) as calculated_stock
+            FROM inventory_transactions 
+            WHERE (is_deleted = 0 OR is_deleted IS NULL)
+            GROUP BY product_id, warehouse_id, batch_id
+        ) trans ON trans.product_id = isb.product_id 
+               AND trans.warehouse_id = isb.warehouse_id 
+               AND trans.batch_id = isb.batch_id
         WHERE 1=1
     `;
     const params = [];
@@ -63,7 +93,6 @@ async function getBatchStock(filters = {}, offset = 0, limit = 100) {
         params.push(filters.batch_id);
     }
 
-    // Add search filter
     if (filters.search) {
         sql += ` AND (
             p.product_name LIKE ? OR
@@ -75,8 +104,11 @@ async function getBatchStock(filters = {}, offset = 0, limit = 100) {
         params.push(searchTerm, searchTerm, searchTerm, searchTerm);
     }
 
-    // Build count query separately
-    const whereClause = sql.substring(sql.indexOf('WHERE'));
+    // Use outer WHERE only: indexOf('WHERE') matches the subquery on inventory_transactions first
+    // and corrupts the count SQL (MariaDB: near ') trans ON ...').
+    const outerWhere = 'WHERE 1=1';
+    const whereIdx = sql.lastIndexOf(outerWhere);
+    const whereClause = whereIdx >= 0 ? sql.substring(whereIdx) : sql.substring(sql.indexOf('WHERE'));
     const countSql = `
         SELECT COUNT(*) as total
         FROM inventory_stock_batches isb
@@ -88,12 +120,10 @@ async function getBatchStock(filters = {}, offset = 0, limit = 100) {
         ${whereClause}
     `;
     
-    // Count params (same as main query params, but without LIMIT/OFFSET)
     const countParams = [...params];
     const [countResult] = await pool.query(countSql, countParams);
     const total = countResult[0]?.total || 0;
 
-    // Add ordering and pagination to main query
     sql += ' ORDER BY ib.exp_date ASC, ib.mfg_date ASC, isb.id ASC';
     sql += ' LIMIT ? OFFSET ?';
     params.push(limit, offset);
@@ -344,8 +374,17 @@ async function insertInventoryTransaction(conn, params) {
         foreign_amount = null,
         total_amount = null,
         uom_id = null,
-        movement_type_id = 1 // Default to 1 (REGULAR_IN). See movement_types table: 1=REGULAR_IN, 2=REGULAR_OUT, 3=IN_TRANSIT, 4=TRANSIT_OUT, 5=DISCARD
+        movement_type_id = 1, // Default to 1 (REGULAR_IN). See movement_types table: 1=REGULAR_IN, 2=REGULAR_OUT, 3=IN_TRANSIT, 4=TRANSIT_OUT, 5=DISCARD
+        sales_order_id = null,
+        dispatch_id = null
     } = params;
+
+    const safeTxnType = txn_type == null ? null : String(txn_type);
+    const safeSourceType = source_type == null ? null : String(source_type);
+    const safeSalesOrderId =
+        sales_order_id != null && Number.isFinite(Number(sales_order_id)) ? Number(sales_order_id) : null;
+    const safeDispatchId =
+        dispatch_id != null && Number.isFinite(Number(dispatch_id)) ? Number(dispatch_id) : null;
 
     const amount = parseFloat(qty) * parseFloat(unit_cost);
     
@@ -363,11 +402,11 @@ async function insertInventoryTransaction(conn, params) {
         INSERT INTO inventory_transactions 
         (txn_date, movement, txn_type, source_type, source_id, source_line_id, 
          product_id, warehouse_id, batch_id, qty, unit_cost, amount,
-         currency_id, exchange_rate, foreign_amount, total_amount, uom_id, movement_type_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, [txn_date, movement, txn_type, source_type, source_id, source_line_id,
+         currency_id, exchange_rate, foreign_amount, total_amount, uom_id, movement_type_id, sales_order_id, dispatch_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [txn_date, movement, safeTxnType, safeSourceType, source_id, source_line_id,
         product_id, warehouse_id, batch_id, qty, unit_cost, amount,
-        currency_id, exchange_rate, finalForeignAmount, finalTotalAmount, uom_id, movement_type_id]);
+        currency_id, exchange_rate, finalForeignAmount, finalTotalAmount, uom_id, movement_type_id, safeSalesOrderId, safeDispatchId]);
 
     return result.insertId;
 }
@@ -378,16 +417,15 @@ async function insertInventoryTransaction(conn, params) {
 async function validateBatchStock(conn, allocations, warehouseId) {
     for (const alloc of allocations) {
         const [rows] = await conn.query(`
-            SELECT qty_on_hand 
-            FROM inventory_stock_batches 
+            SELECT 
+                SUM(CASE WHEN movement = 'IN' THEN qty ELSE 0 END) - 
+                (SUM(CASE WHEN movement = 'OUT' THEN qty ELSE 0 END) + SUM(CASE WHEN movement = 'DISCARD' THEN qty ELSE 0 END)) as available_qty
+            FROM inventory_transactions 
             WHERE batch_id = ? AND warehouse_id = ? AND product_id = ?
+              AND (is_deleted = 0 OR is_deleted IS NULL)
         `, [alloc.batch_id, warehouseId, alloc.product_id]);
 
-        if (rows.length === 0) {
-            throw new Error(`Batch ${alloc.batch_id} not found in warehouse ${warehouseId}`);
-        }
-
-        const availableQty = parseFloat(rows[0].qty_on_hand);
+        const availableQty = parseFloat(rows[0]?.available_qty || 0);
         const requiredQty = parseFloat(alloc.quantity);
 
         if (availableQty < requiredQty) {
