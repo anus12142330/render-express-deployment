@@ -148,6 +148,7 @@ async function listInvoices(req, res, next) {
         const statusId = req.query.status_id ? parseInt(req.query.status_id, 10) : null;
         const editRequestStatus = req.query.edit_request_status ? parseInt(req.query.edit_request_status, 10) : null;
         const createdBy = req.query.created_by ? parseInt(req.query.created_by, 10) : null;
+        const salesPersonId = req.query.sales_person_id ? parseInt(req.query.sales_person_id, 10) : null;
 
         let whereClause = 'WHERE 1=1';
         const params = [];
@@ -181,9 +182,15 @@ async function listInvoices(req, res, next) {
         if (effectiveUserId) {
             whereClause += ' AND ai.user_id = ?';
             params.push(effectiveUserId);
-        } else if (createdBy) {
-            whereClause += ' AND ai.user_id = ?';
-            params.push(createdBy);
+        } else {
+            if (createdBy) {
+                whereClause += ' AND ai.user_id = ?';
+                params.push(createdBy);
+            }
+            if (salesPersonId) {
+                whereClause += ' AND (so.sales_person_id = ? OR (so.sales_person_id IS NULL AND ai.user_id = ?))';
+                params.push(salesPersonId, salesPersonId);
+            }
         }
 
         if (customerId) {
@@ -207,12 +214,22 @@ async function listInvoices(req, res, next) {
             params.push(editRequestStatus);
         }
         if (search) {
-            whereClause += ' AND (ai.invoice_number LIKE ? OR v.display_name LIKE ?)';
+            whereClause += ' AND (ai.invoice_number LIKE ? OR v.display_name LIKE ? OR u1.name LIKE ? OR usp.name LIKE ?)';
             const searchPattern = `%${search}%`;
-            params.push(searchPattern, searchPattern);
+            params.push(searchPattern, searchPattern, searchPattern, searchPattern);
         }
 
-        const [countRows] = await pool.query(`SELECT COUNT(*) as total FROM ar_invoices ai LEFT JOIN vendor v ON v.id = ai.customer_id LEFT JOIN status s ON s.id = ai.status_id ${whereClause}`, params);
+        const [countRows] = await pool.query(
+            `SELECT COUNT(*) as total
+             FROM ar_invoices ai
+             LEFT JOIN vendor v ON v.id = ai.customer_id
+             LEFT JOIN status s ON s.id = ai.status_id
+             LEFT JOIN user u1 ON u1.id = ai.user_id
+             LEFT JOIN sales_orders so ON so.id = ai.sales_order_id
+             LEFT JOIN user usp ON usp.id = so.sales_person_id
+             ${whereClause}`,
+            params
+        );
         const total = countRows[0].total;
 
         const [rows] = await pool.query(`
@@ -224,7 +241,8 @@ async function listInvoices(req, res, next) {
                     COALESCE((SELECT SUM(CASE WHEN p.currency_id = ai.currency_id THEN pa.amount_bank ELSE pa.amount_base END) FROM tbl_payment_allocation pa INNER JOIN tbl_payment p ON p.id = pa.payment_id WHERE pa.alloc_type = 'invoice' AND pa.reference_id = ai.id AND (p.is_deleted = 0 OR p.is_deleted IS NULL) AND p.status_id = 1 AND p.direction = 'IN'), 0)
                 )) as outstanding_amount,
                 s.name as status_name, s.id as status_id, s.colour as status_colour, s.bg_colour as status_bg_colour,
-                u1.name as created_by_name, u2.name as approved_by_name, u3.name as edit_requested_by_name
+                u1.name as created_by_name, u2.name as approved_by_name, u3.name as edit_requested_by_name,
+                COALESCE(usp.name, u1.name) as sales_person_name
             FROM ar_invoices ai
             LEFT JOIN vendor v ON v.id = ai.customer_id
             LEFT JOIN currency c ON c.id = ai.currency_id
@@ -232,6 +250,8 @@ async function listInvoices(req, res, next) {
             LEFT JOIN user u1 ON u1.id = ai.user_id
             LEFT JOIN user u2 ON u2.id = ai.approved_by
             LEFT JOIN user u3 ON u3.id = ai.edit_requested_by
+            LEFT JOIN sales_orders so ON so.id = ai.sales_order_id
+            LEFT JOIN user usp ON usp.id = so.sales_person_id
             ${whereClause}
             ORDER BY ai.invoice_date DESC, ai.id DESC
             LIMIT ? OFFSET ?

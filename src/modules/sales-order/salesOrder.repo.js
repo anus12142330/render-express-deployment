@@ -380,7 +380,7 @@ export const insertAudit = async (conn, data) => {
     );
 };
 
-export const listSalesOrders = async (conn, { clientId, page, pageSize, search, status_id, company_id, customer_id, date_from, date_to, edit_request_status, created_by, filter_own_user_id, exclude_with_ar_invoice, exclude_with_cargo_return }) => {
+export const listSalesOrders = async (conn, { clientId, page, pageSize, search, status_id, company_id, customer_id, sales_person_id, date_from, date_to, edit_request_status, created_by, filter_own_user_id, exclude_with_ar_invoice, exclude_with_cargo_return }) => {
     const offset = (page - 1) * pageSize;
     const conditions = ['COALESCE(so.is_deleted, 0) = 0'];
     const params = [];
@@ -401,9 +401,13 @@ export const listSalesOrders = async (conn, { clientId, page, pageSize, search, 
         conditions.push('so.created_by = ?');
         params.push(created_by);
     }
+    if (sales_person_id) {
+        conditions.push('so.sales_person_id = ?');
+        params.push(sales_person_id);
+    }
     if (search) {
-        conditions.push('(so.order_no LIKE ? OR v.display_name LIKE ? OR p.product_name LIKE ? OR comp.name LIKE ?)');
-        params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
+        conditions.push('(so.order_no LIKE ? OR v.display_name LIKE ? OR p.product_name LIKE ? OR comp.name LIKE ? OR u.name LIKE ?)');
+        params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
     }
     if (status_id) {
         const statusStr = String(status_id);
@@ -451,6 +455,7 @@ export const listSalesOrders = async (conn, { clientId, page, pageSize, search, 
       LEFT JOIN company_settings comp ON so.company_id = comp.id
       LEFT JOIN sales_order_items soi ON so.id = soi.sales_order_id
       LEFT JOIN products p ON soi.product_id = p.id
+      LEFT JOIN user u ON so.sales_person_id = u.id
       WHERE ${where}
       GROUP BY so.id
     ) AS sub
@@ -519,8 +524,8 @@ export const listApprovalQueue = async (conn, { clientId, page, pageSize, search
     let searchClause = '';
 
     if (search) {
-        searchClause = 'AND (so.order_no LIKE ? OR v.display_name LIKE ? OR p.product_name LIKE ? OR comp.name LIKE ?)';
-        params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
+        searchClause = 'AND (so.order_no LIKE ? OR v.display_name LIKE ? OR p.product_name LIKE ? OR comp.name LIKE ? OR u.name LIKE ?)';
+        params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
     }
 
     const sql = `
@@ -530,6 +535,7 @@ export const listApprovalQueue = async (conn, { clientId, page, pageSize, search
     JOIN vendor v ON so.customer_id = v.id
     JOIN company_settings comp ON so.company_id = comp.id
     JOIN status s ON so.status_id = s.id
+    LEFT JOIN user u ON so.sales_person_id = u.id
     LEFT JOIN sales_order_items soi ON so.id = soi.sales_order_id
     LEFT JOIN products p ON soi.product_id = p.id
     WHERE so.status_id = ? AND COALESCE(so.is_deleted, 0) = 0 ${searchClause}
@@ -544,6 +550,7 @@ export const listApprovalQueue = async (conn, { clientId, page, pageSize, search
      SELECT COUNT(*) as total 
      FROM sales_orders so 
      JOIN vendor v ON so.customer_id = v.id
+     LEFT JOIN user u ON so.sales_person_id = u.id
      WHERE so.status_id = 8 AND COALESCE(so.is_deleted, 0) = 0 ${searchClause}
   `;
     const [countRows] = await conn.query(countSql, params);

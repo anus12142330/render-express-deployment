@@ -101,6 +101,7 @@ export const listSalesOrders = async (req, res) => {
             status_id: statusParam,
             company_id: null,
             customer_id: null,
+            sales_person_id: req.query.sales_person_id || null,
             date_from: req.query.date_from || null,
             date_to: req.query.date_to || null,
             edit_request_status: req.query.edit_request_status || null,
