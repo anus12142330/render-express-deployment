@@ -321,8 +321,17 @@ router.get('/payments/inward', requireAuth, async (req, res) => {
     }
 
     if (status_id) {
-      whereClause += " AND p.status_id = ?";
-      params.push(parseInt(status_id, 10));
+      const statusStr = String(status_id);
+      if (statusStr.includes(',')) {
+        const ids = statusStr.split(',').map(s => s.trim()).filter(Boolean);
+        if (ids.length > 0) {
+          whereClause += ` AND p.status_id IN (${ids.map(() => '?').join(',')})`;
+          params.push(...ids);
+        }
+      } else {
+        whereClause += " AND p.status_id = ?";
+        params.push(status_id);
+      }
     }
 
     if (edit_request_status !== undefined && edit_request_status !== null) {

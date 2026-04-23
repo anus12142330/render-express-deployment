@@ -244,39 +244,74 @@ async function postInvoice(conn, invoiceId, userId) {
         const lineQty = parseFloat(line.quantity || 0);
         let totalAllocatedQty = (batchAllocs || []).reduce((sum, a) => sum + parseFloat(a.quantity || 0), 0);
 
-        // Backfill: if no allocations or partial allocations (total < line qty), allocate from current inventory (FIFO)
-        if (totalAllocatedQty < lineQty - 0.01) {
-            const [stockBatches] = await conn.query(`
-                SELECT isb.batch_id, isb.qty_on_hand, isb.unit_cost
-                FROM inventory_stock_batches isb
-                WHERE isb.product_id = ? AND isb.warehouse_id = ? AND isb.qty_on_hand > 0
-                ORDER BY isb.id ASC
-            `, [line.product_id, invoice.warehouse_id]);
-            let remaining = lineQty - totalAllocatedQty;
-            for (const sb of stockBatches || []) {
-                if (remaining <= 0) break;
-                const take = Math.min(remaining, parseFloat(sb.qty_on_hand || 0));
-                if (take <= 0) continue;
-                await conn.query(`
-                    INSERT INTO ar_invoice_line_batches (invoice_line_id, batch_id, quantity, unit_cost)
-                    VALUES (?, ?, ?, ?)
-                `, [line.id, sb.batch_id, take, sb.unit_cost || 0]);
-                remaining -= take;
-            }
-            [batchAllocs] = await conn.query(`SELECT * FROM ar_invoice_line_batches WHERE invoice_line_id = ?`, [line.id]);
-            totalAllocatedQty = (batchAllocs || []).reduce((sum, a) => sum + parseFloat(a.quantity || 0), 0);
-        }
-
-        if (!batchAllocs || batchAllocs.length === 0) {
-            throw new Error(`Invoice line ${line.id} (${line.item_name || 'item'}): No batch allocations. Ensure the product has stock in warehouse or was dispatched with purchase bill batches.`);
-        }
-
-        if (Math.abs(totalAllocatedQty - lineQty) > 0.01) {
-            throw new Error(`Invoice line ${line.id} (${line.item_name || 'item'}): Batch allocations total ${totalAllocatedQty} but line quantity is ${lineQty}. Add stock to the warehouse or adjust the invoice line quantity.`);
-        }
-
-        // Only validate batch stock if inventory movement is enabled
         if (movementEnabled) {
+            // Backfill: if no allocations or partial allocations (total < line qty), allocate from current inventory (FIFO)
+            if (totalAllocatedQty < lineQty - 0.01) {
+                let remaining = lineQty - totalAllocatedQty;
+
+                // 1. If it's an SO-linked invoice, try to consume IN TRANSIT batches (dispatched but not yet invoiced)
+                if (invoice.sales_order_id) {
+                    const [transitBatches] = await conn.query(`
+                        SELECT batch_id, SUM(qty) as total_qty, AVG(unit_cost) as avg_unit_cost
+                        FROM inventory_transactions
+                        WHERE source_type = 'SALES_DISPATCH'
+                          AND txn_type = ?
+                          AND sales_order_id = ?
+                          AND product_id = ?
+                          AND warehouse_id = ?
+                          AND (is_deleted = 0 OR is_deleted IS NULL)
+                        GROUP BY batch_id
+                        HAVING total_qty > 0
+                    `, [TXN_SALES_DISPATCH_IN_TRANSIT, invoice.sales_order_id, line.product_id, invoice.warehouse_id]);
+
+                    for (const tb of transitBatches || []) {
+                        if (remaining <= 0.0001) break;
+                        const take = Math.min(remaining, parseFloat(tb.total_qty || 0));
+                        if (take <= 0.0001) continue;
+                        
+                        await conn.query(`
+                            INSERT INTO ar_invoice_line_batches (invoice_line_id, batch_id, quantity, unit_cost)
+                            VALUES (?, ?, ?, ?)
+                        `, [line.id, tb.batch_id, take, tb.avg_unit_cost || 0]);
+                        remaining -= take;
+                    }
+                }
+
+                // 2. Then try to consume from physical stock in the warehouse
+                if (remaining > 0.0001) {
+                    const [stockBatches] = await conn.query(`
+                        SELECT isb.batch_id, isb.qty_on_hand, isb.unit_cost
+                        FROM inventory_stock_batches isb
+                        WHERE isb.product_id = ? AND isb.warehouse_id = ? AND isb.qty_on_hand > 0
+                        ORDER BY isb.id ASC
+                    `, [line.product_id, invoice.warehouse_id]);
+
+                    for (const sb of stockBatches || []) {
+                        if (remaining <= 0.0001) break;
+                        const take = Math.min(remaining, parseFloat(sb.qty_on_hand || 0));
+                        if (take <= 0.0001) continue;
+                        
+                        await conn.query(`
+                            INSERT INTO ar_invoice_line_batches (invoice_line_id, batch_id, quantity, unit_cost)
+                            VALUES (?, ?, ?, ?)
+                        `, [line.id, sb.batch_id, take, sb.unit_cost || 0]);
+                        remaining -= take;
+                    }
+                }
+
+                [batchAllocs] = await conn.query(`SELECT * FROM ar_invoice_line_batches WHERE invoice_line_id = ?`, [line.id]);
+                totalAllocatedQty = (batchAllocs || []).reduce((sum, a) => sum + parseFloat(a.quantity || 0), 0);
+            }
+
+            if (!batchAllocs || batchAllocs.length === 0) {
+                throw new Error(`Invoice line ${line.id} (${line.item_name || 'item'}): No batch allocations. Ensure the product has stock in warehouse or was dispatched with purchase bill batches.`);
+            }
+
+            if (Math.abs(totalAllocatedQty - lineQty) > 0.01) {
+                throw new Error(`Invoice line ${line.id} (${line.item_name || 'item'}): Batch allocations total ${totalAllocatedQty} but line quantity is ${lineQty}. Add stock to the warehouse or adjust the invoice line quantity.`);
+            }
+
+            // Only validate batch stock if inventory movement is enabled
             await inventoryService.validateBatchStock(conn, batchAllocs.map(a => ({
                 batch_id: a.batch_id,
                 quantity: a.quantity,

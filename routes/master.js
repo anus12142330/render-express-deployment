@@ -474,7 +474,8 @@ const MASTER_CONFIG = {
         fields: [
             { name: 'name', type: 'string', required: true },
             { name: 'bg_colour', type: 'string' },
-            { name: 'colour', type: 'string' }
+            { name: 'colour', type: 'string' },
+            { name: 'is_main', type: 'number', default: 0 }
         ],
         listOrderBy: 'name'
     },
@@ -513,6 +514,13 @@ const MASTER_CONFIG = {
             { name: 'company_prefix', type: 'string' }
         ],
         listOrderBy: 'name'
+    },
+
+    date_set: {
+        table: 'date_set',
+        id: 'id',
+        fields: [{ name: 'sets', type: 'string', required: true }],
+        listOrderBy: 'id'
     }
 };
 

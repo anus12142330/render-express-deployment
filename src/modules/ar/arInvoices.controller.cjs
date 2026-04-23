@@ -145,7 +145,7 @@ async function listInvoices(req, res, next) {
         const customerId = req.query.customer_id ? parseInt(req.query.customer_id, 10) : null;
         const salesOrderId = req.query.sales_order_id ? parseInt(req.query.sales_order_id, 10) : null;
         const status = req.query.status || '';
-        const statusId = req.query.status_id ? parseInt(req.query.status_id, 10) : null;
+        const statusIdRaw = req.query.status_id || null;
         const editRequestStatus = req.query.edit_request_status ? parseInt(req.query.edit_request_status, 10) : null;
         const createdBy = req.query.created_by ? parseInt(req.query.created_by, 10) : null;
         const salesPersonId = req.query.sales_person_id ? parseInt(req.query.sales_person_id, 10) : null;
@@ -205,9 +205,18 @@ async function listInvoices(req, res, next) {
             whereClause += ' AND s.name = ?';
             params.push(status);
         }
-        if (statusId) {
-            whereClause += ' AND ai.status_id = ?';
-            params.push(statusId);
+        if (statusIdRaw) {
+            const statusStr = String(statusIdRaw);
+            if (statusStr.includes(',')) {
+                const ids = statusStr.split(',').map(s => s.trim()).filter(Boolean);
+                if (ids.length > 0) {
+                    whereClause += ` AND ai.status_id IN (${ids.map(() => '?').join(',')})`;
+                    params.push(...ids);
+                }
+            } else {
+                whereClause += ' AND ai.status_id = ?';
+                params.push(statusStr);
+            }
         }
         if (editRequestStatus) {
             whereClause += ' AND ai.edit_request_status = ?';

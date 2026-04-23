@@ -77,7 +77,7 @@ async function listCreditNotes(req, res, next) {
         const search = (req.query.search || '').trim();
         const customerId = req.query.customer_id ? parseInt(req.query.customer_id, 10) : null;
         const createdBy = req.query.created_by ? parseInt(req.query.created_by, 10) : null;
-        const statusIdFilter = req.query.status_id != null && req.query.status_id !== '' ? parseInt(req.query.status_id, 10) : null;
+        const statusIdRaw = req.query.status_id || null;
 
         const authUserId = req.user?.id || req.session?.user?.id;
         if (!authUserId) return res.status(401).json({ error: 'Unauthorized' });
@@ -103,9 +103,18 @@ async function listCreditNotes(req, res, next) {
             const p = `%${search}%`;
             params.push(p, p, p);
         }
-        if (statusIdFilter != null && !Number.isNaN(statusIdFilter)) {
-            whereClause += ' AND cn.status_id = ?';
-            params.push(statusIdFilter);
+        if (statusIdRaw) {
+            const statusStr = String(statusIdRaw);
+            if (statusStr.includes(',')) {
+                const ids = statusStr.split(',').map(s => s.trim()).filter(Boolean);
+                if (ids.length > 0) {
+                    whereClause += ` AND cn.status_id IN (${ids.map(() => '?').join(',')})`;
+                    params.push(...ids);
+                }
+            } else {
+                whereClause += ' AND cn.status_id = ?';
+                params.push(statusStr);
+            }
         }
 
         const [countRows] = await pool.query(
