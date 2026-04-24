@@ -150,7 +150,8 @@ async function listInvoices(req, res, next) {
         const createdBy = req.query.created_by ? parseInt(req.query.created_by, 10) : null;
         const salesPersonId = req.query.sales_person_id ? parseInt(req.query.sales_person_id, 10) : null;
 
-        let whereClause = 'WHERE 1=1';
+        // Hide deleted invoices everywhere (soft delete)
+        let whereClause = 'WHERE (ai.is_deleted = 0 OR ai.is_deleted IS NULL)';
         const params = [];
 
         const authUserId = req.user?.id || req.session?.user?.id;
@@ -324,6 +325,7 @@ async function getInvoice(req, res, next) {
                    c.name as currency_code,
                    c.label as currency_label,
                    c.subunit_label,
+                   pt.terms as payment_terms_name,
                    vo.tax_registration_number AS customer_tax_registration_number,
                    vo.tax_registration_number AS ship_tax_registration_number,
                    vo.tax_registration_number AS tax_registration_number,
@@ -373,12 +375,14 @@ async function getInvoice(req, res, next) {
             LEFT JOIN vendor v ON v.id = ai.customer_id
             LEFT JOIN vendor_other vo ON vo.vendor_id = v.id
             LEFT JOIN currency c ON c.id = ai.currency_id
+            LEFT JOIN payment_terms pt ON pt.id = ai.payment_terms_id
             LEFT JOIN vendor_shipping_addresses vsh ON vsh.id = ai.delivery_address_id
             LEFT JOIN state ship_state ON ship_state.id = vsh.ship_state_id
             LEFT JOIN country ship_country ON ship_country.id = vsh.ship_country_id
             LEFT JOIN status s ON s.id = ai.status_id
             LEFT JOIN user u ON u.id = ai.user_id
-            WHERE ${whereField} = ?
+            WHERE (ai.is_deleted = 0 OR ai.is_deleted IS NULL)
+              AND ${whereField} = ?
         `, [id]);
 
         if (invoices.length === 0) {
