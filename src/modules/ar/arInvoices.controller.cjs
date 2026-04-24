@@ -223,9 +223,9 @@ async function listInvoices(req, res, next) {
             params.push(editRequestStatus);
         }
         if (search) {
-            whereClause += ' AND (ai.invoice_number LIKE ? OR v.display_name LIKE ? OR u1.name LIKE ? OR usp.name LIKE ?)';
+            whereClause += ' AND (ai.invoice_number LIKE ? OR ai.sales_order_number LIKE ? OR v.display_name LIKE ? OR u1.name LIKE ? OR usp.name LIKE ? OR so.order_no LIKE ?)';
             const searchPattern = `%${search}%`;
-            params.push(searchPattern, searchPattern, searchPattern, searchPattern);
+            params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
         }
 
         const [countRows] = await pool.query(
@@ -556,7 +556,7 @@ async function createInvoice(req, res, next) {
 
             const {
                 invoice_number, invoice_date, invoice_time, due_date, payment_terms_id,
-                customer_id, company_id, warehouse_id, currency_id, subtotal,
+                customer_id, company_id, warehouse_id, currency_id, tax_mode, subtotal,
                 discount_type, discount_amount, tax_total, total, notes,
                 proforma_invoice_id, sales_order_id, sales_order_number,
                 customer_address, delivery_address, delivery_address_id,
@@ -582,13 +582,13 @@ async function createInvoice(req, res, next) {
 
             const [invoiceResult] = await conn.query(`
                 INSERT INTO ar_invoices 
-                (invoice_uniqid, invoice_number, invoice_date, invoice_time, due_date, payment_terms_id, customer_id, customer_address, delivery_address, delivery_address_id, company_id, warehouse_id, currency_id, subtotal, discount_type, discount_amount, tax_total, total, notes, proforma_invoice_id, sales_order_id, sales_order_number, allow_stock_override, user_id, status_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3)
+                (invoice_uniqid, invoice_number, invoice_date, invoice_time, due_date, payment_terms_id, customer_id, customer_address, delivery_address, delivery_address_id, company_id, warehouse_id, currency_id, tax_mode, subtotal, discount_type, discount_amount, tax_total, total, notes, proforma_invoice_id, sales_order_id, sales_order_number, allow_stock_override, user_id, status_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3)
             `, [
                 invoiceUniqid, finalInvoiceNumber, invoice_date, invoice_time || null,
                 due_date || null, payment_terms_id || null, customer_id,
                 customer_address || null, delivery_address || null, delivery_address_id || null,
-                company_id || null, warehouse_id, currency_id, subtotal,
+                company_id || null, warehouse_id, currency_id, tax_mode || 'EXCLUSIVE', subtotal,
                 discount_type || 'fixed', discount_amount || 0, tax_total, total,
                 notes, proforma_invoice_id || null, sales_order_id || null, sales_order_number || null,
                 allow_stock_override ? 1 : 0, userId
@@ -719,7 +719,7 @@ async function updateInvoice(req, res, next) {
 
             const {
                 invoice_number, invoice_date, invoice_time, due_date, payment_terms_id,
-                customer_id, company_id, warehouse_id, currency_id, subtotal,
+                customer_id, company_id, warehouse_id, currency_id, tax_mode, subtotal,
                 discount_type, discount_amount, tax_total, total, notes,
                 proforma_invoice_id, sales_order_id, sales_order_number,
                 customer_address, delivery_address, delivery_address_id,
@@ -807,13 +807,13 @@ async function updateInvoice(req, res, next) {
 
             await conn.query(`
                 UPDATE ar_invoices 
-                SET invoice_number = ?, invoice_date = ?, invoice_time = ?, due_date = ?, payment_terms_id = ?, customer_id = ?, customer_address = ?, delivery_address = ?, delivery_address_id = ?, company_id = ?, warehouse_id = ?, currency_id = ?, subtotal = ?, discount_type = ?, discount_amount = ?, tax_total = ?, total = ?, notes = ?, proforma_invoice_id = ?, sales_order_id = ?, sales_order_number = ?, allow_stock_override = ?, status_id = ?, edit_request_status = ?
+                SET invoice_number = ?, invoice_date = ?, invoice_time = ?, due_date = ?, payment_terms_id = ?, customer_id = ?, customer_address = ?, delivery_address = ?, delivery_address_id = ?, company_id = ?, warehouse_id = ?, currency_id = ?, tax_mode = ?, subtotal = ?, discount_type = ?, discount_amount = ?, tax_total = ?, total = ?, notes = ?, proforma_invoice_id = ?, sales_order_id = ?, sales_order_number = ?, allow_stock_override = ?, status_id = ?, edit_request_status = ?
                 WHERE id = ?
             `, [
                 invoice_number, invoice_date, invoice_time || null, due_date || null,
                 payment_terms_id || null, customer_id, customer_address || null,
                 delivery_address || null, delivery_address_id || null, company_id || null,
-                warehouse_id, currency_id, subtotal, discount_type || 'fixed',
+                warehouse_id, currency_id, tax_mode || invoice.tax_mode || 'EXCLUSIVE', subtotal, discount_type || 'fixed',
                 discount_amount || 0, tax_total, total, notes,
                 proforma_invoice_id || null, sales_order_id || null, sales_order_number || null,
                 allow_stock_override ? 1 : 0, newStatusId,
