@@ -1061,7 +1061,6 @@ router.get('/:id/statement', async (req, res, next) => {
                 gj.foreign_amount as journal_foreign_amount,
                 gj.total_amount as journal_total_amount,
                 acc.name as account_name,
-                acc.account_code,
                 c.name as currency_code,
                 p.product_name
             FROM gl_journal_lines gjl
@@ -1111,7 +1110,7 @@ router.get('/:id/statement', async (req, res, next) => {
                 source_id: line.source_id,
                 type: transactionType,
                 account_name: line.account_name,
-                account_code: line.account_code,
+                account_code: null,
                 description: line.description || line.memo,
                 product_name: line.product_name,
                 debit: debitAmount,

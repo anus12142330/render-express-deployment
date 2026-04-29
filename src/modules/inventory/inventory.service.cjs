@@ -49,6 +49,7 @@ async function getBatchStock(filters = {}, offset = 0, limit = 100) {
             ib.mfg_date,
             ib.exp_date,
             p.product_name,
+            pd.packing_alias,
             p.hscode,
             w.warehouse_name,
             c.name as currency_name,
@@ -60,6 +61,11 @@ async function getBatchStock(filters = {}, offset = 0, limit = 100) {
         JOIN inventory_batches ib ON ib.id = isb.batch_id
         JOIN products p ON p.id = isb.product_id
         JOIN warehouses w ON w.id = isb.warehouse_id
+        LEFT JOIN (
+            SELECT product_id, packing_alias 
+            FROM product_details 
+            GROUP BY product_id
+        ) pd ON pd.product_id = p.id
         LEFT JOIN currency c ON c.id = isb.currency_id
         LEFT JOIN uom_master um ON um.id = isb.uom_id
         LEFT JOIN (
@@ -96,12 +102,13 @@ async function getBatchStock(filters = {}, offset = 0, limit = 100) {
     if (filters.search) {
         sql += ` AND (
             p.product_name LIKE ? OR
+            pd.packing_alias LIKE ? OR
             ib.batch_no LIKE ? OR
             w.warehouse_name LIKE ? OR
             p.hscode LIKE ?
         )`;
         const searchTerm = `%${filters.search}%`;
-        params.push(searchTerm, searchTerm, searchTerm, searchTerm);
+        params.push(searchTerm, searchTerm, searchTerm, searchTerm, searchTerm);
     }
 
     // Use outer WHERE only: indexOf('WHERE') matches the subquery on inventory_transactions first
@@ -115,6 +122,11 @@ async function getBatchStock(filters = {}, offset = 0, limit = 100) {
         JOIN inventory_batches ib ON ib.id = isb.batch_id
         JOIN products p ON p.id = isb.product_id
         JOIN warehouses w ON w.id = isb.warehouse_id
+        LEFT JOIN (
+            SELECT product_id, packing_alias 
+            FROM product_details 
+            GROUP BY product_id
+        ) pd ON pd.product_id = p.id
         LEFT JOIN currency c ON c.id = isb.currency_id
         LEFT JOIN uom_master um ON um.id = isb.uom_id
         ${whereClause}
@@ -143,12 +155,18 @@ async function getNearExpiryBatches(days = 30, warehouseId = null) {
             ib.mfg_date,
             ib.exp_date,
             p.product_name,
+            pd.packing_alias,
             w.warehouse_name,
             DATEDIFF(ib.exp_date, CURDATE()) as days_to_expiry
         FROM inventory_stock_batches isb
         JOIN inventory_batches ib ON ib.id = isb.batch_id
         JOIN products p ON p.id = isb.product_id
         JOIN warehouses w ON w.id = isb.warehouse_id
+        LEFT JOIN (
+            SELECT product_id, packing_alias 
+            FROM product_details 
+            GROUP BY product_id
+        ) pd ON pd.product_id = p.id
         WHERE ib.exp_date IS NOT NULL
           AND ib.exp_date >= CURDATE()
           AND ib.exp_date <= DATE_ADD(CURDATE(), INTERVAL ? DAY)
@@ -177,6 +195,7 @@ async function getInventoryTransactions(filters = {}, offset = 0, limit = 100) {
             COALESCE(it.total_amount, it.amount) as local_amount,
             ib.batch_no,
             p.product_name,
+            pd.packing_alias,
             p.hscode,
             w.warehouse_name,
             c.name as currency_name,
@@ -187,6 +206,11 @@ async function getInventoryTransactions(filters = {}, offset = 0, limit = 100) {
         LEFT JOIN inventory_batches ib ON ib.id = it.batch_id
         JOIN products p ON p.id = it.product_id
         JOIN warehouses w ON w.id = it.warehouse_id
+        LEFT JOIN (
+            SELECT product_id, packing_alias 
+            FROM product_details 
+            GROUP BY product_id
+        ) pd ON pd.product_id = p.id
         LEFT JOIN currency c ON c.id = it.currency_id
         LEFT JOIN uom_master um ON um.id = it.uom_id
         WHERE 1=1
@@ -231,6 +255,7 @@ async function getInventoryTransactions(filters = {}, offset = 0, limit = 100) {
     if (filters.search) {
         sql += ` AND (
             p.product_name LIKE ? OR
+            pd.packing_alias LIKE ? OR
             ib.batch_no LIKE ? OR
             w.warehouse_name LIKE ? OR
             p.hscode LIKE ? OR
@@ -238,7 +263,7 @@ async function getInventoryTransactions(filters = {}, offset = 0, limit = 100) {
             it.source_type LIKE ?
         )`;
         const searchTerm = `%${filters.search}%`;
-        params.push(searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm);
+        params.push(searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm);
     }
 
     // Build count query separately
@@ -249,6 +274,11 @@ async function getInventoryTransactions(filters = {}, offset = 0, limit = 100) {
         LEFT JOIN inventory_batches ib ON ib.id = it.batch_id
         JOIN products p ON p.id = it.product_id
         JOIN warehouses w ON w.id = it.warehouse_id
+        LEFT JOIN (
+            SELECT product_id, packing_alias 
+            FROM product_details 
+            GROUP BY product_id
+        ) pd ON pd.product_id = p.id
         LEFT JOIN currency c ON c.id = it.currency_id
         LEFT JOIN uom_master um ON um.id = it.uom_id
         ${whereClause}

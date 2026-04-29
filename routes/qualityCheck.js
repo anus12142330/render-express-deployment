@@ -5191,9 +5191,9 @@ const updatePurchaseBillInventoryFromQCDecision = async (conn, {
     if (qtyToProcess <= 0) continue;
 
     // Calculate amounts correctly based on quantity to process
-    const amount = qtyToProcess * txnUnitCost; 
-    const foreignAmount = amount; 
-    const totalAmount = txnExchangeRate > 0 ? amount * txnExchangeRate : amount; 
+    const amount = qtyToProcess * txnUnitCost;
+    const foreignAmount = amount;
+    const totalAmount = txnExchangeRate > 0 ? amount * txnExchangeRate : amount;
 
     const finalWarehouseId = warehouse_id || txn.warehouse_id;
 
@@ -5265,9 +5265,9 @@ const updatePurchaseBillInventoryFromQCDecision = async (conn, {
     // Reduce purchase bill transaction quantity by processed quantity
     const newQty = txnQty - qtyToProcess;
     if (newQty > 0) {
-      const newAmount = newQty * txnUnitCost; 
-      const newForeignAmount = newAmount; 
-      const newTotalAmount = txnExchangeRate > 0 ? newAmount * txnExchangeRate : newAmount; 
+      const newAmount = newQty * txnUnitCost;
+      const newForeignAmount = newAmount;
+      const newTotalAmount = txnExchangeRate > 0 ? newAmount * txnExchangeRate : newAmount;
 
       await conn.query(`
         UPDATE inventory_transactions
@@ -6721,28 +6721,9 @@ router.put('/discard-requests/:id/approve', requireAuth, requirePerm('QualityChe
           discardRequest.qc_inspection_id || null
         ]);
 
-        // Reduce qty and amounts on original IN transaction (only if it's a real transaction, not virtual)
-        if (txn.id !== null && txn.id !== undefined) {
-          const remainingQty = txnQty - qtyFromThisTxn;
-          if (remainingQty > 0) {
-            const newAmount = remainingQty * unitCost;
-            const newForeignAmount = newAmount;
-            const newTotalAmount = exchangeRate > 0 ? newAmount * exchangeRate : newAmount;
-
-            await conn.query(`
-              UPDATE inventory_transactions
-              SET qty = ?, amount = ?, foreign_amount = ?, total_amount = ?
-              WHERE id = ?
-            `, [remainingQty, newAmount, newForeignAmount, newTotalAmount, txn.id]);
-          } else {
-            await conn.query(`
-              UPDATE inventory_transactions
-              SET qty = 0, amount = 0, foreign_amount = 0, total_amount = 0, is_deleted = 1
-              WHERE id = ?
-            `, [txn.id]);
-          }
-        }
-        // For virtual transactions (from stock batches), we only update stock, not transactions
+        // We no longer reduce the qty and amounts on the original IN transaction.
+        // Instead, we keep the IN as it is, and the new DISCARD transaction will correctly
+        // offset the stock in the calculation: Total Stock = IN - (OUT + DISCARD).
 
         // Update inventory stock: reduce on-hand by discarded quantity
         await inventoryService.updateInventoryStock(
@@ -6816,4 +6797,3 @@ router.put('/discard-requests/:id/approve', requireAuth, requirePerm('QualityChe
 });
 
 export default router;
-

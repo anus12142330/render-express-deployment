@@ -19,7 +19,7 @@ const pool = mysql.createPool({
     dateStrings: true,
     enableKeepAlive: true,
     keepAliveInitialDelay: 60000,
-    
+
 });
 
 /**

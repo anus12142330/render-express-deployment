@@ -724,16 +724,16 @@ export const updateDraftHeader = async ({ clientId, userId, id, payload }) =>
             await conn.query(`UPDATE sales_orders SET status_id = ?, updated_by = ?, updated_at = NOW() WHERE id = ?`, [
                 3,
                 userId,
-                id
+                header.id
             ]);
 
             // If this order was previously approved/accepted, remove any existing "IN TRANSIT" inventory rows.
             // They will be re-created on the next approval based on the updated items.
-            await softDeleteSalesOrderInTransitInventory(conn, id);
+            await softDeleteSalesOrderInTransitInventory(conn, header.id);
 
             await insertAudit(conn, {
                 client_id: scopeClientId,
-                sales_order_id: id,
+                sales_order_id: header.id,
                 action: 'SET_TO_DRAFT_FOR_EDIT',
                 old_status_id: oldStatus,
                 new_status_id: 3,
@@ -789,34 +789,34 @@ export const replaceItems = async ({ clientId, userId, id, taxMode, items }) =>
             await conn.query(`UPDATE sales_orders SET status_id = ?, updated_by = ?, updated_at = NOW() WHERE id = ?`, [
                 3,
                 userId,
-                id
+                header.id
             ]);
 
             // Remove old "IN TRANSIT" inventory rows if they exist from a previous approval.
-            await softDeleteSalesOrderInTransitInventory(conn, id);
+            await softDeleteSalesOrderInTransitInventory(conn, header.id);
 
             await insertAudit(conn, {
                 client_id: clientId,
-                sales_order_id: id,
+                sales_order_id: header.id,
                 action: 'SET_TO_DRAFT_FOR_EDIT',
                 old_status_id: oldStatus,
                 new_status_id: 3,
                 payload_json: { order_no: header.order_no },
                 action_by: userId
             });
-            const refreshed = await getSalesOrderHeader(conn, { id, clientId: null });
+            const refreshed = await getSalesOrderHeader(conn, { id: header.id, clientId: null });
             if (refreshed) Object.assign(header, refreshed);
         }
 
         const computed = computeTotals(items, taxMode || header.tax_mode);
         await replaceSalesOrderItems(conn, {
-            salesOrderId: id,
+            salesOrderId: header.id,
             clientId,
             items: computed.items
         });
 
         await updateSalesOrderHeader(conn, {
-            id,
+            id: header.id,
             client_id: clientId,
             company_id: header.company_id,
             customer_id: header.customer_id,
@@ -859,7 +859,7 @@ export const addAttachments = async ({ clientId, userId, id, scope, files }) =>
         // Also Completion creates new attachments.
 
         const rows = files.map((file) => [
-            id,
+            header.id,
             null, // dispatch_id (header attachments have no dispatch)
             scope,
             file.originalname,
@@ -874,7 +874,7 @@ export const addAttachments = async ({ clientId, userId, id, scope, files }) =>
 
         await insertAudit(conn, {
             client_id: scopeClientId ?? null,
-            sales_order_id: id,
+            sales_order_id: header.id,
             action: 'ATTACHMENTS_ADDED',
             old_status_id: header.status_id,
             new_status_id: header.status_id,
@@ -891,7 +891,7 @@ export const removeAttachment = async ({ clientId, userId, id, attachmentId }) =
         const att = await getAttachmentById(conn, { attachmentId, clientId });
         if (!att) throw new Error('Attachment not found');
 
-        if (Number(att.sales_order_id) !== Number(id)) throw new Error('Attachment mismatch');
+        if (Number(att.sales_order_id) !== Number(header.id)) throw new Error('Attachment mismatch');
 
         // Delete from DB
         await deleteAttachment(conn, { attachmentId, clientId });
@@ -907,7 +907,7 @@ export const removeAttachment = async ({ clientId, userId, id, attachmentId }) =
 
         await insertAudit(conn, {
             client_id: clientId,
-            sales_order_id: id,
+            sales_order_id: header.id,
             action: 'ATTACHMENT_DELETED',
             old_status_id: header.status_id,
             new_status_id: header.status_id,
@@ -924,12 +924,12 @@ export const submitForApproval = async ({ clientId, userId, id }) =>
         const scopeClientId = clientId ?? header.client_id;
         if (Number(header.status_id) !== 3) throw new Error('Only drafts can be submitted');
 
-        const items = await getSalesOrderItems(conn, { salesOrderId: id, clientId: null });
+        const items = await getSalesOrderItems(conn, { salesOrderId: header.id, clientId: null });
         if (!items.length) throw new Error('At least 1 item is required before submit');
 
         // Defensive: if this SO was previously approved/accepted and then edited+re-submitted,
         // remove stale IN TRANSIT rows (scoped by SO line ids so we always match).
-        await softDeleteSalesOrderInTransitInventory(conn, id);
+        await softDeleteSalesOrderInTransitInventory(conn, header.id);
 
         let finalOrderNo = header.order_no;
         const needsOrderNo = !header.order_no || String(header.order_no).toUpperCase() === 'XXX';
@@ -941,18 +941,18 @@ export const submitForApproval = async ({ clientId, userId, id }) =>
             });
             await conn.query(
                 `UPDATE sales_orders SET order_no = ?, status_id = 8, updated_by = ?, updated_at = NOW() WHERE id = ?`,
-                [finalOrderNo, userId, id]
+                [finalOrderNo, userId, header.id]
             );
         } else {
             await conn.query(
                 `UPDATE sales_orders SET status_id = 8, updated_by = ?, updated_at = NOW() WHERE id = ?`,
-                [userId, id]
+                [userId, header.id]
             );
         }
 
         await insertAudit(conn, {
             client_id: scopeClientId ?? null,
-            sales_order_id: id,
+            sales_order_id: header.id,
             action: 'SUBMITTED',
             old_status_id: 3,
             new_status_id: 8,
@@ -984,7 +984,7 @@ export const approveOrder = async ({ clientId, userId, id, comment }) =>
         await conn.query(`UPDATE sales_orders SET status_id = ?, updated_by = ?, updated_at = NOW() WHERE id = ?`, [
             nextStatus,
             userId,
-            id
+            header.id
         ]);
 
         // Create IN TRANSIT inventory rows on approval/accept (informational; does NOT affect stock on hand).
@@ -993,11 +993,11 @@ export const approveOrder = async ({ clientId, userId, id, comment }) =>
             `SELECT id, product_id, uom_id, quantity, ordered_quantity, unit_price
              FROM sales_order_items
              WHERE sales_order_id = ?`,
-            [id]
+            [header.id]
         );
         if (soItems?.length) {
             // Remove previous SO in-transit rows to avoid duplicates on re-approval.
-            await softDeleteSalesOrderInTransitInventory(conn, id);
+            await softDeleteSalesOrderInTransitInventory(conn, header.id);
 
             // Exchange rate (optional) — align with AP bill logic (currency.conversion_rate).
             let exchangeRate = null;
@@ -1049,13 +1049,13 @@ export const approveOrder = async ({ clientId, userId, id, comment }) =>
                    AND (source_type IS NULL OR source_type = '')
                    AND (txn_type IS NULL OR txn_type = '')
                    AND (is_deleted = 0 OR is_deleted IS NULL)`,
-                [INV_SOURCE_TYPE_SALES_ORDER, INV_TXN_TYPE_SALES_ORDER_IN_TRANSIT, id, ...lineIds]
+                [INV_SOURCE_TYPE_SALES_ORDER, INV_TXN_TYPE_SALES_ORDER_IN_TRANSIT, header.id, ...lineIds]
             );
         }
 
         await insertAudit(conn, {
             client_id: scopeClientId,
-            sales_order_id: id,
+            sales_order_id: header.id,
             action: auditAction,
             old_status_id: currentStatus,
             new_status_id: nextStatus,
@@ -1419,7 +1419,7 @@ export const markAsDelivered = async ({ clientId, userId, id, comment, files }) 
             const fileName = file.filename || file.originalname || file.originalName || `delivery_${Date.now()}.jpg`;
             const filePath = file.file_path || file.path || `uploads/sales_orders/delivery/${fileName}`;
             return [
-                id,
+                header.id,
                 null, // dispatch_id
                 'DELIVERY',
                 originalName,
@@ -1442,12 +1442,12 @@ export const markAsDelivered = async ({ clientId, userId, id, comment, files }) 
                  updated_by = ?, 
                  updated_at = NOW() 
              WHERE id = ?`,
-            [comment || null, userId, userId, id]
+            [comment || null, userId, userId, header.id]
         );
 
         await insertAudit(conn, {
             client_id: scopeClientId,
-            sales_order_id: id,
+            sales_order_id: header.id,
             action: 'MARKED_DELIVERED',
             old_status_id: header.status_id,
             new_status_id: 12,
@@ -1464,10 +1464,10 @@ export const deleteDispatch = async ({ clientId, userId, id, dispatchId }) =>
 
         const dispatch = await getDispatchById(conn, { id: dispatchId });
         if (!dispatch) throw new Error('Dispatch record not found');
-        if (Number(dispatch.sales_order_id) !== Number(id)) throw new Error('Dispatch record mismatch');
+        if (Number(dispatch.sales_order_id) !== Number(header.id)) throw new Error('Dispatch record mismatch');
 
         const items = await getDispatchItems(conn, { dispatchId, clientId: scopeClientId });
-        const soItemsBeforeDelete = await getSalesOrderItems(conn, { salesOrderId: id, clientId: scopeClientId });
+        const soItemsBeforeDelete = await getSalesOrderItems(conn, { salesOrderId: header.id, clientId: scopeClientId });
         for (const it of items) {
             // Restore physical stock
             if (it.ap_bill_line_id) {
@@ -1547,7 +1547,7 @@ export const deleteDispatch = async ({ clientId, userId, id, dispatchId }) =>
 
         await insertAudit(conn, {
             client_id: scopeClientId,
-            sales_order_id: id,
+            sales_order_id: header.id,
             action: 'DISPATCH_DELETED',
             old_status_id: header.status_id,
             new_status_id: newStatus,
@@ -1565,7 +1565,7 @@ export const completeOrder = async ({ clientId, userId, id, client_received_by, 
             throw new Error('Completion allowed only for dispatched or delivered orders');
         }
 
-        const crReturns = await getSalesOrderReturns(conn, { salesOrderId: id });
+        const crReturns = await getSalesOrderReturns(conn, { salesOrderId: header.id });
         if (blockCompleteDueToCargoReturnQc(crReturns)) {
             throw new Error(
                 'Cannot complete this order while a cargo return is submitted or awaiting QC. Approve or reject the return first.'
@@ -1587,7 +1587,7 @@ export const completeOrder = async ({ clientId, userId, id, client_received_by, 
                 if (alloc.id && alloc.allocated_qty !== undefined) {
                     await conn.query(
                         `UPDATE sales_order_items SET dispatched_quantity = ? WHERE id = ? AND sales_order_id = ?`,
-                        [Number(alloc.allocated_qty), alloc.id, id]
+                        [Number(alloc.allocated_qty), alloc.id, header.id]
                     );
                 }
             }
@@ -1599,7 +1599,7 @@ export const completeOrder = async ({ clientId, userId, id, client_received_by, 
                 const fileName = file.filename || file.originalname || file.originalName || `completion_${Date.now()}.jpg`;
                 const filePath = file.file_path || file.path || `uploads/sales_orders/completion/${fileName}`;
                 return [
-                    id,
+                    header.id,
                     null, // dispatch_id (completion attachments have no dispatch)
                     'COMPLETION',
                     originalName,
@@ -1622,7 +1622,8 @@ export const completeOrder = async ({ clientId, userId, id, client_received_by, 
             JOIN ap_bills ab ON abl.bill_id = ab.id
             JOIN sales_order_dispatches d ON di.dispatch_id = d.id
             WHERE d.sales_order_id = ? LIMIT 1
-        `, [id]);
+        `, [header.id]);
+
         let finalWarehouseId = dispatchWh[0]?.warehouse_id || header.warehouse_id;
 
         if (!finalWarehouseId) {
@@ -1644,14 +1645,14 @@ export const completeOrder = async ({ clientId, userId, id, client_received_by, 
                  updated_by = ?, 
                  updated_at = NOW() 
              WHERE id = ?`,
-            [client_received_by || null, client_notes, userId, payment_term_id || null, due_date || null, finalWarehouseId, userId, id]
+            [client_received_by || null, client_notes, userId, payment_term_id || null, due_date || null, finalWarehouseId, userId, header.id]
         );
 
         // 3. Auto-generate Customer Invoice (Submitted status 8)
-        const [existingInvoices] = await conn.query('SELECT id FROM ar_invoices WHERE sales_order_id = ?', [id]);
+        const [existingInvoices] = await conn.query('SELECT id FROM ar_invoices WHERE sales_order_id = ?', [header.id]);
         if (existingInvoices.length === 0) {
             // Re-fetch items to get latest dispatched_quantity and prices
-            const items = await getSalesOrderItems(conn, { salesOrderId: id, clientId: scopeClientId });
+            const items = await getSalesOrderItems(conn, { salesOrderId: header.id, clientId: scopeClientId });
 
             let invSubtotal = 0;
             let invTaxTotal = 0;
@@ -1860,7 +1861,7 @@ export const completeOrder = async ({ clientId, userId, id, client_received_by, 
                     'INSERT INTO history (module, module_id, user_id, action, details, created_at) VALUES (?, ?, ?, ?, ?, NOW())',
                     ['ar_invoice', invoiceId, userId, 'CREATED', JSON.stringify({
                         invoice_number: invoiceNumber,
-                        sales_order_id: id,
+                        sales_order_id: header.id,
                         reason: 'Auto-generated on Sales Order completion'
                     })]
                 );
@@ -1869,7 +1870,7 @@ export const completeOrder = async ({ clientId, userId, id, client_received_by, 
 
         await insertAudit(conn, {
             client_id: scopeClientId,
-            sales_order_id: id,
+            sales_order_id: header.id,
             action: 'COMPLETED',
             old_status_id: 9,
             new_status_id: 10,
@@ -1961,12 +1962,12 @@ export const rejectOrder = async ({ clientId, userId, id, reason }) =>
 
         await conn.query(`UPDATE sales_orders SET status_id = 2, updated_by = ?, updated_at = NOW() WHERE id = ?`, [
             userId,
-            id
+            header.id
         ]);
 
         await insertAudit(conn, {
             client_id: scopeClientId,
-            sales_order_id: id,
+            sales_order_id: header.id,
             action: 'REJECTED',
             old_status_id: 8,
             new_status_id: 2,

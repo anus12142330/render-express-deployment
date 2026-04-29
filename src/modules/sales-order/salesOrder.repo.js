@@ -3,6 +3,10 @@ export const fetchCompanyPrefix = async (conn, companyId) => {
     return rows[0]?.company_prefix || 'SO';
 };
 
+import crypto from 'node:crypto';
+
+const generateSalesOrderUniqId = () => `so_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`;
+
 /** Get company prefix and optional sales order number format template (from master). */
 export const fetchSalesOrderFormat = async (conn, companyId) => {
     const [rows] = await conn.query(
@@ -14,7 +18,17 @@ export const fetchSalesOrderFormat = async (conn, companyId) => {
     return { prefix, format };
 };
 
-export const getSalesOrderHeader = async (conn, { id, clientId }) => {
+export const getSalesOrderHeader = async (conn, { id: inputId, clientId }) => {
+    let id = inputId;
+    
+    // If inputId is a uniqid (string starting with so_), resolve the numeric ID first
+    if (typeof inputId === 'string' && inputId.startsWith('so_')) {
+        const [idRows] = await conn.query('SELECT id FROM sales_orders WHERE uniqid = ? LIMIT 1', [inputId]);
+        if (idRows.length > 0) {
+            id = idRows[0].id;
+        }
+    }
+
     const [rows] = await conn.query(
         `SELECT so.*, 
                 COALESCE(NULLIF(v.company_name, ''), v.display_name) as customer_name, 
@@ -55,15 +69,15 @@ export const getSalesOrderHeader = async (conn, { id, clientId }) => {
          LEFT JOIN \`user\` ucr ON so.created_by = ucr.id
          LEFT JOIN \`user\` udeliv ON so.delivered_by = udeliv.id
          LEFT JOIN currency cur ON so.currency_id = cur.id
-         LEFT JOIN sales_order_dispatches latest_d ON latest_d.id = (
+          LEFT JOIN sales_order_dispatches latest_d ON latest_d.id = (
             SELECT id FROM sales_order_dispatches 
-            WHERE sales_order_id = so.id 
+            WHERE sales_order_id = ? 
             ORDER BY dispatched_at DESC LIMIT 1
          )
          LEFT JOIN \`user\` udisp ON latest_d.dispatched_by = udisp.id
-         WHERE so.id = ?
+         WHERE (so.id = ? OR so.uniqid = ?)
            AND COALESCE(so.is_deleted, 0) = 0`,
-        [id, id]
+        [id, id, id, inputId]
     );
     return rows[0];
 };
@@ -236,11 +250,13 @@ export const insertSalesOrder = async (conn, data) => {
         subtotal, tax_total, grand_total, created_by, terms_conditions, sales_person_id
     } = data;
 
+    const uniqid = data?.uniqid || generateSalesOrderUniqId();
+
     const [res] = await conn.query(
         `INSERT INTO sales_orders 
-    (company_id, customer_id, warehouse_id, billing_address, shipping_address, currency_id, tax_mode, order_no, order_date, status_id, subtotal, tax_total, grand_total, created_by, updated_by, terms_conditions, sales_person_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [company_id, customer_id, warehouse_id, billing_address, shipping_address, currency_id, tax_mode, order_no, order_date, status_id, subtotal, tax_total, grand_total, created_by, created_by, terms_conditions, sales_person_id]
+    (uniqid, company_id, customer_id, warehouse_id, billing_address, shipping_address, currency_id, tax_mode, order_no, order_date, status_id, subtotal, tax_total, grand_total, created_by, updated_by, terms_conditions, sales_person_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [uniqid, company_id, customer_id, warehouse_id, billing_address, shipping_address, currency_id, tax_mode, order_no, order_date, status_id, subtotal, tax_total, grand_total, created_by, created_by, terms_conditions, sales_person_id]
     );
     return res.insertId;
 };

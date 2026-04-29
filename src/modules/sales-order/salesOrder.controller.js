@@ -153,7 +153,7 @@ export const updateSalesOrderDraft = async (req, res) => {
     try {
         const clientId = (await getClientContext(req)) || null;
         const userId = getAuthUser(req)?.id;
-        const id = Number(req.params.id);
+        const id = req.params.id;
         const payload = req.body || {};
 
         const missing = requireFields(payload, ['customer_id', 'company_id', 'currency_id', 'tax_mode', 'order_date', 'order_no']);
@@ -174,7 +174,7 @@ export const upsertSalesOrderItems = async (req, res) => {
         if (!clientId) return fail(res, 'Missing tenant context', 400);
 
         const userId = getAuthUser(req)?.id;
-        const id = Number(req.params.id);
+        const id = req.params.id;
         const items = req.body?.items || [];
         const taxMode = normalizeTaxMode(req.body?.tax_mode);
 
@@ -192,7 +192,7 @@ export const uploadHeaderAttachments = async (req, res) => {
     try {
         const clientId = (await getClientContext(req)) || null;
         const userId = getAuthUser(req)?.id;
-        const id = Number(req.params.id);
+        const id = req.params.id;
         const files = (req.files || []).map(file => ({
             ...file,
             file_path: buildStoredPath('header', file.filename)
@@ -211,7 +211,7 @@ export const deleteHeaderAttachment = async (req, res) => {
     try {
         const clientId = (await getClientContext(req)) || null;
         const userId = getAuthUser(req)?.id;
-        const id = Number(req.params.id);
+        const id = req.params.id;
         const attachmentId = Number(req.params.attachmentId);
 
         await removeAttachment({ clientId, userId, id, attachmentId });
@@ -227,7 +227,7 @@ export const submitSalesOrder = async (req, res) => {
     try {
         const clientId = await getClientContext(req) || null;
         const userId = getAuthUser(req)?.id;
-        const id = Number(req.params.id);
+        const id = req.params.id;
 
         const result = await submitForApproval({ clientId, userId, id });
         
@@ -268,7 +268,7 @@ export const dispatchSalesOrder = async (req, res) => {
         // Falls back to default tenant (1) via getClientContext when missing.
         const clientId = await getClientContext(req);
         const userId = getAuthUser(req)?.id;
-        const id = Number(req.params.id);
+        const id = req.params.id;
 
         let payload = req.body || {};
         try {
@@ -387,8 +387,8 @@ export const dispatchSalesOrder = async (req, res) => {
 /** GET /api/sales-orders/:id/dispatch-batch-info - warehouse, dispatching time, per-item purchase bill (date, batch_no, allocated qty; only qty > 0) */
 export const getDispatchBatchInfo = async (req, res) => {
     try {
-        const id = Number(req.params.id);
-        if (!id || !Number.isFinite(id)) return fail(res, 'Invalid order id', 400);
+        const id = req.params.id;
+        if (!id) return fail(res, 'Invalid order id', 400);
         const info = await getOrderDispatchBatchInfo({ id });
         if (!info) return fail(res, 'Sales order not found', 404);
         return res.json({ success: true, data: info });
@@ -400,9 +400,9 @@ export const getDispatchBatchInfo = async (req, res) => {
 /** GET /api/sales-orders/:id/dispatch/:dispatchId/delivery-order-pdf — A5 Delivery Order PDF */
 export const getDeliveryOrderPdf = async (req, res) => {
     try {
-        const orderId = Number(req.params.id);
+        const orderId = req.params.id;
         const dispatchId = Number(req.params.dispatchId);
-        if (!orderId || !Number.isFinite(orderId) || !dispatchId || !Number.isFinite(dispatchId)) {
+        if (!orderId || !dispatchId || !Number.isFinite(dispatchId)) {
             return fail(res, 'Invalid order or dispatch id', 400);
         }
         const buf = await getDeliveryOrderPdfBuffer({ orderId, dispatchId });
@@ -446,7 +446,7 @@ export const removeSalesOrderDispatch = async (req, res) => {
     try {
         const clientId = (await getClientContext(req)) || null;
         const userId = getAuthUser(req)?.id;
-        const id = Number(req.params.id);
+        const id = req.params.id;
         const dispatchId = Number(req.params.dispatchId);
 
         // Security check: only role 1 (Super Admin) can delete dispatches
@@ -465,7 +465,7 @@ export const completeSalesOrder = async (req, res) => {
     try {
         const clientId = null; // Bypassed as requested
         const userId = getAuthUser(req)?.id;
-        const id = Number(req.params.id);
+        const id = req.params.id;
         const { client_received_by, client_notes, comments, payment_term_id, due_date, allocations: rawAllocations } = req.body || {};
         const finalNotes = client_notes || comments;
 
@@ -529,10 +529,14 @@ export const completeSalesOrder = async (req, res) => {
 export const getSalesOrderDetail = async (req, res) => {
     try {
         const userId = getAuthUser(req)?.id;
-        const id = Number(req.params.id);
-        if (!id || !Number.isFinite(id)) return fail(res, 'Invalid order id', 400);
+        const raw = String(req.params.id || '').trim();
 
-        const detail = await getOrderDetail({ id, clientId: null });
+        // Handle "new" - return success so the wizard can initialize without 400 errors
+        if (raw.toLowerCase() === 'new') {
+            return res.json({ success: true, data: null });
+        }
+
+        const detail = await getOrderDetail({ id: raw, clientId: null });
         if (!detail) return fail(res, 'Sales order not found', 404);
 
         const superAdmin = await isSuperAdmin(req);
@@ -557,7 +561,7 @@ export const rejectSalesOrder = async (req, res) => {
     try {
         const clientId = (await getClientContext(req)) || null;
         const userId = getAuthUser(req)?.id;
-        const id = Number(req.params.id);
+        const id = req.params.id;
         const { reason } = req.body || {};
 
         if (!reason) return fail(res, 'Reason is required for rejection');
@@ -573,7 +577,7 @@ export const requestSalesOrderEdit = async (req, res) => {
     try {
         const clientId = (await getClientContext(req)) || null;
         const userId = getAuthUser(req)?.id;
-        const id = Number(req.params.id);
+        const id = req.params.id;
         const { reason } = req.body || {};
 
         if (!reason) return fail(res, 'Reason is required for edit request');
@@ -589,7 +593,7 @@ export const decideSalesOrderEditRequest = async (req, res) => {
     try {
         const clientId = (await getClientContext(req)) || null;
         const userId = getAuthUser(req)?.id;
-        const id = Number(req.params.id);
+        const id = req.params.id;
         const { decision, reason } = req.body || {};
 
         if (!decision) return fail(res, 'Decision is required');
@@ -605,7 +609,7 @@ export const approveSalesOrder = async (req, res) => {
     try {
         const clientId = null; // Bypassed as requested
         const userId = getAuthUser(req)?.id;
-        const id = Number(req.params.id);
+        const id = req.params.id;
         const { comment } = req.body || {};
 
         await approveOrder({ clientId, userId, id, comment });
@@ -623,7 +627,7 @@ export const deliveredSalesOrder = async (req, res) => {
     try {
         const clientId = null; // Bypassed as requested
         const userId = getAuthUser(req)?.id;
-        const id = Number(req.params.id);
+        const id = req.params.id;
         const { comment, comments } = req.body || {};
         const finalComment = comment || comments;
 
